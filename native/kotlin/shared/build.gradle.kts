@@ -8,6 +8,8 @@ plugins {
 kotlin {
     sourceSets.androidMain.dependencies {
         implementation("dev.ffmpegkit-maintained:ffmpeg-kit-min-gpl:8.1.7")
+        implementation("com.arthenica:smart-exception-java:0.2.1")
+        implementation("com.arthenica:smart-exception-common:0.2.1")
     }
     android {
         namespace = "com.faceclaw.shared"

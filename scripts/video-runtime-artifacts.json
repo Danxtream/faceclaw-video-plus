@@ -1,0 +1,20 @@
+{
+  "ffmpeg": {
+    "coordinate": "dev.ffmpegkit-maintained:ffmpeg-kit-min-gpl:8.1.7",
+    "url": "https://repo.maven.apache.org/maven2/dev/ffmpegkit-maintained/ffmpeg-kit-min-gpl/8.1.7/ffmpeg-kit-min-gpl-8.1.7.aar",
+    "sha256": "3698fe62678cbc6c7d3c2b124ce28f4f064d0f18e1ecb414a513ed9909eee73e",
+    "license": "GPL-3.0"
+  },
+  "smart_java": {
+    "coordinate": "com.arthenica:smart-exception-java:0.2.1",
+    "url": "https://repo.maven.apache.org/maven2/com/arthenica/smart-exception-java/0.2.1/smart-exception-java-0.2.1.jar",
+    "sha256": "5b96aaa5f191dedbef72fb0c38f1a2b01807920afc0d92a75a2acd6e0cc7703c",
+    "license": "BSD-3-Clause"
+  },
+  "smart_common": {
+    "coordinate": "com.arthenica:smart-exception-common:0.2.1",
+    "url": "https://repo.maven.apache.org/maven2/com/arthenica/smart-exception-common/0.2.1/smart-exception-common-0.2.1.jar",
+    "sha256": "1cad0fb4dfa01755a014331b5ed199281d2c3fab5aca5c9d7abd0b41d0ec3f7b",
+    "license": "BSD-3-Clause"
+  }
+}

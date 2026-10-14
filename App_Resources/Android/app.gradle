@@ -2,8 +2,10 @@ import org.apache.tools.ant.taskdefs.condition.Os
 
 // You can add your native dependencies here
 dependencies {
-  // The single pinned GPL encoder dependency; keep its bundled notices.
+  // The encoder POM omits its Java runtime dependencies; pin them explicitly.
   implementation 'dev.ffmpegkit-maintained:ffmpeg-kit-min-gpl:8.1.7'
+  implementation 'com.arthenica:smart-exception-java:0.2.1'
+  implementation 'com.arthenica:smart-exception-common:0.2.1'
 //  implementation 'androidx.multidex:multidex:2.0.1'
   // WebSocket transport for the g2mirror terminal-mirroring client.
   implementation 'com.squareup.okhttp3:okhttp:4.12.0'
