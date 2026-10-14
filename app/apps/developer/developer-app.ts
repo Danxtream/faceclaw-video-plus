@@ -8,6 +8,8 @@ import { ResourceUsageLayer } from "./resource-usage";
 import { FileBrowserLayer } from "../files/file-browser";
 import { VideoPlaybackLayer } from "../video/video-playback-layer";
 import { activeVideoSession } from "../video/video-session";
+import { videoDetailedReportsSetting } from "../video/video-settings";
+import { toggleSettingMenuItem } from "../../ui/dashboard-settings";
 import { LoadAppFromQrLayer, LoadAppFromUrlLayer } from "./load-app";
 import { unicodeTestMenu } from "./unicode-test";
 import { type AppContext } from "../app-definition";
@@ -62,7 +64,8 @@ function debugTestsMenu(): MenuLayer {
           ctx.stack.push(new FileBrowserLayer({
             isSupportedFile: (name) => /\.h264$/i.test(name),
             onFilePicked: (entry, picked) => {
-              if (/\.h264$/i.test(entry.name)) picked.stack.push(new VideoPlaybackLayer(entry.path, picked.actions.requestRender));
+              if (/\.h264$/i.test(entry.name)) picked.stack.push(new VideoPlaybackLayer(entry.path, picked.actions.requestRender,
+                () => ({native: false, dither: false, radio: true, detailedReports: videoDetailedReportsSetting.get()})));
             },
             onLeave: () => ctx.stack.pop(),
           }));
@@ -149,6 +152,7 @@ export function createDeveloperAppWindow(appContext: AppContext, options: InProc
       submenuItem("Debug tests", (ctx) => {
         ctx.stack.push(debugTestsMenu());
       }),
+      {...toggleSettingMenuItem(videoDetailedReportsSetting), disabled: global.isIOS},
     ],
     MENU_LAYOUT,
   );

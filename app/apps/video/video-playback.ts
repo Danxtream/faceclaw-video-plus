@@ -10,7 +10,7 @@ export interface VideoAudio {
   close(): Promise<void>;
 }
 export const silentVideoAudio: VideoAudio = { sync: async () => {}, pause: async () => {}, close: async () => {} };
-export type VideoOptions = { native: boolean; dither: boolean; radio: boolean };
+export type VideoOptions = { native: boolean; dither: boolean; radio: boolean; detailedReports?: boolean };
 export type VideoPlaybackView = {
   active: boolean; paused: boolean; menuOpen: boolean; selection: number; native: boolean;
   position: number; duration: number; fps: number | null; intervals: number;
@@ -18,9 +18,9 @@ export type VideoPlaybackView = {
   cleanupFailed: boolean;
   hostPhy: string;
 };
-type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy">;
+type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata">>;
 type Intent = { kind: "pause" | "seek" | "scale" | "menu"; value: number | boolean; resolve: () => void; reject: (error: unknown) => void };
-type Generation = { stream: number; tokens: number[]; idr: number; target: number; prefix: number[]; firstNal: number; index: number; count: number; metadata: number; paused: boolean; reached: boolean; oldPhy: VideoPhy[]; started: number };
+type Generation = { stream: number; tokens: number[]; idr: number; target: number; prefix: number[]; firstNal: number; index: number; count: number; metadata: number; paused: boolean; reached: boolean; oldPhy: VideoPhy[]; started: number; anchor: VideoPhy[]; anchorAt: number; anchorUncertainty: number; detailedReports: boolean };
 
 /** One writer processes uploads and controls; no callback or timer writes BLE. */
 export class VideoPlayback {
@@ -36,6 +36,15 @@ export class VideoPlayback {
   private copyFirst: VideoShown[] | null = null;
   private copyPrevious: VideoShown[] | null = null;
   private shownCount = 0;
+  private reportSafe = false;
+  private reportStage: "left" | "right" | "playback" = "left";
+  private pendingShown: VideoShown | null = null;
+  private pendingShownAt = 0;
+  private pendingShownCost = 0;
+  private ended = false;
+  private consumed = -1;
+  private creditBudget = 0;
+  private metadataStaged = false;
   constructor(private readonly protocol: Protocol, private readonly source: VideoSource,
     private readonly audio: VideoAudio, private readonly options: () => VideoOptions,
     private readonly changed: (view: VideoPlaybackView) => void = () => {},
@@ -97,18 +106,26 @@ export class VideoPlayback {
     // Record the attempted stream before START so a partial admission gets STOP.
     this.generation = { stream, tokens: [], idr, target, prefix, firstNal, index: 0,
       count: prefix.length + this.source.clip.h264.nals.length - firstNal, metadata: 0,
-      paused, reached: false, oldPhy, started: this.clock() };
+      paused, reached: false, oldPhy, started: this.clock(), anchor: oldPhy, anchorAt: this.clock(),
+      anchorUncertainty: 0, detailedReports: !!selection.detailedReports };
     this.validateStatus(await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused), stream);
     const ready = await this.waitReady(stream);
     this.generation.tokens = ready.map((row) => row.token);
+    const anchorBegin = this.clock();
     const ownedPhy = await this.phy();
     videoLive(oldPhy, ownedPhy);
     this.generation.oldPhy = videoOwnedSnapshot(oldPhy, ownedPhy);
+    this.generation.anchor = ownedPhy;
+    this.generation.anchorAt = (anchorBegin + this.clock()) / 2;
+    this.generation.anchorUncertainty = (this.clock() - anchorBegin) / 2;
+    this.updateHostPhy(ownedPhy);
     this.view.native = selection.native;
     this.view.paused = paused;
     this.copyFirst = this.copyPrevious = null;
     this.shownCount = 0;
     this.reportDue = 0;
+    this.reportStage = "left"; this.pendingShown = null; this.ended = false; this.consumed = -1;
+    this.creditBudget = 0;
     this.progressAt = this.clock(); this.progress = -1;
     this.lastSeek = 0;
     this.notify();
@@ -196,16 +213,36 @@ export class VideoPlayback {
   }
   private async upload(): Promise<boolean> {
     const g = this.generation!;
-    const credit = await this.protocol.owned(VIDEO.credits, g.stream, g.tokens, 6);
-    const expected = credit.map((raw) => videoU32(raw, 0));
-    let count = Math.min(4, g.count - g.index);
-    for (let side = 0; side < 2; side++) {
-      const packed = credit[side][4], state = packed >>> 4 & 7, capacity = packed & 8 ? 6 : 4, free = packed & 7;
-      if (credit[side][5] || state !== 2 || free > capacity || expected[side] > g.index || g.index - expected[side] > capacity)
-        throw new Error("Video owner credit window failed");
-      count = Math.min(count, free, capacity + expected[side] - g.index);
+    this.reportSafe = false;
+    this.metadataStaged = false;
+    if (!this.creditBudget || g.detailedReports || g.index === g.count) {
+      const credit = await this.protocol.owned(VIDEO.credits, g.stream, g.tokens, 6);
+      const expected = credit.map((raw) => videoU32(raw, 0));
+      let budget = 4;
+      for (let side = 0; side < 2; side++) {
+        const packed = credit[side][4], state = packed >>> 4 & 7, capacity = packed & 8 ? 6 : 4, free = packed & 7;
+        if (credit[side][5] || packed & 128 || state !== 2 || free > capacity || expected[side] > g.index || g.index - expected[side] > capacity)
+          throw new Error("Video owner credit window failed");
+        budget = Math.min(budget, free, capacity + expected[side] - g.index);
+      }
+      this.creditBudget = budget;
+      const consumed = Math.min(...expected);
+      if (consumed !== this.consumed) { this.consumed = consumed; this.progressAt = this.clock(); }
     }
-    if (count <= 0) return false;
+    const count = Math.min(this.creditBudget, g.count - g.index);
+    if (count <= 0) {
+      const picture = this.source.clip.pictures[g.idr + g.metadata];
+      const sourceIndex = g.index < g.prefix.length ? g.prefix[g.index] : g.firstNal + g.index - g.prefix.length;
+      // Admit the next picture while blocked, so a slow sample cannot leave a
+      // newly credited NAL waiting for its mandatory metadata round trip.
+      if (!g.detailedReports && g.index < g.count && picture?.nal === sourceIndex) {
+        if (await this.protocol.metadata(g.stream, g.metadata + 1, g.index, picture.pts)) {
+          g.metadata++; this.metadataStaged = true;
+        }
+        return false;
+      }
+      this.reportSafe = true; return false;
+    }
     const records: Uint8Array[] = [];
     for (let i = 0; i < count; i++) {
       const sequence = g.index + i;
@@ -217,11 +254,24 @@ export class VideoPlayback {
         g.metadata++;
       }
       records.push(await this.source.readNal(sourceIndex));
+      // Do not hold a credited finishing NAL behind another picture's metadata.
+      if ([1, 5].includes(this.source.clip.h264.nals[sourceIndex].type)) break;
     }
     if (!records.length) return false;
-    await this.protocol.sendNals(g.stream, g.index, records);
+    const next = this.source.clip.pictures[g.idr + g.metadata];
+    const nextSource = g.firstNal + g.index + records.length - g.prefix.length;
+    if (!g.detailedReports && records.length === 1 && next?.nal === nextSource && this.protocol.sendNalsWithMetadata) {
+      if (await this.protocol.sendNalsWithMetadata(g.stream, g.index, records[0],
+        {ordinal: g.metadata + 1, nal: g.index + records.length, pts: next.pts})) g.metadata++;
+    } else await this.protocol.sendNals(g.stream, g.index, records);
     g.index += records.length;
+    this.creditBudget -= records.length;
     return true;
+  }
+  private updateHostPhy(phy: VideoPhy[]): void {
+    const pairs = phy[0].links.filter((link) => link.bound && link.valid).map((link) =>
+      `${["", "1M", "2M", "Coded"][link.current & 255]}/${["", "1M", "2M", "Coded"][link.current >>> 8]}`);
+    this.view.hostPhy = pairs.length ? [...new Set(pairs)].join(", ") : "Unknown";
   }
   private async observe(): Promise<void> {
     const g = this.generation!;
@@ -238,15 +288,20 @@ export class VideoPlayback {
     const capturedPhy = await this.phy();
     videoLive(g.oldPhy, capturedPhy);
     g.oldPhy = videoOwnedSnapshot(g.oldPhy, capturedPhy);
-    const pairs = phy[0].links.filter((link) => link.bound && link.valid).map((link) =>
-      `${["", "1M", "2M", "Coded"][link.current & 255]}/${["", "1M", "2M", "Coded"][link.current >>> 8]}`);
-    this.view.hostPhy = pairs.length ? [...new Set(pairs)].join(", ") : "Unknown";
+    this.updateHostPhy(phy);
     const captures = [left, right];
     const ages = captures.map((row, i) => videoTickSpan(capturedPhy[i].tick, row.copyTick));
+    await this.applyShown(captures, ages, this.clock() - began);
+  }
+  private async applyShown(captures: VideoShown[], ages: number[], uncertainty: number): Promise<void> {
+    const g = this.generation!, [left, right] = captures;
+    const picture = this.source.clip.pictures[g.idr + left.ordinal - 1];
+    if (!picture || picture.pts !== left.pts || left.ordinal !== right.ordinal || left.pts !== right.pts ||
+        g.idr + left.ordinal - 1 < g.target) throw new Error("Shown picture does not match audited seek timeline");
     g.reached = true;
     this.view.position = left.pts;
     this.view.lostReports = Math.max(left.lost, right.lost);
-    this.view.audioUncertainty = captures.some((row) => row.uncertain) ? null : this.clock() - began;
+    this.view.audioUncertainty = captures.some((row) => row.uncertain) ? null : uncertainty;
     const relative = left.ordinal - (g.target - g.idr);
     if (relative > this.shownCount) { this.countCopies(relative - this.shownCount); this.shownCount = relative; }
     if (!this.copyFirst) this.copyFirst = captures;
@@ -263,16 +318,62 @@ export class VideoPlayback {
     if (this.view.paused) await this.audio.sync(left.pts, false, 1, 0);
     else if (ages.some((age) => age > 2000)) await this.audio.pause();
     else await this.audio.sync(Math.min(this.source.clip.duration, left.pts + Math.min(...ages) * speed), true,
-      speed, Math.max(100, this.clock() - began));
+      speed, Math.max(100, uncertainty));
+    this.notify();
+  }
+  private updatePlayback(rows: VideoPlaybackState[]): void {
+    const g = this.generation!;
+    if (rows.some((row) => row.result)) throw new Error("Video playback owner report refused");
+    this.view.paused = g.paused && !g.reached || rows.every((row) => row.paused);
+    const shown = Math.min(...rows.map((row) => row.shown));
+    if (shown !== this.progress) { this.progress = shown; this.progressAt = this.clock(); }
+    this.ended = g.index === g.count && this.shownCount === this.source.clip.pictures.length - g.target &&
+      rows.every((row) => !row.paused && !row.pending &&
+      row.shown === this.source.clip.pictures.length - g.target);
+  }
+  /** One passive request per credit-blocked turn; recheck input before the next. */
+  private async report(): Promise<void> {
+    const g = this.generation!;
+    if (g.detailedReports) {
+      await this.observe();
+      this.updatePlayback(await this.playback());
+      this.reportDue = this.clock() + 500;
+    } else if (this.reportStage === "playback") {
+      this.updatePlayback(await this.playback());
+      this.reportStage = "left";
+      this.reportDue = this.clock() + (this.view.paused || g.index === g.count ? 500 : 1500);
+    } else {
+      const lens = this.reportStage === "left" ? 1 : 2;
+      const began = this.clock();
+      const capture = parseShown(await this.protocol.shown(g.stream, g.tokens[lens - 1], lens,
+        lens === 2 ? this.pendingShown!.serial : 0), lens, g.stream, g.tokens[lens - 1]);
+      if (capture) this.view.lostReports = Math.max(this.view.lostReports, capture.lost);
+      if (lens === 1) {
+        this.pendingShown = capture; this.pendingShownAt = this.clock(); this.pendingShownCost = this.clock() - began;
+        this.reportStage = capture ? "right" : "playback";
+      } else {
+        const left = this.pendingShown!;
+        if (capture && capture.serial === left.serial && capture.ordinal === left.ordinal && capture.pts === left.pts) {
+          // Separate local clocks are anchored at READY, never subtracted across lenses.
+          const captures = [left, capture];
+          const ages = captures.map((row, i) => Math.max(0, this.clock() - g.anchorAt -
+            videoTickSpan(row.copyTick, g.anchor[i].tick)));
+          await this.applyShown(captures, ages, g.anchorUncertainty + this.clock() - this.pendingShownAt + this.pendingShownCost);
+        }
+        this.pendingShown = null; this.reportStage = "playback";
+      }
+      this.reportDue = 0;
+    }
+    if (this.view.paused) await this.audio.pause();
     this.notify();
   }
   private async preview(): Promise<void> {
     const deadline = this.clock() + 30_000;
     while (!this.generation!.reached && !this.stopping) {
-      await this.upload();
-      await this.observe();
+      const uploaded = await this.upload();
+      if (this.generation!.detailedReports || this.reportSafe || this.view.paused) await this.report();
       if (this.clock() > deadline) throw new Error("Seek target was not shown by both lenses");
-      await this.sleep(10);
+      if (!uploaded && !this.metadataStaged) await this.sleep(10);
     }
     if (this.generation!.paused) await this.settle(true);
   }
@@ -294,21 +395,11 @@ export class VideoPlayback {
         }
         const g = this.generation!;
         const uploaded = await this.upload();
-        if (this.clock() >= this.reportDue) {
-          await this.observe();
-          this.reportDue = this.clock() + 500;
-          const state = await this.playback();
-          if (state.some((row) => row.result)) throw new Error("Video playback owner report refused");
-          this.view.paused = state.every((row) => row.paused);
-          if (this.view.paused) await this.audio.pause();
-          const shown = Math.min(...state.map((row) => row.shown));
-          if (shown !== this.progress) { this.progress = shown; this.progressAt = this.clock(); }
-          if (g.index === g.count && state.every((row) => !row.paused && !row.pending &&
-              row.shown === this.source.clip.pictures.length - g.target)) break;
-          if (!this.view.paused && this.clock() - this.progressAt > 30_000) throw new Error("Video stopped making copy progress");
-          this.notify();
-        }
-        if (!uploaded || this.view.paused) await this.sleep(20);
+        const report = (g.detailedReports || this.reportSafe || this.view.paused) && this.clock() >= this.reportDue;
+        if (report) await this.report();
+        if (this.ended && !this.intents.length) break;
+        if (!this.view.paused && this.clock() - this.progressAt > 30_000) throw new Error("Video stopped making copy progress");
+        if ((!uploaded || this.view.paused) && !report && !this.metadataStaged) await this.sleep(20);
       }
     } catch (error) { failure = error; }
     finally {

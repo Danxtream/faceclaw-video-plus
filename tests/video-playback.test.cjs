@@ -124,7 +124,7 @@ function fixture(frames = 20) {
   const source = {clip, readNal: async index => { assert.ok(index >= 0 && index < nals.length); return Uint8Array.of(nals[index].type | 0x60, index); }, close: () => { closed = true; calls.push('close'); }};
   const player = new VideoPlayback(protocol, source, {sync: async (...args) => audio.push(['sync', ...args]),
     pause: async () => audio.push(['pause']), close: async () => audio.push(['close'])},
-    () => ({native: state.native, dither: false, radio: true}), v => { view.push(v); f.onView?.(v); },
+    () => ({native: state.native, dither: false, radio: true, detailedReports: !!state.detailedReports}), v => { view.push(v); f.onView?.(v); },
     count => copied += count, () => now, async ms => { now += ms; });
   const f = {player, state, calls, audio, view, clip, protocol, onView: null,
     closed: () => closed, copied: () => copied};
@@ -258,6 +258,7 @@ test('Every bound peer remains checked even when it carries no video or SHOWN is
   }
   const f = fixture(5), sample = f.protocol.phy, send = f.protocol.sendNals;
   let unsafe = false;
+  f.state.detailedReports = true;
   f.protocol.sendNals = async (...args) => { await send(...args); unsafe = true; };
   f.protocol.shown = async (_stream, _token, lens) => shown(lens, 0, 0, 0, 0, 0);
   f.protocol.phy = async () => {

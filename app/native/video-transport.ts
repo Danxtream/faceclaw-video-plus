@@ -23,6 +23,10 @@ export function createVideoProtocol(ingressLeft = true): VideoProtocol {
   }
   const backend: VideoBackend = {
     epoch: () => Number(transport.getEpoch()),
+    sendPicture: async (record, metadata) => {
+      const raw = await collect(Number(transport.beginPicture(record.slice().buffer, metadata.slice().buffer, 3, ingressLeft)));
+      return raw.map((hex: string) => Uint8Array.from(hex.match(/../g)!.map(pair => parseInt(pair, 16))));
+    },
     exchange: async (payload, length, targets, resultOffset) => {
       const snapshot = payload.slice();
       const raw = await collect(Number(transport.beginExchange(snapshot.buffer, length, targets, ingressLeft, resultOffset)));

@@ -16,10 +16,14 @@ export const videoDitherSetting = new ConfigSettingBoolean({
 export const videoDeblockingSetting = new ConfigSettingBoolean({
   id: "video-deblocking", label: "Deblocking filter", storageKey: "video.deblocking", defaultValue: false,
 });
+export const videoDetailedReportsSetting = new ConfigSettingBoolean({
+  id: "video-detailed-reports", label: "Video detailed reports", storageKey: "video.detailedReports", defaultValue: false,
+});
 
 /** Generation settings are read only at START/seek, never on a settings callback. */
 export function configuredVideoOptions(): VideoOptions {
-  return { native: videoScaleSetting.get() === "native", dither: videoDitherSetting.get(), radio: videoRadioSetting.get() === "video" };
+  return { native: videoScaleSetting.get() === "native", dither: videoDitherSetting.get(), radio: videoRadioSetting.get() === "video",
+    detailedReports: videoDetailedReportsSetting.get() };
 }
 /** These are Video settings, not entries in the firmware's playback pause menu. */
 export function videoSettingsMenuItems() {

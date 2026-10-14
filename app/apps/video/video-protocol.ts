@@ -3,6 +3,7 @@ export interface VideoBackend {
   epoch(): number;
   exchange(payload: Uint8Array, bytes: number, targets: number, resultOffset: number): Promise<Uint8Array[]>;
   sendWindow(records: readonly Uint8Array[]): Promise<number[]>;
+  sendPicture?(record: Uint8Array, metadata: Uint8Array): Promise<Uint8Array[]>;
 }
 
 export const VIDEO = {
@@ -133,17 +134,33 @@ export class VideoProtocol {
       throw new Error("Shown report owner mismatch");
     return row;
   }
-  async sendNals(stream: number, first: number, nals: readonly Uint8Array[]): Promise<void> {
+  private nalRecords(stream: number, first: number, nals: readonly Uint8Array[]): Uint8Array[] {
     this.check();
     if (nals.length < 1 || nals.length > 4 || first + nals.length >= 0xffffffff) throw new Error("Invalid NAL window");
-    const records = nals.map((nal, index) => {
+    return nals.map((nal, index) => {
       if (!nal.length || nal.length > 4086) throw new Error("Complete NAL exceeds advertised limit");
       const record = new Uint8Array(10 + nal.length);
       record.set([31, 6]); put(record, 2, stream); put(record, 6, first + index); record.set(nal, 10);
       return record;
     });
-    const masks = await this.backend.sendWindow(records);
+  }
+  async sendNals(stream: number, first: number, nals: readonly Uint8Array[]): Promise<void> {
+    const masks = await this.backend.sendWindow(this.nalRecords(stream, first, nals));
     this.check();
-    if (masks.length !== records.length || masks.some((mask) => mask !== 3)) throw new Error("Paired NAL transport refused");
+    if (masks.length !== nals.length || masks.some((mask) => mask !== 3)) throw new Error("Paired NAL transport refused");
+  }
+  /** Next-picture metadata may be busy; its NAL is never sent before acceptance. */
+  async sendNalsWithMetadata(stream: number, first: number, nal: Uint8Array,
+    next: {ordinal: number; nal: number; pts: number}): Promise<boolean> {
+    if (next.nal !== first + 1) throw new Error("Metadata must describe the next NAL");
+    if (!this.backend.sendPicture) { await this.sendNals(stream, first, [nal]); return this.metadata(stream, next.ordinal, next.nal, next.pts); }
+    const record = this.nalRecords(stream, first, [nal])[0];
+    const raw = await this.header(VIDEO.metadata, 24);
+    put(raw, 8, stream); put(raw, 12, next.ordinal); put(raw, 16, next.nal); put(raw, 20, next.pts);
+    const rows = await this.backend.sendPicture(record, raw);
+    this.check();
+    if (rows.length !== 2 || rows.some(row => row.length !== 6 || ![0, 3].includes(row[5]) ||
+        row[4] > 4 || (!row[5] && videoU32(row, 0) !== next.ordinal))) throw new Error("Picture metadata refused");
+    return rows.every(row => !row[5]);
   }
 }

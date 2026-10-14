@@ -13,7 +13,8 @@ test('Video settings retain old scale/radio keys with new defaults and generatio
   const load = loader({}, {'../../ui/dashboard-settings': {ConfigSettingEnum: Enum, ConfigSettingBoolean: Bool,
     enumSettingMenuItem: setting => ({label: setting.options.label}), toggleSettingMenuItem: setting => ({label: setting.options.label})}});
   const settings = load('app/apps/video/video-settings.ts');
-  assert.deepEqual({...settings.configuredVideoOptions()}, {native: true, dither: false, radio: true});
+  assert.deepEqual({...settings.configuredVideoOptions()}, {native: true, dither: false, radio: true, detailedReports: false});
+  saved.set('video.detailedReports', true); assert.equal(settings.configuredVideoOptions().detailedReports, true);
   saved.set('video.blePhy', '1m'); assert.equal(settings.configuredVideoOptions().radio, false);
   saved.set('video.blePhy', '2m'); assert.equal(settings.configuredVideoOptions().radio, true);
   saved.set('video.blePhy', 'broken'); assert.equal(settings.configuredVideoOptions().radio, true);

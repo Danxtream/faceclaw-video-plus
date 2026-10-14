@@ -167,6 +167,52 @@ class VideoTransportTest {
         assertTrue(f.records.isEmpty())
     }
 
+    @Test fun admittedPictureAndNextMetadataKeepBothAckMasksAndCompactRefusals() {
+        for (left in listOf(true, false)) for (busy in listOf(true, false)) {
+            val f = Fixture()
+            val nal = byteArrayOf(31, 6, 50, 0, 0, 0, 3, 0, 0, 0, 0x65)
+            val metadata = byteArrayOf(31, 14, 1, 0, 88, 0, 0, 0, 50, 0, 0, 0,
+                2, 0, 0, 0, 4, 0, 0, 0, 63, 0, 0, 0)
+            f.respond = { record ->
+                for (side in 1..2) {
+                    if (record.payload[1].toInt() == 14) {
+                        f.page(88, side, 0, 1, byteArrayOf(2, 0, 0, 0, 2, if (busy) 3 else 0), left)
+                        f.ack(record, side, success = !busy)
+                    } else f.ack(record, side)
+                }
+            }
+            val id = f.transport.beginPicture(java.nio.ByteBuffer.wrap(nal), java.nio.ByteBuffer.wrap(metadata), 3, left)
+            nal[10] = 0
+            val limit = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
+            while (f.transport.pollOperation(id) == 0 && System.nanoTime() < limit) Thread.yield()
+            assertEquals(1, f.transport.pollOperation(id))
+            assertEquals(if (busy) "[\"020000000203\", \"020000000203\"]" else "[\"020000000200\", \"020000000200\"]",
+                f.transport.takeOperation(id))
+            assertEquals(6, f.records.poll()!!.payload[1].toInt())
+            assertEquals(14, f.records.poll()!!.payload[1].toInt())
+        }
+    }
+
+    @Test fun futureMetadataCannotHideARefusedCurrentPictureOrCrossRetirement() {
+        val nal = byteArrayOf(31, 6, 50, 0, 0, 0, 3, 0, 0, 0, 0x65)
+        val metadata = byteArrayOf(31, 14, 1, 0, 88, 0, 0, 0, 50, 0, 0, 0,
+            2, 0, 0, 0, 4, 0, 0, 0, 63, 0, 0, 0)
+        val f = Fixture()
+        f.respond = { record ->
+            for (side in 1..2) f.ack(record, side, success = record.payload[1].toInt() != 6 || side == 1)
+        }
+        assertFailsWith<IllegalStateException> { f.transport.exchange(metadata, 6, 3, true, 5, leading = arrayOf(nal)) }
+        assertFailsWith<IllegalArgumentException> {
+            f.transport.beginPicture(java.nio.ByteBuffer.wrap(nal), java.nio.ByteBuffer.wrap(metadata.copyOf().also { it[16] = 3 }), 3, true)
+        }
+        val retired = Fixture()
+        val id = retired.transport.beginPicture(java.nio.ByteBuffer.wrap(nal), java.nio.ByteBuffer.wrap(metadata), 3, false)
+        assertTrue(retired.records.poll(1, TimeUnit.SECONDS) != null)
+        retired.transport.retire("disconnected")
+        assertEquals(-1, retired.transport.pollOperation(id))
+        assertFailsWith<IllegalStateException> { retired.transport.takeOperation(id) }
+    }
+
     companion object {
         private fun packet(body: ByteArray): ByteArray {
             val crc = CfwTransport.crc(body)

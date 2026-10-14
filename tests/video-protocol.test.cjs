@@ -72,3 +72,21 @@ test('A durable reservation finishes before sending and epoch changes during it 
   assert.equal(sent, 0); epoch++; release(100);
   await assert.rejects(pending, /generation/); assert.equal(sent, 0);
 });
+
+test('Admitted data and future metadata share a bounded window without inventing acceptance', async () => {
+  let pair, epoch = 1, busy = false;
+  const protocol = new VideoProtocol({epoch: () => epoch, sendPicture: async (data, metadata) => {
+    pair = [data, metadata];
+    return [1, 2].map(() => {
+      const raw = new Uint8Array(6); raw[0] = 2; raw[4] = 2; raw[5] = busy ? 3 : 0; return raw;
+    });
+  }}, () => 88);
+  const next = {ordinal: 2, nal: 4, pts: 63};
+  assert.equal(await protocol.sendNalsWithMetadata(50, 3, Uint8Array.of(0x65), next), true);
+  assert.equal(videoU32(pair[0], 6), 3); assert.equal(pair[1][1], VIDEO.metadata);
+  assert.equal(videoU32(pair[1], 4), 88); assert.equal(videoU32(pair[1], 16), 4);
+  busy = true;
+  assert.equal(await protocol.sendNalsWithMetadata(50, 3, Uint8Array.of(0x65), next), false);
+  epoch++;
+  await assert.rejects(protocol.sendNalsWithMetadata(50, 3, Uint8Array.of(0x65), next), /generation/);
+});
