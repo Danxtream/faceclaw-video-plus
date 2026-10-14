@@ -1,7 +1,9 @@
 import { videoSeekPoint, type VideoSource } from "./video-clip";
 import { VIDEO, VideoProtocol, videoU32, type VideoStatus } from "./video-protocol";
-import { parsePlayback, parseShown, parseVideoPhy, videoRestored, videoLive, videoOwnedSnapshot, videoTickSpan, videoCopyRate,
+import { parsePlayback, parseShown, parseVideoPhy, videoRestored, videoLive, videoOwnedSnapshot, videoTickSpan, videoCopyRate, videoPhyDetails,
   type VideoPhy, type VideoShown, type VideoPlaybackState } from "./video-observations";
+
+declare const console: { error(message: string): void };
 
 /** Audio stays on the phone's existing media route; all methods are asynchronous. */
 export interface VideoAudio {
@@ -70,6 +72,54 @@ export class VideoPlayback {
   }
   stop(): void { this.stopping = true; }
   private async phy(): Promise<VideoPhy[]> { return (await this.protocol.phy()).map((raw, i) => parseVideoPhy(raw, i + 1)); }
+  private startPhyError(detail: string): Error {
+    const message = `Video START host links are not clean: ${detail}`;
+    console.error(message);
+    return new Error(message);
+  }
+  private async cleanStartPhy(): Promise<VideoPhy[]> {
+    const deadline = this.clock() + 8_000;
+    let first: VideoPhy[];
+    try { first = await this.phy(); }
+    catch (error) { throw this.startPhyError(String(error)); }
+    let current = first;
+    // Kind-1 diagnostics queue READ after freezing the reply. Require a newer
+    // per-link event tick, not merely a later report or an old valid sample.
+    for (let polls = 0; ; polls++) {
+      const failed: string[] = [], waiting: string[] = [];
+      for (let side = 0; side < 2; side++) {
+        if (!current[side].links.some((link) => link.bound)) {
+          failed.push(current[side].links.map((link, i) =>
+            `failed=bound; ${videoPhyDetails(side + 1, i + 1, link)}`).join("; "));
+        }
+        for (let i = 0; i < 3; i++) {
+          const old = first[side].links[i], link = current[side].links[i];
+          if (!old.bound && !link.bound) continue;
+          const fields = [old.bound !== link.bound && "bound", !link.connected && "connected",
+            link.epoch !== old.epoch && "epoch", link.owners && "owners", link.permission && "permission",
+            link.uncertain && "uncertain", link.status && "status",
+            link.pending && (polls === 0 || link.operation !== 1) && "pending"].filter(Boolean);
+          const details = videoPhyDetails(side + 1, i + 1, link);
+          if (fields.length) failed.push(`failed=${fields.join(",")}; ${details}`);
+          else {
+            const missing = [!link.valid && "valid", link.pending && "pending",
+              link.sampleTick === old.sampleTick && "fresh PHY sample"].filter(Boolean);
+            if (missing.length) waiting.push(`waiting=${missing.join(",")}; ${details}`);
+          }
+        }
+      }
+      if (failed.length) throw this.startPhyError(failed.join("; "));
+      if (this.stopping || this.clock() >= deadline || polls + 1 >= 80) {
+        const evidence = waiting.length ? waiting : current.flatMap((side) => side.links.map((link, i) =>
+          videoPhyDetails(side.lens, i + 1, link)));
+        throw this.startPhyError(`${this.stopping ? "PHY read cancelled" : "PHY read timed out"}; ${evidence.join("; ")}`);
+      }
+      if (!waiting.length) return current;
+      await this.sleep(100);
+      try { current = await this.phy(); }
+      catch (error) { throw this.startPhyError(`${String(error)}; ${waiting.join("; ")}`); }
+    }
+  }
   private validateStatus(rows: VideoStatus[], stream?: number, tokens?: number[]): void {
     if (rows.length !== 2 || rows.some((row, i) => row.result || row.error || row.state === 4 ||
         (stream !== undefined && row.state !== 0 && row.stream !== stream) ||
@@ -96,10 +146,7 @@ export class VideoPlayback {
     const picture = this.source.clip.pictures[idr];
     const firstNal = idr === 0 ? 0 : picture.nal;
     const prefix = idr === 0 ? [] : [picture.sps, picture.pps];
-    const oldPhy = await this.phy();
-    if (oldPhy.some((side) => side.links.some((link) => link.bound &&
-        (!link.connected || !link.valid || link.pending || link.owners || link.permission || link.uncertain || link.status))))
-      throw new Error("Video START host links are not clean");
+    const oldPhy = await this.cleanStartPhy();
     const selection = this.options();
     await this.protocol.radioSelection(selection.radio);
     this.validateStatus(await this.protocol.timeline(stream, this.source.clip.duration, this.source.clip.pictures[target].pts));

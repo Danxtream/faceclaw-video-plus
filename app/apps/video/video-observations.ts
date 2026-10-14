@@ -46,28 +46,42 @@ export function parseShown(raw: Uint8Array, lens: number, stream: number, token:
 export type VideoPhyLink = {
   epoch: number; bound: boolean; connected: boolean; valid: boolean; beforeValid: boolean; afterValid: boolean;
   uncertain: boolean; phase: number; status: number; owners: number; pending: boolean; permission: number;
-  current: number; before: number; after: number;
+  current: number; before: number; after: number; sampleTick: number; operation: number;
 };
 export type VideoPhy = { lens: number; tick: number; links: VideoPhyLink[] };
+
+/** Keep failure evidence identical in the user error and console log. */
+export function videoPhyDetails(lens: number, slot: number, link: VideoPhyLink): string {
+  return `${lens === 1 ? "LEFT" : "RIGHT"} link=${slot} bound=${link.bound} connected=${link.connected}` +
+    ` valid=${link.valid} pending=${link.pending} owners=${link.owners} permission=${link.permission}` +
+    ` uncertain=${link.uncertain} status=${link.status} epoch=${link.epoch}` +
+    ` tx=${link.current & 255} rx=${link.current >>> 8} sampleTick=${link.sampleTick}` +
+    ` operation=${link.operation} phase=${link.phase}`;
+}
 
 /** Preserve all bound-link health; a wire-fed peer's safe fallback is allowed. */
 export function parseVideoPhy(raw: Uint8Array, lens: number): VideoPhy {
   if (raw.length !== 128 || raw[0] !== 1 || raw[1] !== 7 || raw[2] || raw[3] !== 1 ||
       raw[8] !== 1 || raw[9] !== 32 || raw[10] !== 3 || raw[11] !== lens || raw[116] > 2 || raw[117] > 2 ||
-      raw[118] > 3 || raw[119] || raw.slice(124).some(Boolean)) throw new Error("Invalid video PHY report");
+      raw[118] > 3 || raw[119] || raw.slice(124).some(Boolean))
+    throw new Error(`Invalid video PHY report: ${lens === 1 ? "LEFT" : "RIGHT"}`);
   const links: VideoPhyLink[] = [];
   for (let i = 0; i < 3; i++) {
     const p = raw.slice(12 + i * 32, 44 + i * 32), flags = p[1];
     const link = { epoch: videoU32(p, 4), connected: !!(flags & 1), bound: !!(flags & 2), valid: !!(flags & 4),
       beforeValid: !!(flags & 8), afterValid: !!(flags & 16), uncertain: !!(flags & 128), phase: p[2], status: p[3],
       owners: p[26], pending: !!(flags & 64), permission: videoU32(p, 28),
-      before: p[20] | p[21] << 8, current: p[22] | p[23] << 8, after: p[24] | p[25] << 8 };
-    if (p[0] !== i + 1 || link.phase > 9 || link.owners > 2 || p[27] > 2 ||
-        (flags & 31 && !link.epoch) || (flags & 30 && !link.connected) ||
-        !!(flags & 32) !== !!link.owners || !!(flags & 64) !== !!p[27] ||
-        [[link.valid, 22], [link.beforeValid, 20], [link.afterValid, 24]].some(([valid, offset]) =>
-          valid && (![1, 2, 3].includes(p[Number(offset)]) || ![1, 2, 3].includes(p[Number(offset) + 1]))))
-      throw new Error("Inconsistent video PHY sample");
+      before: p[20] | p[21] << 8, current: p[22] | p[23] << 8, after: p[24] | p[25] << 8,
+      sampleTick: videoU32(p, 8), operation: p[27] };
+    const failed = [p[0] !== i + 1 && "slot", link.phase > 9 && "phase", p[27] > 2 && "operation",
+      link.owners > 2 && "owners", flags & 31 && !link.epoch && "epoch",
+      flags & 30 && !link.connected && "connected", !!(flags & 32) !== !!link.owners && "owners",
+      !!(flags & 64) !== !!p[27] && "pending",
+      [[link.valid, 22], [link.beforeValid, 20], [link.afterValid, 24]].some(([valid, offset]) =>
+        valid && (![1, 2, 3].includes(p[Number(offset)]) || ![1, 2, 3].includes(p[Number(offset) + 1]))) && "valid/tx/rx"]
+      .filter(Boolean);
+    if (failed.length)
+      throw new Error(`Inconsistent video PHY sample: failed=${failed.join(",")}; ${videoPhyDetails(lens, i + 1, link)}`);
     links.push(link);
   }
   return { lens, tick: videoU32(raw, 4), links };

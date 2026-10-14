@@ -63,7 +63,8 @@ function latencyTransport(frames = 160, decodeMs = 70) {
           const p = 12 + i * 32; raw[p] = i + 1;
           if (i) continue;
           raw[p + 1] = active ? 63 : 31; raw[p + 2] = active ? lens === 1 ? 3 : 4 : 8;
-          put(raw, p + 4, 40); raw.set([1, 1, active && lens === 1 ? 2 : 1, active && lens === 1 ? 2 : 1, 1, 1, active ? 1 : 0, 0], p + 20);
+          put(raw, p + 4, 40); put(raw, p + 8, now);
+          raw.set([1, 1, active && lens === 1 ? 2 : 1, active && lens === 1 ? 2 : 1, 1, 1, active ? 1 : 0, 0], p + 20);
           put(raw, p + 28, active && lens === 1 ? 1 : 0);
         }
         return raw;

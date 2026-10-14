@@ -93,6 +93,8 @@ export class VideoProtocol {
         videoU32(row, 4) !== Number(enabled))) throw new Error("Video radio selection refused");
   }
   async phy(): Promise<Uint8Array[]> {
+    // Firmware freezes this kind-1 snapshot, then queues a READ on an idle
+    // bound link. START must poll for the resulting per-link sample.
     const raw = await this.header(7, 12);
     raw[8] = 1;
     return this.query(raw, 128);

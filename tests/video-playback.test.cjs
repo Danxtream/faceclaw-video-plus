@@ -15,6 +15,7 @@ function phy(lens, owned = false, tick = 100) {
     raw[base + 1] = owned ? 63 : 31;
     raw[base + 2] = owned ? lens === 1 ? 3 : 4 : 8;
     put(raw, base + 4, 40);
+    put(raw, base + 8, tick);
     raw.set([1, 1, owned && lens === 1 ? 2 : 1, owned && lens === 1 ? 2 : 1, 1, 1, owned ? 1 : 0, 0], base + 20);
     put(raw, base + 28, owned && lens === 1 ? 1 : 0);
   }
@@ -62,6 +63,7 @@ function fixture(frames = 20) {
     },
     phy: async () => {
       calls.push('phy');
+      now++;
       if (state.failedSample) { state.failedSample = false; throw new Error('diagnostics unavailable'); }
       const rows = [1, 2].map(lens => phy(lens, state.active, now));
       if (state.wrongRestore && !state.active) rows[1][36] = 2;
@@ -154,6 +156,121 @@ test('Wire-fed peer fallback is safe, but its uncertain epoch or wrong restorati
   assert.throws(() => videoRestored(before, bad), /changed/);
   bad[1].links[0] = {...after[1].links[0], permission: 1};
   assert.equal(videoRestored(before, bad), false);
+});
+
+test('START waits for delayed READ on RIGHT slot three before timeline or admission', async () => {
+  const f = fixture(5), sample = f.protocol.phy;
+  let queries = 0;
+  f.protocol.phy = async () => {
+    const rows = await sample();
+    if (!f.state.active) {
+      queries++;
+      const right = rows[1]; right.set(right.slice(12, 44), 76); right[76] = 3;
+      right.fill(0, 12, 44); right[12] = 1;
+      if (queries < 3) {
+        right[77] &= ~4; put(right, 84, 0);
+        if (queries === 2) { right[77] |= 64; right[103] = 1; }
+      }
+    }
+    return rows;
+  };
+  // Inspect pre-admission only; subsequent active/retirement fixture uses slot1.
+  const rows = await f.player.cleanStartPhy();
+  assert.equal(queries, 3); assert.equal(rows[1].links[2].valid, true);
+  assert.equal(rows[1].links[2].pending, false);
+  assert.equal(f.calls.some(row => Array.isArray(row) && ['timeline', 'start', 'radio'].includes(row[0])), false);
+  const h = fixture(5), read = h.protocol.phy, timeline = h.protocol.timeline;
+  let idleQueries = 0;
+  h.protocol.phy = async () => {
+    const result = await read();
+    if (!h.state.active && ++idleQueries < 3) result[1][13] &= ~4;
+    return result;
+  };
+  h.protocol.timeline = async (...args) => { assert.equal(idleQueries, 3); return timeline(...args); };
+  await h.player.run();
+  assert.equal(h.copied(), 5);
+});
+
+test('START refuses every unsafe field with identical console and error evidence', async () => {
+  const cases = {
+    bound: raw => { raw[13] &= ~2; },
+    connected: raw => { raw[13] &= ~1; },
+    owners: raw => { raw[13] |= 32; raw[38] = 1; },
+    permission: raw => put(raw, 40, 9),
+    uncertain: raw => { raw[13] |= 128; },
+    status: raw => { raw[15] = 12; },
+    pending: raw => { raw[13] |= 64; raw[39] = 1; },
+  };
+  const log = console.error;
+  try {
+    for (const [field, mutate] of Object.entries(cases)) {
+      const f = fixture(5), sample = f.protocol.phy, logs = [];
+      console.error = message => logs.push(message);
+      f.protocol.phy = async () => { const rows = await sample(); mutate(rows[1]); return rows; };
+      await assert.rejects(f.player.run(), error => {
+        assert.match(error.message, /RIGHT link=1/);
+        for (const name of ['bound', 'connected', 'valid', 'pending', 'owners', 'permission', 'uncertain', 'status', 'epoch', 'tx', 'rx'])
+          assert.ok(error.message.includes(`${name}=`), `${field}: ${name}`);
+        assert.ok(error.message.includes(`${field}=`));
+        assert.deepEqual(logs, [error.message]); return true;
+      });
+      assert.equal(f.calls.some(row => Array.isArray(row) && row[0] === 'start'), false);
+      assert.equal(f.closed(), true);
+    }
+  } finally { console.error = log; }
+});
+
+test('START rejects stale valid samples, missing valid samples and in-flight SET', async () => {
+  const log = console.error;
+  try {
+    for (const mode of ['stale', 'invalid', 'set']) {
+      const f = fixture(5), sample = f.protocol.phy, logs = [];
+      let queries = 0;
+      console.error = message => logs.push(message);
+      f.protocol.phy = async () => {
+        const rows = await sample(); queries++;
+        if (mode === 'stale') put(rows[1], 20, 0);
+        if (mode === 'invalid') rows[1][13] &= ~4;
+        if (mode === 'set' && queries > 1) { rows[1][13] |= 64; rows[1][39] = 2; }
+        return rows;
+      };
+      await assert.rejects(f.player.run(), error => {
+        assert.match(error.message, /RIGHT link=1/);
+        assert.match(error.message, mode === 'set' ? /failed=pending/ : /PHY read timed out/);
+        assert.match(error.message, mode === 'invalid' ? /valid=false/ : mode === 'set' ? /operation=2/ : /fresh PHY sample/);
+        assert.deepEqual(logs, [error.message]); return true;
+      });
+      assert.ok(queries <= 80); assert.equal(f.calls.some(row => Array.isArray(row) && row[0] === 'start'), false);
+    }
+  } finally { console.error = log; }
+});
+
+test('START freshness accepts event-timer wrap but rejects epoch changes and disconnects', async () => {
+  const f = fixture(5), sample = f.protocol.phy;
+  let queries = 0;
+  f.protocol.phy = async () => { const rows = await sample(); queries++;
+    put(rows[1], 20, queries === 1 ? 0xffffffff : 0); return rows; };
+  assert.equal((await f.player.cleanStartPhy())[1].links[0].sampleTick, 0);
+  const log = console.error;
+  try {
+    for (const mode of ['epoch', 'disconnect', 'transport', 'cancel']) {
+      const h = fixture(5), read = h.protocol.phy; let count = 0;
+      console.error = () => {};
+      h.protocol.phy = async () => {
+        const rows = await read(); count++;
+        if (mode === 'cancel') h.player.stop();
+        if (count > 1) {
+          if (mode === 'epoch') put(rows[1], 16, 41);
+          if (mode === 'disconnect') rows[1][13] = 0;
+          if (mode === 'transport') throw new Error('link request timed out');
+        }
+        return rows;
+      };
+      await assert.rejects(h.player.run(), mode === 'epoch' ? /failed=epoch.*epoch=41/ :
+        mode === 'disconnect' ? /failed=bound/ : mode === 'transport' ? /request timed out.*RIGHT link=1/ : /PHY read cancelled/);
+      assert.equal(h.calls.some(row => Array.isArray(row) && row[0] === 'start'), false);
+    }
+  } finally { console.error = log; }
 });
 
 test('Single writer finishes paired copies, uses metadata identity and cleans all resources', async () => {
