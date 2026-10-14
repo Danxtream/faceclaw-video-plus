@@ -69,6 +69,25 @@ test('START retry targets only the refused lens with a fresh request ID', async 
   await assert.rejects(protocol.start(4, false, false, true, 0, false, 0), /lens mask/);
 });
 
+test('Pipeline keeps each NAL identity, gates following metadata and rejects impossible completions', async () => {
+  let records, commands, result = [2, 1], epoch = 1, id = 90;
+  const backend = {epoch: () => epoch, sendPipeline: async (nals, following) => {
+    records = nals; commands = following; return result;
+  }};
+  const protocol = new VideoProtocol(backend, () => id++);
+  const nals = [Uint8Array.of(0x65), Uint8Array.of(0x61)];
+  const next = [{ordinal: 2, nal: 4, pts: 63}, null];
+  assert.deepEqual(await protocol.sendPipeline(50, 3, nals, next), [2, 1]);
+  assert.deepEqual(records.map(row => videoU32(row, 6)), [3, 4]);
+  assert.equal(videoU32(commands[0], 4), 90); assert.equal(commands[1], null);
+  result = [1, 0]; assert.deepEqual(await protocol.sendPipeline(50, 3, nals, next), result);
+  for (const invalid of [[0, 0], [3, 1], [1, 1], [2, 0], [2, 2], [2, 1, 0]]) {
+    result = invalid; await assert.rejects(protocol.sendPipeline(50, 3, nals, next), /completion/);
+  }
+  backend.sendPipeline = async () => { epoch++; return [2, 1]; };
+  await assert.rejects(protocol.sendPipeline(50, 3, nals, next), /generation/);
+});
+
 test('Queries require both lenses and durable nonwrapping request IDs', async () => {
   const protocol = new VideoProtocol({ epoch: () => 1, exchange: async () => [status()] }, () => 1);
   await assert.rejects(protocol.status(), /Missing lens/);

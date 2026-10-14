@@ -213,6 +213,109 @@ class VideoTransportTest {
         assertFailsWith<IllegalStateException> { retired.transport.takeOperation(id) }
     }
 
+    private fun nal(sequence: Int) = byteArrayOf(31, 6, 50, 0, 0, 0, sequence.toByte(), 0, 0, 0, 0x65)
+    private fun metadata(sequence: Int) = byteArrayOf(31, 14, 1, 0, (100 + sequence).toByte(), 0, 0, 0,
+        50, 0, 0, 0, sequence.toByte(), 0, 0, 0, sequence.toByte(), 0, 0, 0, 0, 0, 0, 0)
+
+    @Test fun asynchronousPipelineCopiesAndBoundsItsPacket() {
+        val f = Fixture()
+        f.respond = { record -> f.ack(record, 1); f.ack(record, 2) }
+        val packet = byteArrayOf(1, 11, 0) + nal(1) + byteArrayOf(0)
+        val id = f.transport.beginPipeline(java.nio.ByteBuffer.wrap(packet), 3, true)
+        packet[3] = 0
+        val limit = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
+        while (f.transport.pollOperation(id) == 0 && System.nanoTime() < limit) Thread.yield()
+        assertEquals(1, f.transport.pollOperation(id))
+        assertEquals("[1, 0]", f.transport.takeOperation(id))
+        assertEquals(31, f.records.poll()!!.payload[0].toInt())
+        for (invalid in listOf(byteArrayOf(5), byteArrayOf(1, 11, 0), byteArrayOf(1, 11, 0) + nal(1) + byteArrayOf(1)))
+            assertFailsWith<IllegalArgumentException> { f.transport.beginPipeline(java.nio.ByteBuffer.wrap(invalid), 3, true) }
+    }
+
+    @Test fun pipelineStopsBeforeNalsWhoseMetadataEitherLensRefused() {
+        for (left in listOf(true, false)) {
+            val f = Fixture()
+            f.respond = { record -> for (side in 1..2) {
+                val busy = record.payload[1].toInt() == 14 && side == 2
+                if (record.payload[1].toInt() == 14) f.page(102, side, 0, 1,
+                    byteArrayOf(2, 0, 0, 0, 2, if (busy) 3 else 0), left)
+                f.ack(record, side, success = !busy)
+            } }
+            assertContentEquals(intArrayOf(1, 0), f.transport.pipeline(arrayOf(nal(1), nal(2)),
+                arrayOf(metadata(2), null), 3, left))
+            assertEquals(listOf(6, 14), f.records.map { it.payload[1].toInt() })
+        }
+    }
+
+    @Test fun pipelineCannotHideNalRefusalRetirementOrMalformedMetadata() {
+        val f = Fixture()
+        f.respond = { record -> f.ack(record, 1); f.ack(record, 2, success = false) }
+        assertFailsWith<IllegalStateException> { f.transport.pipeline(arrayOf(nal(1)), arrayOf(null), 3, true) }
+        assertFailsWith<IllegalArgumentException> { f.transport.pipeline(arrayOf(nal(1)), arrayOf(metadata(3)), 3, true) }
+        val retired = Fixture()
+        val worker = Executors.newSingleThreadExecutor()
+        try {
+            val result = worker.submit<IntArray> { retired.transport.pipeline(arrayOf(nal(1), nal(2)), arrayOf(null, null), 3, true) }
+            val old = retired.records.poll(1, TimeUnit.SECONDS)!!
+            retired.transport.retire("disconnected")
+            old.delivered()
+            assertFailsWith<java.util.concurrent.ExecutionException> { result.get(1, TimeUnit.SECONDS) }
+        } finally { worker.shutdownNow() }
+    }
+
+    @Test fun pipelineReplayStillRequiresBothLensesOnTheNewAttempt() {
+        val f = Fixture(); val worker = Executors.newSingleThreadExecutor()
+        try {
+            val result = worker.submit<IntArray> { f.transport.pipeline(arrayOf(nal(1)), arrayOf(null), 3, false) }
+            val record = f.records.poll(1, TimeUnit.SECONDS)!!
+            val old = record.message!!.magic
+            f.ack(record, 1)
+            record.message!!.prepareCfwReplay(old + 1)
+            f.transport.targetsFor(record.message!!)
+            f.ack(record, 2, attempt = old)
+            assertFalse(result.isDone)
+            f.ack(record, 2); assertFalse(result.isDone)
+            f.ack(record, 1)
+            assertContentEquals(intArrayOf(1, 0), result.get(1, TimeUnit.SECONDS))
+        } finally { worker.shutdownNow() }
+    }
+
+    @Test fun latencyRealisticPipelineOverlapsThirtyToFortyFiveMillisecondAcks() {
+        fun measure(pipelined: Boolean): Pair<Double, Int> {
+            val f = Fixture()
+            val timer = Executors.newSingleThreadScheduledExecutor()
+            val live = java.util.concurrent.atomic.AtomicInteger()
+            val peak = java.util.concurrent.atomic.AtomicInteger()
+            f.respond = { record ->
+                peak.accumulateAndGet(live.incrementAndGet(), ::maxOf)
+                val meta = record.payload[1].toInt() == 14
+                timer.schedule({
+                    live.decrementAndGet()
+                    for (side in 1..2) {
+                        if (meta) f.page((record.payload[4].toInt() and 255).toLong(), side, 0, 1,
+                            byteArrayOf(record.payload[12], 0, 0, 0, 2, 0), true)
+                        f.ack(record, side)
+                    }
+                }, if (meta) 30 else 45, TimeUnit.MILLISECONDS)
+            }
+            try {
+                val begin = System.nanoTime()
+                for (first in 1..24 step 4) {
+                    if (pipelined) f.transport.pipeline(Array(4) { nal(first + it) },
+                        Array(4) { metadata(first + it + 1) }, 3, true)
+                    else for (i in first until first + 4) f.transport.exchange(metadata(i + 1), 6, 3, true, 5, leading = arrayOf(nal(i)))
+                    // One compact credit request per four NALs: 2.25 messages/NAL.
+                    Thread.sleep(35)
+                }
+                return Pair(24e9 / (System.nanoTime() - begin), peak.get())
+            } finally { timer.shutdownNow() }
+        }
+        val before = measure(false); val after = measure(true)
+        println("ACK latency fake NAL/s: before=${before.first} after=${after.first} maxOutstanding=${after.second}")
+        assertTrue(after.first > before.first * 1.1, "Pipeline must beat the per-picture fence")
+        assertTrue(after.second in 2..3)
+    }
+
     companion object {
         private fun packet(body: ByteArray): ByteArray {
             val crc = CfwTransport.crc(body)

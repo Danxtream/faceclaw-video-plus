@@ -56,6 +56,20 @@ test('Cancellation during source audit does not prepare audio or create transpor
   assert.equal(closed, 1); assert.equal(session.opening, false); assert.equal(session.ownsDisplay, false);
 });
 
+test('Cancelled native media preparation cleans resources without a session error', async () => {
+  let reject;
+  const load = loader({}, {
+    '../../native/file-access': {}, '../../native/g2-video-library': {},
+    '../../native/video-source': {openVideoSource: () => new Promise((_, fail) => reject = fail)},
+    '../../native/video-audio': {}, '../../native/video-transport': {}, './video-playback': {},
+  });
+  const {VideoSession} = load('app/apps/video/video-session.ts');
+  const session = new VideoSession('clip.h264', () => ({})), running = session.run();
+  session.stop(); reject(new Error('Video source closed')); await running;
+  assert.equal(session.error, null); assert.equal(session.opening, false);
+  assert.equal(session.ownsDisplay, false);
+});
+
 test('Failed media preparation closes the source and creates no BLE writer', async () => {
   let closed = 0;
   const load = loader({}, {

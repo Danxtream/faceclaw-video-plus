@@ -23,6 +23,18 @@ export function createVideoProtocol(ingressLeft = true): VideoProtocol {
   }
   const backend: VideoBackend = {
     epoch: () => Number(transport.getEpoch()),
+    sendPipeline: async (records, following) => {
+      const packet = new Uint8Array(1 + records.reduce((sum, record, i) => sum + 3 + record.length + (following[i] ? 24 : 0), 0));
+      packet[0] = records.length;
+      let offset = 1;
+      records.forEach((record, i) => {
+        packet[offset++] = record.length & 255; packet[offset++] = record.length >>> 8;
+        packet.set(record, offset); offset += record.length;
+        packet[offset++] = Number(!!following[i]);
+        if (following[i]) { packet.set(following[i]!, offset); offset += 24; }
+      });
+      return collect(Number(transport.beginPipeline(packet.buffer, 3, ingressLeft)));
+    },
     sendPicture: async (record, metadata) => {
       const raw = await collect(Number(transport.beginPicture(record.slice().buffer, metadata.slice().buffer, 3, ingressLeft)));
       return raw.map((hex: string) => Uint8Array.from(hex.match(/../g)!.map(pair => parseInt(pair, 16))));

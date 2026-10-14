@@ -20,9 +20,11 @@ export type VideoPlaybackView = {
   cleanupFailed: boolean;
   hostPhy: string;
 };
-type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata">>;
+type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline">>;
 type Intent = { kind: "pause" | "seek" | "scale" | "menu"; value: number | boolean; resolve: () => void; reject: (error: unknown) => void };
 type Generation = { stream: number; tokens: number[]; idr: number; target: number; prefix: number[]; firstNal: number; index: number; count: number; metadata: number; paused: boolean; reached: boolean; oldPhy: VideoPhy[]; started: number; anchor: VideoPhy[]; anchorAt: number; anchorUncertainty: number; detailedReports: boolean };
+
+class VideoCancelled extends Error { constructor() { super("Video cancelled"); } }
 
 /** One writer processes uploads and controls; no callback or timer writes BLE. */
 export class VideoPlayback {
@@ -33,6 +35,7 @@ export class VideoPlayback {
   private generation: Generation | null = null;
   private lastSeek = 0;
   private reportDue = 0;
+  private reportAt = 0;
   private progressAt = 0;
   private progress = -1;
   private copyFirst: VideoShown[] | null = null;
@@ -81,11 +84,12 @@ export class VideoPlayback {
     const deadline = this.clock() + 8_000;
     let first: VideoPhy[];
     try { first = await this.phy(); }
-    catch (error) { throw this.startPhyError(String(error)); }
+    catch (error) { if (this.stopping) throw new VideoCancelled(); throw this.startPhyError(String(error)); }
     let current = first;
     // Kind-1 diagnostics queue READ after freezing the reply. Require a newer
     // per-link event tick, not merely a later report or an old valid sample.
     for (let polls = 0; ; polls++) {
+      if (this.stopping) throw new VideoCancelled();
       const failed: string[] = [], waiting: string[] = [];
       for (let side = 0; side < 2; side++) {
         if (!current[side].links.some((link) => link.bound)) {
@@ -109,15 +113,15 @@ export class VideoPlayback {
         }
       }
       if (failed.length) throw this.startPhyError(failed.join("; "));
-      if (this.stopping || this.clock() >= deadline || polls + 1 >= 80) {
+      if (this.clock() >= deadline || polls + 1 >= 80) {
         const evidence = waiting.length ? waiting : current.flatMap((side) => side.links.map((link, i) =>
           videoPhyDetails(side.lens, i + 1, link)));
-        throw this.startPhyError(`${this.stopping ? "PHY read cancelled" : "PHY read timed out"}; ${evidence.join("; ")}`);
+        throw this.startPhyError(`PHY read timed out; ${evidence.join("; ")}`);
       }
       if (!waiting.length) return current;
       await this.sleep(100);
       try { current = await this.phy(); }
-      catch (error) { throw this.startPhyError(`${String(error)}; ${waiting.join("; ")}`); }
+      catch (error) { if (this.stopping) throw new VideoCancelled(); throw this.startPhyError(`${String(error)}; ${waiting.join("; ")}`); }
     }
   }
   private validateStatus(rows: VideoStatus[], operation: number = VIDEO.status, stream?: number, tokens?: number[]): void {
@@ -145,6 +149,7 @@ export class VideoPlayback {
       if (rows.some((row) => ![1, 2].includes(row.state)) || this.clock() > deadline) break;
       await this.sleep(20);
     }
+    if (this.stopping) throw new VideoCancelled();
     throw new Error("Video START did not reach both READY owners");
   }
   private async begin(targetMs: number, paused: boolean): Promise<void> {
@@ -158,9 +163,11 @@ export class VideoPlayback {
     const firstNal = idr === 0 ? 0 : picture.nal;
     const prefix = idr === 0 ? [] : [picture.sps, picture.pps];
     const oldPhy = await this.cleanStartPhy();
+    if (this.stopping) throw new VideoCancelled();
     const selection = this.options();
     await this.protocol.radioSelection(selection.radio);
     this.validateStatus(await this.protocol.timeline(stream, this.source.clip.duration, this.source.clip.pictures[target].pts), VIDEO.timeline);
+    if (this.stopping) throw new VideoCancelled();
     // Record the attempted stream before START so a partial admission gets STOP.
     this.generation = { stream, tokens: [], idr, target, prefix, firstNal, index: 0,
       count: prefix.length + this.source.clip.h264.nals.length - firstNal, metadata: 0,
@@ -169,6 +176,7 @@ export class VideoPlayback {
     const start = await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused);
     const retryDeadline = this.clock() + 1_000;
     for (let attempt = 0; ; attempt++) {
+      if (this.stopping) throw new VideoCancelled();
       const mask = start.reduce((bits, row, i) => bits | (row.result === 4 && !row.error &&
         row.state === 0 && row.stream === 0 && row.high < stream ? 1 << i : 0), 0);
       // Only a proven unadmitted LEASE refusal may be retried. Preserve the
@@ -180,6 +188,7 @@ export class VideoPlayback {
         break;
       }
       await this.sleep(200);
+      if (this.stopping) throw new VideoCancelled();
       if (this.stopping || this.clock() >= retryDeadline) {
         this.validateStatus(start, VIDEO.start, stream);
         break;
@@ -203,6 +212,7 @@ export class VideoPlayback {
     this.copyFirst = this.copyPrevious = null;
     this.shownCount = 0;
     this.reportDue = 0;
+    this.reportAt = this.clock();
     this.reportStage = "left"; this.pendingShown = null; this.ended = false; this.consumed = -1;
     this.creditBudget = 0;
     this.progressAt = this.clock(); this.progress = -1;
@@ -250,9 +260,11 @@ export class VideoPlayback {
       if (!this.view.paused) await this.upload();
       await this.sleep(20);
     }
+    if (this.stopping) throw new VideoCancelled();
     throw new Error("Video control did not reach both actual states");
   }
   private async intent(request: Intent): Promise<void> {
+    if (this.stopping) throw new VideoCancelled();
     if (!this.generation!.reached) await this.preview();
     if (request.kind === "seek") {
       await this.audio.pause();
@@ -269,7 +281,8 @@ export class VideoPlayback {
       const rows = await this.playback(op, value);
       if (rows.some((row) => row.result && row.result !== 3)) throw new Error("Video control owner refused");
       if (rows.every((row) => !row.result)) break;
-      if (this.stopping || this.clock() > deadline) throw new Error("Video control admission timed out");
+      if (this.stopping) throw new VideoCancelled();
+      if (this.clock() > deadline) throw new Error("Video control admission timed out");
       await this.sleep(20);
     }
     const settled = await this.settle(request.kind === "pause" ? Boolean(request.value) : undefined);
@@ -293,6 +306,11 @@ export class VideoPlayback {
     }
     this.reportDue = 0;
     this.notify();
+  }
+  private async readNal(index: number): Promise<Uint8Array> {
+    if (this.stopping) throw new VideoCancelled();
+    try { return await this.source.readNal(index); }
+    catch (error) { if (this.stopping) throw new VideoCancelled(); throw error; }
   }
   private async upload(): Promise<boolean> {
     const g = this.generation!;
@@ -327,6 +345,27 @@ export class VideoPlayback {
       this.reportSafe = true; return false;
     }
     const records: Uint8Array[] = [];
+    if (!g.detailedReports && this.protocol.sendPipeline) {
+      const following: ({ordinal: number; nal: number; pts: number} | null)[] = [];
+      const sourceIndex = (sequence: number) => sequence < g.prefix.length ? g.prefix[sequence] : g.firstNal + sequence - g.prefix.length;
+      const first = this.source.clip.pictures[g.idr + g.metadata];
+      if (first?.nal === sourceIndex(g.index)) {
+        if (!await this.protocol.metadata(g.stream, g.metadata + 1, g.index, first.pts)) return false;
+        g.metadata++;
+      }
+      let metadata = g.metadata;
+      for (let i = 0; i < count; i++) {
+        records.push(await this.readNal(sourceIndex(g.index + i)));
+        const next = this.source.clip.pictures[g.idr + metadata];
+        const command = next?.nal === sourceIndex(g.index + i + 1) ?
+          {ordinal: metadata + 1, nal: g.index + i + 1, pts: next.pts} : null;
+        following.push(command);
+        if (command) metadata++;
+      }
+      const [sent, admitted] = await this.protocol.sendPipeline(g.stream, g.index, records, following);
+      g.index += sent; g.metadata += admitted; this.creditBudget -= sent;
+      return true;
+    }
     for (let i = 0; i < count; i++) {
       const sequence = g.index + i;
       const sourceIndex = sequence < g.prefix.length ? g.prefix[sequence] : g.firstNal + sequence - g.prefix.length;
@@ -336,7 +375,7 @@ export class VideoPlayback {
         if (!await this.protocol.metadata(g.stream, g.metadata + 1, sequence, picture.pts)) break;
         g.metadata++;
       }
-      records.push(await this.source.readNal(sourceIndex));
+      records.push(await this.readNal(sourceIndex));
       // Do not hold a credited finishing NAL behind another picture's metadata.
       if ([1, 5].includes(this.source.clip.h264.nals[sourceIndex].type)) break;
     }
@@ -414,7 +453,7 @@ export class VideoPlayback {
       rows.every((row) => !row.paused && !row.pending &&
       row.shown === this.source.clip.pictures.length - g.target);
   }
-  /** One passive request per credit-blocked turn; recheck input before the next. */
+  /** One passive step per blocked or stale turn; recheck input before the next. */
   private async report(): Promise<void> {
     const g = this.generation!;
     if (g.detailedReports) {
@@ -424,7 +463,7 @@ export class VideoPlayback {
     } else if (this.reportStage === "playback") {
       this.updatePlayback(await this.playback());
       this.reportStage = "left";
-      this.reportDue = this.clock() + (this.view.paused || g.index === g.count ? 500 : 1500);
+      this.reportDue = this.clock() + (!g.reached || this.view.paused || g.index === g.count ? 500 : 1500);
     } else {
       const lens = this.reportStage === "left" ? 1 : 2;
       const began = this.clock();
@@ -448,16 +487,18 @@ export class VideoPlayback {
       this.reportDue = 0;
     }
     if (this.view.paused) await this.audio.pause();
+    this.reportAt = this.clock();
     this.notify();
   }
   private async preview(): Promise<void> {
     const deadline = this.clock() + 30_000;
     while (!this.generation!.reached && !this.stopping) {
       const uploaded = await this.upload();
-      if (this.generation!.detailedReports || this.reportSafe) await this.report();
+      await this.report();
       if (this.clock() > deadline) throw new Error("Seek target was not shown by both lenses");
       if (!uploaded && !this.metadataStaged) await this.sleep(10);
     }
+    if (this.stopping) throw new VideoCancelled();
     if (this.generation!.paused) await this.settle(true);
   }
   /** Run once through EOF or explicit STOP; seeks retain the same source/writer. */
@@ -478,13 +519,15 @@ export class VideoPlayback {
         }
         const g = this.generation!;
         const uploaded = await this.upload();
-        const report = (g.detailedReports || this.reportSafe) && this.clock() >= this.reportDue;
+        if (this.stopping) break;
+        const stale = this.clock() - this.reportAt >= (g.reached ? 1500 : 500);
+        const report = (g.detailedReports || this.reportSafe || stale) && this.clock() >= this.reportDue;
         if (report) await this.report();
         if (this.ended && !this.intents.length) break;
         if (!this.view.paused && this.clock() - this.progressAt > 30_000) throw new Error("Video stopped making copy progress");
         if ((!uploaded || this.view.paused) && !report && !this.metadataStaged) await this.sleep(20);
       }
-    } catch (error) { failure = error; }
+    } catch (error) { if (!(error instanceof VideoCancelled)) failure = error; }
     finally {
       try { await this.audio.pause(); } catch (error) { failure ??= error; }
       try { await this.retire(false); } catch (error) {

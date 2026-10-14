@@ -156,6 +156,79 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         } }
     }
 
+    /** Copy one credit-bounded batch; each optional command admits the next NAL. */
+    fun beginPipeline(buffer: ByteBuffer, targets: Int, ingressLeft: Boolean): Long {
+        val data = snapshot(buffer)
+        require(data.isNotEmpty() && unsigned(data[0]) in 1..4)
+        var offset = 1
+        val following = arrayOfNulls<ByteArray>(unsigned(data[0]))
+        val records = Array(following.size) { index ->
+            require(offset + 2 <= data.size)
+            val size = u16(data, offset); offset += 2
+            require(size in 11..4096 && offset + size < data.size)
+            val nal = data.copyOfRange(offset, offset + size); offset += size
+            val present = unsigned(data[offset++]); require(present in 0..1)
+            if (present == 1) {
+                require(offset + 24 <= data.size)
+                following[index] = data.copyOfRange(offset, offset + 24); offset += 24
+            }
+            nal
+        }
+        require(offset == data.size)
+        return begin { generation -> pipeline(records, following, targets, ingressLeft, generation).joinToString(prefix = "[", postfix = "]") }
+    }
+
+    /** Metadata acceptance gates the next NAL, not the preceding NAL's ACK. */
+    fun pipeline(records: Array<ByteArray>, following: Array<ByteArray?>, targets: Int,
+                 ingressLeft: Boolean, generation: Long = epoch): IntArray = writer.withLock {
+        require(targets in 1..3 && records.size in 1..4 && following.size == records.size)
+        require(records.all { it.size in 11..4096 })
+        val stream = u32(records[0], 2)
+        records.forEachIndexed { i, nal ->
+            require(nal.size in 11..4096 && unsigned(nal[0]) == MESSAGE && unsigned(nal[1]) == 6)
+            require(u32(nal, 2) == stream && u32(nal, 6) == u32(records[0], 6) + i)
+            following[i]?.let { meta ->
+                require(meta.size == 24 && unsigned(meta[0]) == MESSAGE && unsigned(meta[1]) == 14)
+                require(u32(meta, 8) == stream && u32(meta, 16) == u32(nal, 6) + 1)
+            }
+        }
+        val deadline = System.nanoTime() + 15_000_000_000L
+        val submitted = mutableListOf<VideoSubmission>()
+        var admitted = 0
+        synchronized(monitor) {
+            check(epoch == generation) { "Video generation retired before submission" }
+            check(pending.isEmpty()) { "Video record window is not fenced" }
+        }
+        fun room() = await(generation, deadline) {
+            val done = submitted.filter { it in pending && it.delivered }
+            check(done.all { it.accepted == targets }) { "Paired NAL transport refused" }
+            pending.removeAll(done.toSet())
+            pending.size < 3
+        }
+        try {
+            for (i in records.indices) {
+                room()
+                val record = VideoSubmission(records[i].copyOf(), targets, ingressLeft, generation, this)
+                synchronized(monitor) {
+                    check(epoch == generation) { "Video generation retired before submission" }
+                    pending.add(record); submitted.add(record)
+                }
+                if (!queue.enqueue(record)) failed(record, "Video session is not ready")
+                val meta = following[i] ?: continue
+                room()
+                val rows = exchange(meta, 6, targets, ingressLeft, 5, generation,
+                    overlap = true, deadline = deadline)
+                check(rows.all { unsigned(it[5]) in listOf(0, 3) && unsigned(it[4]) <= 4 &&
+                    (unsigned(it[5]) != 0 || u32(it, 0) == u32(meta, 12)) }) { "Picture metadata refused" }
+                if (rows.any { unsigned(it[5]) != 0 }) break
+                admitted++
+            }
+            await(generation, deadline) { submitted.all { it.delivered } }
+            check(submitted.all { it.accepted == targets }) { "Paired NAL transport refused" }
+            intArrayOf(submitted.size, admitted)
+        } finally { synchronized(monitor) { pending.removeAll(submitted.toSet()) } }
+    }
+
     private fun begin(work: (Long) -> String): Long {
         val id: Long
         val operation: Operation
@@ -199,7 +272,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
 
     private fun snapshot(buffer: ByteBuffer): ByteArray {
         val view = buffer.duplicate()
-        require(view.remaining() <= 16_393)
+        require(view.remaining() <= 16_493)
         return ByteArray(view.remaining()).also { view.get(it) }
     }
 
@@ -264,13 +337,14 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
     }
 
     private fun send(records: Array<ByteArray>, targets: Int, ingressLeft: Boolean,
-                     generation: Long = epoch, deadline: Long = System.nanoTime() + 15_000_000_000L): IntArray {
+                     generation: Long = epoch, deadline: Long = System.nanoTime() + 15_000_000_000L,
+                     overlap: Boolean = false): IntArray {
         require(targets in 1..3 && records.size in 1..4)
         require(records.all { it.size in 2..4096 && unsigned(it[0]) == MESSAGE })
         val submitted = records.map { VideoSubmission(it.copyOf(), targets, ingressLeft, generation, this) }
         synchronized(monitor) {
             check(epoch == generation) { "Video generation retired before submission" }
-            check(pending.isEmpty()) { "Video record window is not fenced" }
+            check(pending.isEmpty() || overlap && pending.size + submitted.size <= 3) { "Video record window is not fenced" }
             pending.addAll(submitted)
         }
         try {
@@ -287,12 +361,12 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
 
     /** Fetch bounded pages of one frozen command reply, preserving refusal evidence. */
     fun exchange(payload: ByteArray, length: Int, targets: Int, ingressLeft: Boolean, resultOffset: Int,
-                 generation: Long = epoch, leading: Array<ByteArray> = emptyArray()): Array<ByteArray> = writer.withLock {
+                 generation: Long = epoch, leading: Array<ByteArray> = emptyArray(), overlap: Boolean = false,
+                 deadline: Long = System.nanoTime() + 15_000_000_000L): Array<ByteArray> = writer.withLock {
         require(payload.size >= 8 && length in 1..192 && resultOffset in 0 until length)
         val id = u32(payload, 4)
         require(id in 1..0xfffffffeL)
         require(leading.size <= 1 && leading.all { it.size in 11..4096 && unsigned(it[0]) == MESSAGE && unsigned(it[1]) == 6 })
-        val deadline = System.nanoTime() + 15_000_000_000L
         synchronized(monitor) {
             check(epoch == generation) { "Video query generation retired" }
             check(request == 0L) { "Video query already active" }
@@ -303,7 +377,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             pages.clear()
         }
         try {
-            val masks = send(leading + payload, targets, ingressLeft, generation, deadline)
+            val masks = send(leading + payload, targets, ingressLeft, generation, deadline, overlap)
             check(masks.take(leading.size).all { it == targets }) { "Paired NAL transport refused" }
             val accepted = masks.last()
             val sides = (1..2).filter { targets and it != 0 }

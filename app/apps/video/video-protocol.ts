@@ -4,6 +4,7 @@ export interface VideoBackend {
   exchange(payload: Uint8Array, bytes: number, targets: number, resultOffset: number): Promise<Uint8Array[]>;
   sendWindow(records: readonly Uint8Array[]): Promise<number[]>;
   sendPicture?(record: Uint8Array, metadata: Uint8Array): Promise<Uint8Array[]>;
+  sendPipeline?(records: readonly Uint8Array[], following: readonly (Uint8Array | null)[]): Promise<number[]>;
 }
 
 export const VIDEO = {
@@ -151,6 +152,30 @@ export class VideoProtocol {
     const masks = await this.backend.sendWindow(this.nalRecords(stream, first, nals));
     this.check();
     if (masks.length !== nals.length || masks.some((mask) => mask !== 3)) throw new Error("Paired NAL transport refused");
+  }
+  /** Only native transport pipelines; callers retain their granted NAL budget. */
+  async sendPipeline(stream: number, first: number, nals: readonly Uint8Array[],
+    following: readonly ({ordinal: number; nal: number; pts: number} | null)[]): Promise<number[]> {
+    if (!this.backend.sendPipeline || following.length !== nals.length) throw new Error("Video pipeline unavailable");
+    const records = this.nalRecords(stream, first, nals);
+    const commands: (Uint8Array | null)[] = [];
+    for (let i = 0; i < following.length; i++) {
+      const next = following[i];
+      if (!next) { commands.push(null); continue; }
+      if (next.nal !== first + i + 1) throw new Error("Metadata must describe the next NAL");
+      const raw = await this.header(VIDEO.metadata, 24);
+      put(raw, 8, stream); put(raw, 12, next.ordinal); put(raw, 16, next.nal); put(raw, 20, next.pts);
+      commands.push(raw);
+    }
+    const result = await this.backend.sendPipeline(records, commands);
+    this.check();
+    const [sent, admitted] = result;
+    const expected = commands.slice(0, sent).filter(Boolean).length;
+    if (result.length !== 2 || !Number.isInteger(sent) || sent < 1 || sent > records.length ||
+        !Number.isInteger(admitted) || admitted < 0 || admitted > expected ||
+        (admitted !== expected && (admitted !== expected - 1 || !commands[sent - 1])) ||
+        (sent < records.length && admitted === expected)) throw new Error("Invalid video pipeline completion");
+    return result;
   }
   /** Next-picture metadata may be busy; its NAL is never sent before acceptance. */
   async sendNalsWithMetadata(stream: number, first: number, nal: Uint8Array,

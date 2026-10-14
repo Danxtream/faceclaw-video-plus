@@ -266,8 +266,9 @@ test('START freshness accepts event-timer wrap but rejects epoch changes and dis
         }
         return rows;
       };
-      await assert.rejects(h.player.run(), mode === 'epoch' ? /failed=epoch.*epoch=41/ :
-        mode === 'disconnect' ? /failed=bound/ : mode === 'transport' ? /request timed out.*RIGHT link=1/ : /PHY read cancelled/);
+      if (mode === 'cancel') { await h.player.run(); assert.equal(h.player.view.error, null); }
+      else await assert.rejects(h.player.run(), mode === 'epoch' ? /failed=epoch.*epoch=41/ :
+        mode === 'disconnect' ? /failed=bound/ : /request timed out.*RIGHT link=1/);
       assert.equal(h.calls.some(row => Array.isArray(row) && row[0] === 'start'), false);
     }
   } finally { console.error = log; }
@@ -467,13 +468,17 @@ test('Bounded control queue refuses overflow and explicit STOP rejects outstandi
   assert.ok(!f.calls.some(row => Array.isArray(row) && row[0] === 'start'));
 });
 
-test('Paused seek previews do not sample ahead of available input credits', async () => {
+test('Paused seek previews report even when input credits remain available', async () => {
   const f = fixture(20), shown = f.protocol.shown;
-  f.onView = view => { if (view.position === 688 && view.active) f.player.stop(); };
+  let intent = false;
+  f.onView = view => {
+    if (view.position === 688 && view.active) f.player.stop();
+    else if (view.active && !intent) { intent = true; f.player.pause(true).catch(() => {}); }
+  };
   f.protocol.shown = async (...args) => {
     const generation = f.player.generation;
-    assert.ok(!generation.paused || generation.index === generation.count,
-      'This fake always grants four credits: a paused preview must send its input before passive sampling');
+    assert.ok(generation.index > 0 && generation.index < generation.count,
+      'Preview must not wait for every input NAL before reporting');
     return shown(...args);
   };
   await f.player.run(700, true).catch(error => {
@@ -481,4 +486,27 @@ test('Paused seek previews do not sample ahead of available input credits', asyn
   });
   assert.equal(f.player.view.position, 688);
   assert.equal(f.closed(), true);
+});
+
+test('Cancel during START PHY refresh is a clean cancel, not dirty host links', async () => {
+  const f = fixture(20), phy = f.protocol.phy;
+  f.protocol.phy = async () => {
+    const rows = await phy();
+    for (const row of rows) row[13] &= ~4;
+    f.player.stop();
+    return rows;
+  };
+  await f.player.run();
+  assert.equal(f.player.view.error, null);
+  assert.equal(f.player.view.cleanupFailed, false);
+  assert.ok(!f.calls.some(row => Array.isArray(row) && row[0] === 'start'));
+});
+
+test('Cancel during a NAL read still retires owners without reporting a source failure', async () => {
+  const f = fixture(20);
+  f.player.source.readNal = async () => { f.player.stop(); throw new Error('Video source closed'); };
+  await f.player.run();
+  assert.equal(f.player.view.error, null);
+  assert.equal(f.player.view.cleanupFailed, false);
+  assert.ok(f.calls.some(row => Array.isArray(row) && row[0] === 'status' && row[1] === VIDEO.stop));
 });

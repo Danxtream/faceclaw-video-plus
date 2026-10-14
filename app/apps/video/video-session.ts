@@ -64,7 +64,10 @@ export class VideoSession {
       // The engine owns source/audio from here, including failed START cleanup.
       source = null; audio = null;
       await this.engine.run(position);
-    } catch (error) { this.error = String(error); throw error; }
+    } catch (error) {
+      if (this.cancelled && !this.engine) return;
+      this.error = String(error); throw error;
+    }
     finally {
       try { source?.close(); }
       finally {
