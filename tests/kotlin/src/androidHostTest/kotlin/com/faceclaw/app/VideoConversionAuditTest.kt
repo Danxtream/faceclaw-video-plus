@@ -6,6 +6,34 @@ import kotlin.test.assertFails
 import kotlin.test.assertTrue
 
 class VideoConversionAuditTest {
+    @Test fun conversionAuditLeavesDecodingAndSecondProbeWithoutReportPrefix() {
+        for (initial in listOf(null, "")) {
+            var environment: String? = initial
+            val report = "file=/writable/conversion.log:level=32"
+            val json = "{\"frames\":[]}"
+            fun probe() = if (environment != null) "Failed to open report: Read-only file system\n$json" else json
+            withVideoReport(report, read = { environment }, write = { environment = it }, unset = { environment = null }) {
+                assertEquals(report, environment)
+            }
+            assertEquals(null, environment)
+            assertEquals(json, probe(), "Decoding audit must receive only JSON")
+            assertEquals(json, probe(), "A subsequent probe must receive only JSON")
+        }
+    }
+
+    @Test fun reportEnvironmentRestoresNonemptyValueAndUnsetsAfterAuditFailure() {
+        for (initial in listOf(null, "", "file=/writable/prior.log:level=16")) {
+            var environment: String? = initial
+            assertFails {
+                withVideoReport("file=/writable/conversion.log:level=32", read = { environment },
+                    write = { environment = it }, unset = { environment = null }) {
+                    error("Audit failed or cancelled")
+                }
+            }
+            assertEquals(initial?.takeIf { it.isNotEmpty() }, environment)
+        }
+    }
+
     private fun section(name: String, fields: Map<String, Long>): String = "[trace_headers @ test] $name\n" +
         fields.entries.joinToString("") { "[trace_headers @ test] 1 ${it.key} 101 = ${it.value}\n" }
     private val sps = linkedMapOf("profile_idc" to 66L, "max_num_ref_frames" to 1L, "pic_width_in_mbs_minus1" to 19L,

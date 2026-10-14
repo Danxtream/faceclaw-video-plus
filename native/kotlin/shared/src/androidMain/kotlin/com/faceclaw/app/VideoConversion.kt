@@ -1,5 +1,6 @@
 package com.faceclaw.app
 
+import android.system.Os
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.FFmpegKitConfig
 import com.arthenica.ffmpegkit.FFmpegSession
@@ -14,6 +15,16 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+
+/** Scope the process-wide report setting so subsequent probes retain JSON output. */
+internal fun <T> withVideoReport(report: String, read: () -> String? = { System.getenv("FFREPORT") },
+    write: (String) -> Unit = { check(FFmpegKitConfig.setEnvironmentVariable("FFREPORT", it) == 0) },
+    unset: () -> Unit = { Os.unsetenv("FFREPORT") }, block: () -> T): T {
+    require(report.isNotEmpty())
+    val previous = read()?.takeIf { it.isNotEmpty() }
+    try { write(report); return block() }
+    finally { if (previous == null) unset() else write(previous) }
+}
 
 /** A single native conversion job; no BLE, firmware, repair pass or auto-downrate. */
 class VideoConversion(private val input: File, private val deblocking: Boolean, private val overwrite: Boolean,
@@ -90,12 +101,10 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
             progress("auditing headers", 0.99)
             // FFmpeg's report logs to disk at INFO while stderr remains ERROR;
             // trace output does not accumulate in FFmpegKit's session history.
-            val oldReport = System.getenv("FFREPORT") ?: ""
-            check(FFmpegKitConfig.setEnvironmentVariable("FFREPORT", "file=${publication.report.path}:level=32") == 0)
-            try {
+            withVideoReport("file=${publication.report.path}:level=32") {
                 execute(arrayOf("-nostdin", "-report", "-v", "error", "-f", "h264", "-i", publication.candidate.path,
                     "-map", "0:v:0", "-c:v", "copy", "-bsf:v", "trace_headers", "-f", "null", "-"))
-            } finally { FFmpegKitConfig.setEnvironmentVariable("FFREPORT", oldReport) }
+            }
             val headerAudit = VideoHeaderAudit(deblocking)
             publication.report.bufferedReader().useLines { lines -> lines.forEach { checkActive(); headerAudit.accept(it + "\n") } }
             headerAudit.finish()
