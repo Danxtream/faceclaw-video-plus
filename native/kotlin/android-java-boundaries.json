@@ -3,6 +3,7 @@
     "reason": "BluetoothGatt, BluetoothLeScanner, Android callback threads",
     "files": [
       "com/faceclaw/app/FaceclawBleCommunicator.java",
+      "com/faceclaw/app/VideoTextureCacheGate.java",
       "com/faceclaw/app/FaceclawBleManager.java",
       "com/faceclaw/app/FaceclawDeviceDiscovery.java",
       "com/faceclaw/app/FaceclawDeviceInfoProbe.java",

@@ -38,6 +38,7 @@ export class VideoSession {
     this.notify();
     let source: Awaited<ReturnType<typeof openVideoSource>> | null = null;
     let audio: Awaited<ReturnType<typeof openVideoAudio>> | null = null;
+    let communicator: any = null;
     try {
       source = await openVideoSource(this.path, () => this.cancelled);
       if (this.cancelled) return;
@@ -46,6 +47,7 @@ export class VideoSession {
       else audio = silentVideoAudio;
       if (this.cancelled) return;
       const active = com.faceclaw.app.FaceclawBleCommunicator.getActive();
+      communicator = active;
       this.transportEpoch = Number(active?.getVideoTransport().getEpoch());
       this.engine = new VideoPlayback(createVideoProtocol(), source, audio, this.options, (view) => {
         this.view = view;
@@ -67,7 +69,10 @@ export class VideoSession {
       try { source?.close(); }
       finally {
         try { await audio?.close(); }
-        finally { this.opening = false; this.notify(); }
+        finally {
+          if (!this.view?.cleanupFailed) communicator?.finishVideoDisplay();
+          this.opening = false; this.notify();
+        }
       }
     }
   }

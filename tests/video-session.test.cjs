@@ -7,7 +7,8 @@ test('Session opens audited media before one supplied transport and counts only 
   const source = {clip: {source: {name: 'clip.mp4'}}, close: () => events.push('source-close')};
   const audio = {close: async () => events.push('audio-close')};
   const load = loader({com: {faceclaw: {app: {
-    FaceclawBleCommunicator: {getActive: () => ({isSessionReady: () => ready, getVideoTransport: () => ({getEpoch: () => epoch})})},
+    FaceclawBleCommunicator: {getActive: () => ({isSessionReady: () => ready, getVideoTransport: () => ({getEpoch: () => epoch}),
+      finishVideoDisplay: () => events.push('cache-resume')})},
     FaceclawBleManager: {recordDisplayFrameSent: () => events.push('copy')},
   }}}}, {
     '../../native/file-access': {statPath: () => ({isDirectory: false})},
@@ -34,6 +35,7 @@ test('Session opens audited media before one supplied transport and counts only 
   await assert.rejects(new VideoSession('other.h264', () => ({})).run(), /owns/);
   await assert.rejects(session.run(), /single use/);
   session.stop(); await running;
+  assert.equal(events.at(-1), 'cache-resume');
   assert.equal(session.ownsDisplay, false);
   assert.ok(changes >= 3);
   remove(); epoch++; assert.equal(activeVideoSession(), null);

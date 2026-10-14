@@ -120,16 +120,27 @@ export class VideoPlayback {
       catch (error) { throw this.startPhyError(`${String(error)}; ${waiting.join("; ")}`); }
     }
   }
-  private validateStatus(rows: VideoStatus[], stream?: number, tokens?: number[]): void {
-    if (rows.length !== 2 || rows.some((row, i) => row.result || row.error || row.state === 4 ||
-        (stream !== undefined && row.state !== 0 && row.stream !== stream) ||
-        (tokens && row.state !== 0 && row.token !== tokens[i]))) throw new Error("Video owner or decoder status failed");
+  private validateStatus(rows: VideoStatus[], operation: number = VIDEO.status, stream?: number, tokens?: number[]): void {
+    const name = Object.entries(VIDEO).find(([, value]) => value === operation)?.[0].toUpperCase() ?? "UNKNOWN";
+    const failures = rows.length === 2 ? [] : [`operation=${name}(${operation}) expected=2 lenses received=${rows.length}`];
+    rows.forEach((row, i) => {
+      if (row.result || row.error || row.state === 4 ||
+          (stream !== undefined && row.state !== 0 && row.stream !== stream) ||
+          (tokens && row.state !== 0 && row.token !== tokens[i]))
+        failures.push(`${i === 0 ? "LEFT" : "RIGHT"} operation=${name}(${operation}) result=${row.result}` +
+          ` state=${row.state} error=${row.error} stream=${row.stream} high=${row.high} token=${row.token}`);
+    });
+    if (failures.length) {
+      const message = `Video owner or decoder status failed: ${failures.join("; ")}`;
+      console.error(message);
+      throw new Error(message);
+    }
   }
   private async waitReady(stream: number): Promise<VideoStatus[]> {
     const deadline = this.clock() + 30_000;
     while (!this.stopping) {
       const rows = await this.protocol.status();
-      this.validateStatus(rows, stream);
+      this.validateStatus(rows, VIDEO.status, stream);
       if (rows.every((row) => row.state === 2 && row.token)) return rows;
       if (rows.some((row) => ![1, 2].includes(row.state)) || this.clock() > deadline) break;
       await this.sleep(20);
@@ -149,13 +160,13 @@ export class VideoPlayback {
     const oldPhy = await this.cleanStartPhy();
     const selection = this.options();
     await this.protocol.radioSelection(selection.radio);
-    this.validateStatus(await this.protocol.timeline(stream, this.source.clip.duration, this.source.clip.pictures[target].pts));
+    this.validateStatus(await this.protocol.timeline(stream, this.source.clip.duration, this.source.clip.pictures[target].pts), VIDEO.timeline);
     // Record the attempted stream before START so a partial admission gets STOP.
     this.generation = { stream, tokens: [], idr, target, prefix, firstNal, index: 0,
       count: prefix.length + this.source.clip.h264.nals.length - firstNal, metadata: 0,
       paused, reached: false, oldPhy, started: this.clock(), anchor: oldPhy, anchorAt: this.clock(),
       anchorUncertainty: 0, detailedReports: !!selection.detailedReports };
-    this.validateStatus(await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused), stream);
+    this.validateStatus(await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused), VIDEO.start, stream);
     const ready = await this.waitReady(stream);
     this.generation.tokens = ready.map((row) => row.token);
     const anchorBegin = this.clock();
@@ -186,7 +197,7 @@ export class VideoPlayback {
     try {
       before = videoOwnedSnapshot(generation.oldPhy, await this.phy());
     } catch (error) { before = generation.oldPhy; sampleFailure = error; }
-    this.validateStatus(await this.protocol.status(reset ? VIDEO.reset : VIDEO.stop, generation.stream));
+    this.validateStatus(await this.protocol.status(reset ? VIDEO.reset : VIDEO.stop, generation.stream), reset ? VIDEO.reset : VIDEO.stop);
     const deadline = this.clock() + 30_000;
     while (true) {
       const rows = await this.protocol.status();

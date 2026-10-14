@@ -265,6 +265,8 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
     // firmware frees the cache with the fb lease, and after any resync the
     // cheap safe assumption is an empty cache (glyphs re-upload lazily).
     private final TextureCacheState textureCache = new TextureCacheState();
+    private final VideoTextureCacheGate videoTextureCacheGate = new VideoTextureCacheGate(
+            this::enqueueVideoCacheLeaseLocked, textureCache::reset);
 
     private final ArrayDeque<OutboundMessage> pendingMessages = new ArrayDeque<>();
     private final CfwTransport[] cfwTransports = { new CfwTransport(AndroidProtocolPlatform.INSTANCE), new CfwTransport(AndroidProtocolPlatform.INSTANCE) };
@@ -1037,6 +1039,26 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
         return videoTransport;
     }
 
+    private void enqueueVideoCacheLeaseLocked(int operation, boolean left,
+            Runnable acknowledged, Runnable failed) {
+        OutboundMessage message = messageBuilder.faceclawFramebufferControl(operation, left);
+        message.onAck = acknowledged::run;
+        message.onTimeout = failed::run;
+        if (operation == BleProtocol.FACECLAW_FB_OP_ACQUIRE)
+            lastFaceclawFramebufferLeaseQueuedAtMs = SystemClock.elapsedRealtime();
+        pendingMessages.addLast(message);
+    }
+
+    /** Called only after successful video retirement, never after failed cleanup. */
+    public void finishVideoDisplay() {
+        synchronized (lock) {
+            videoTextureCacheGate.resume();
+            lastEnqueuedPacked = new byte[0];
+            lastEnqueuedFingerprint = "";
+        }
+        interruptibleSleep.interrupt();
+    }
+
     private boolean enqueueVideoRecord(VideoSubmission record) {
         synchronized (lock) {
             if (!running || !sessionReady || shutdownRequested || chargingMode || !fixedLayoutCreated
@@ -1046,7 +1068,13 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
             record.message = message;
             message.onAck = record::delivered;
             message.onTimeout = () -> record.failed("Video native ACK timeout");
-            pendingMessages.addLast(message);
+            if (record.payload.length >= 2 && record.payload[1] == 1) {
+                videoTextureCacheGate.prepare(() -> {
+                    if (record.epoch == videoTransport.getEpoch() && running && sessionReady)
+                        pendingMessages.addLast(message);
+                    else record.failed("Video cache preparation generation retired");
+                }, () -> record.failed("Video texture-cache lease transition failed"));
+            } else pendingMessages.addLast(message);
         }
         interruptibleSleep.interrupt();
         return true;
@@ -2448,8 +2476,10 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
                     // Up to WINDOW_SIZE messages may be in flight at once (full
                     // pipelining); a slot frees when an ack arrives. An active
                     // bandwidth benchmark measures its own selected window instead.
-                    boolean windowHasRoom = inFlightMessages.size()
-                            < Math.max(1, benchmarkActive ? benchmarkWindowSize : connectionOptions.WINDOW_SIZE);
+                    boolean windowHasRoom = videoTextureCacheGate.preparing()
+                            ? inFlightMessages.isEmpty()
+                            : inFlightMessages.size() < Math.max(1,
+                                benchmarkActive ? benchmarkWindowSize : connectionOptions.WINDOW_SIZE);
                     // A frame ready to send right now: don't inject a fresh
                     // heartbeat in front of it (the image's own ack resets the
                     // firmware heartbeat timer, so the heartbeat is redundant).
@@ -2994,7 +3024,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
         // ink out of the baked deltas. Uploads (mode 12) ride ahead of the
         // image message on the ordered transport. Falls through to the plain
         // paths whenever the planner has nothing to draw.
-        if (customFirmwareDetected && connectionOptions.TEXTURE_CACHE_FRAMES
+        if (customFirmwareDetected && !videoTextureCacheGate.suspended() && connectionOptions.TEXTURE_CACHE_FRAMES
                 && draws != null && draws.length > 0 && packed.length > 0) {
             byte[] deltaBase = (connectionOptions.INCREMENTAL_FRAMES && lastEnqueuedPacked.length > 0
                     && lastEnqueuedWidth == width && lastEnqueuedHeight == height)
@@ -3640,6 +3670,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
      */
     private void clearAllMessagesPreservingWakeLeaseLocked(String reason) {
         videoTransport.retire(reason);
+        videoTextureCacheGate.retire();
         Iterator<OutboundMessage> pendingIterator = pendingMessages.iterator();
         while (pendingIterator.hasNext()) {
             OutboundMessage message = pendingIterator.next();
@@ -3677,6 +3708,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
 
     private void clearPendingMessagesLocked(String reason) {
         videoTransport.retire(reason);
+        videoTextureCacheGate.retire();
         while (!pendingMessages.isEmpty()) {
             var message = pendingMessages.removeFirst();
             discardPrewriteIfMatchesLocked(message);
