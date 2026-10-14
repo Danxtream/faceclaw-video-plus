@@ -90,6 +90,11 @@ export class VideoProtocol {
     if (rows.some((row, index) => row[0] !== 1 || row[1] !== 21 || row[2] || row[3] !== index + 1 ||
         videoU32(row, 4) !== Number(enabled))) throw new Error("Video radio selection refused");
   }
+  async phy(): Promise<Uint8Array[]> {
+    const raw = this.header(7, 12);
+    raw[8] = 1;
+    return this.query(raw, 128);
+  }
   async start(stream: number, native: boolean, dither: boolean, radio: boolean, preroll = 0, paused = false): Promise<VideoStatus[]> {
     const raw = this.header(VIDEO.start, 24);
     if (!Number.isInteger(preroll) || preroll < 0 || preroll > 255) throw new Error("Unsupported seek preroll");
@@ -110,11 +115,13 @@ export class VideoProtocol {
     if (value !== undefined) put(raw, 20, value);
     return this.query(raw, length, 3, op === VIDEO.credits ? 5 : 2);
   }
-  async metadata(stream: number, ordinal: number, nal: number, pts: number): Promise<void> {
+  async metadata(stream: number, ordinal: number, nal: number, pts: number): Promise<boolean> {
     const raw = this.header(VIDEO.metadata, 24);
     put(raw, 8, stream); put(raw, 12, ordinal); put(raw, 16, nal); put(raw, 20, pts);
     const rows = await this.query(raw, 6, 3, 5);
-    if (rows.some((row) => row[5] || row[4] > 4 || videoU32(row, 0) !== ordinal)) throw new Error("Picture metadata refused");
+    if (rows.some((row) => ![0, 3].includes(row[5]) || row[4] > 4 || (!row[5] && videoU32(row, 0) !== ordinal)))
+      throw new Error("Picture metadata refused");
+    return rows.every((row) => !row[5]);
   }
   async shown(stream: number, token: number, lens: number, cursor = 0): Promise<Uint8Array> {
     const raw = this.header(VIDEO.shown, 20);
