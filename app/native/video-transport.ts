@@ -1,5 +1,6 @@
 import { VideoProtocol, type VideoBackend } from "../apps/video/video-protocol";
-import { getStringSetting, setStringSetting } from "./settings-store";
+import { getStringSetting } from "./settings-store";
+import { Utils } from "@nativescript/core";
 
 declare const com: any;
 
@@ -9,6 +10,8 @@ export function createVideoProtocol(ingressLeft = true): VideoProtocol {
   const active = com.faceclaw.app.FaceclawBleCommunicator.getActive();
   if (!active || !active.isSessionReady()) throw new Error("Glasses session is not ready");
   const transport = active.getVideoTransport();
+  const legacyNext = Number(getStringSetting("video.requestId", "1"));
+  const identities = new com.faceclaw.app.VideoIdentityAllocator(Utils.android.getApplicationContext(), legacyNext);
   async function collect(id: number): Promise<any> {
     const deadline = Date.now() + 30_000;
     while (Number(transport.pollOperation(id)) === 0) {
@@ -38,10 +41,9 @@ export function createVideoProtocol(ingressLeft = true): VideoProtocol {
       return collect(Number(transport.beginWindow(packet.buffer, 3, ingressLeft)));
     },
   };
-  return new VideoProtocol(backend, () => {
-    const stored = Number(getStringSetting("video.requestId", "1"));
-    if (!Number.isInteger(stored) || stored < 1 || stored >= 0xfffffffe) throw new Error("Video request ID exhausted");
-    setStringSetting("video.requestId", String(stored + 1));
-    return stored;
+  return new VideoProtocol(backend, async () => {
+    identities.beginReserve();
+    while (Number(identities.poll()) === 0) await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    return Number(identities.takeResult());
   });
 }

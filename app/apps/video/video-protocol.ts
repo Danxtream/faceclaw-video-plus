@@ -48,17 +48,18 @@ export function parseVideoStatus(raw: Uint8Array): VideoStatus {
 /** One serialized caller owns controls and uploads; requests survive exact replay. */
 export class VideoProtocol {
   readonly epoch: number;
-  constructor(private readonly backend: VideoBackend, private readonly reserve: () => number) {
+  constructor(private readonly backend: VideoBackend, private readonly reserve: () => number | Promise<number>) {
     this.epoch = backend.epoch();
   }
   private check(): void {
     if (this.backend.epoch() !== this.epoch) throw new Error("Video connection generation changed; restart at IDR");
   }
-  private header(op: number, bytes: number): Uint8Array {
+  private async header(op: number, bytes: number): Promise<Uint8Array> {
     this.check();
     const raw = new Uint8Array(bytes);
     raw.set([31, op, 1, 0]);
-    const id = this.reserve();
+    const id = await this.reserve();
+    this.check();
     if (!Number.isInteger(id) || id < 1 || id >= 0xffffffff) throw new Error("Video request ID exhausted");
     put(raw, 4, id);
     return raw;
@@ -72,31 +73,31 @@ export class VideoProtocol {
     return rows;
   }
   async status(op: number = VIDEO.status, stream = 0): Promise<VideoStatus[]> {
-    const raw = this.header(op, op === VIDEO.reset || op === VIDEO.stop ? 12 : 8);
+    const raw = await this.header(op, op === VIDEO.reset || op === VIDEO.stop ? 12 : 8);
     if (raw.length === 12) put(raw, 8, stream);
     return (await this.query(raw, op === VIDEO.status ? 192 : 128)).map(parseVideoStatus);
   }
   async capabilities(): Promise<void> {
     if ((await this.status(VIDEO.caps)).some((row) => row.result || row.error)) throw new Error("Video capabilities refused");
-    const rows = await this.query(this.header(VIDEO.playbackCaps, 8), 16);
+    const rows = await this.query(await this.header(VIDEO.playbackCaps, 8), 16);
     if (rows.some((row) => row[0] !== 1 || row[1] !== 13 || row[2] || row[3] !== 255 ||
       row[4] !== 2 || row[5] !== 16 || row[6] !== 255 || (row[7] & 7) !== 7 || (row[7] & ~31)))
       throw new Error("Paired queued playback controls are not supported");
   }
   async radioSelection(enabled: boolean): Promise<void> {
-    const raw = this.header(VIDEO.radio, 12);
+    const raw = await this.header(VIDEO.radio, 12);
     put(raw, 8, enabled ? 1 : 0);
     const rows = await this.query(raw, 24);
     if (rows.some((row, index) => row[0] !== 1 || row[1] !== 21 || row[2] || row[3] !== index + 1 ||
         videoU32(row, 4) !== Number(enabled))) throw new Error("Video radio selection refused");
   }
   async phy(): Promise<Uint8Array[]> {
-    const raw = this.header(7, 12);
+    const raw = await this.header(7, 12);
     raw[8] = 1;
     return this.query(raw, 128);
   }
   async start(stream: number, native: boolean, dither: boolean, radio: boolean, preroll = 0, paused = false): Promise<VideoStatus[]> {
-    const raw = this.header(VIDEO.start, 24);
+    const raw = await this.header(VIDEO.start, 24);
     if (!Number.isInteger(preroll) || preroll < 0 || preroll > 255) throw new Error("Unsupported seek preroll");
     put(raw, 8, stream);
     raw.set([64, 1, 192, 0, 1, 2, 4 | 8 | (native ? 1 : 0) | (dither ? 16 : 0) | (!radio ? 2 : 0) | (paused ? 32 : 0), preroll], 12);
@@ -104,19 +105,19 @@ export class VideoProtocol {
     return (await this.query(raw, 128)).map(parseVideoStatus);
   }
   async timeline(stream: number, duration: number, pts: number): Promise<VideoStatus[]> {
-    const raw = this.header(VIDEO.timeline, 24);
+    const raw = await this.header(VIDEO.timeline, 24);
     put(raw, 8, stream); put(raw, 12, duration); put(raw, 16, pts); raw[20] = 16; raw[22] = 1;
     return (await this.query(raw, 128)).map(parseVideoStatus);
   }
   async owned(op: number, stream: number, tokens: readonly number[], length: number, value?: number): Promise<Uint8Array[]> {
     if (tokens.length !== 2 || tokens.some((value) => !value)) throw new Error("Video owner token missing");
-    const raw = this.header(op, value === undefined ? 20 : 24);
+    const raw = await this.header(op, value === undefined ? 20 : 24);
     put(raw, 8, stream); put(raw, 12, tokens[0]); put(raw, 16, tokens[1]);
     if (value !== undefined) put(raw, 20, value);
     return this.query(raw, length, 3, op === VIDEO.credits ? 5 : 2);
   }
   async metadata(stream: number, ordinal: number, nal: number, pts: number): Promise<boolean> {
-    const raw = this.header(VIDEO.metadata, 24);
+    const raw = await this.header(VIDEO.metadata, 24);
     put(raw, 8, stream); put(raw, 12, ordinal); put(raw, 16, nal); put(raw, 20, pts);
     const rows = await this.query(raw, 6, 3, 5);
     if (rows.some((row) => ![0, 3].includes(row[5]) || row[4] > 4 || (!row[5] && videoU32(row, 0) !== ordinal)))
@@ -124,7 +125,7 @@ export class VideoProtocol {
     return rows.every((row) => !row[5]);
   }
   async shown(stream: number, token: number, lens: number, cursor = 0): Promise<Uint8Array> {
-    const raw = this.header(VIDEO.shown, 20);
+    const raw = await this.header(VIDEO.shown, 20);
     put(raw, 8, stream); put(raw, 12, token); put(raw, 16, cursor);
     const row = (await this.query(raw, 72, lens))[0];
     if (row[0] !== 1 || row[1] !== VIDEO.shown || (!row[2] &&

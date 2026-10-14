@@ -62,3 +62,13 @@ test('Queries require both lenses and durable nonwrapping request IDs', async ()
   const exhausted = new VideoProtocol({ epoch: () => 1 }, () => 0xffffffff);
   await assert.rejects(exhausted.status(VIDEO.caps), /exhausted/);
 });
+
+test('A durable reservation finishes before sending and epoch changes during it refuse the query', async () => {
+  let release, epoch = 1, sent = 0;
+  const protocol = new VideoProtocol({epoch: () => epoch, exchange: async () => {sent++; return [status(), status()];}},
+    () => new Promise(resolve => release = resolve));
+  const pending = protocol.status();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(sent, 0); epoch++; release(100);
+  await assert.rejects(pending, /generation/); assert.equal(sent, 0);
+});
