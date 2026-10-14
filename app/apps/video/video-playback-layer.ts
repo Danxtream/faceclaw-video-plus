@@ -10,12 +10,18 @@ import { type VideoOptions } from "./video-playback";
 export class VideoPlaybackLayer implements Layer {
   readonly session: VideoSession;
   private readonly unsubscribe: () => void;
+  private context: LayerContext | null = null;
   constructor(path: string, requestRender: () => void, options: () => VideoOptions = () => ({native: false, dither: false, radio: true}), position = 0) {
     this.session = new VideoSession(path, options);
-    this.unsubscribe = observeVideoSession(requestRender);
+    this.unsubscribe = observeVideoSession(() => {
+      if (!this.session.opening && this.session.view && !this.session.view.active && !this.session.view.error &&
+          this.context?.stack.topMatches((layer) => layer === this)) this.context.stack.pop();
+      requestRender();
+    });
     void this.session.run(position).catch((error) => { console.error("Video playback failed", error); requestRender(); });
   }
   paint(ctx: LayerContext): GrayImage {
+    this.context = ctx;
     const {width, height} = ctx.stack.getBaseSize();
     const image = new GrayImage(width, height, 0), font = getDefaultSmallFont();
     image.drawText(font, 20, 8, "Video", 220);

@@ -22,6 +22,7 @@ import {
   type AsrModelId,
 } from "../../native/asr-model";
 import { TextViewerLayer } from "../../apps/files/text-viewer";
+import { videoSettingsMenuItems } from "../../apps/video/video-settings";
 import type { LayerContext } from "../layers";
 import { drawRightValueMenuItem, openModalMenu, type MenuItem } from "../menu";
 import { shell } from "../shell/shell";
@@ -241,7 +242,7 @@ function settingsSections(): SettingsSection[] {
       ],
     },
   ];
-  if (!global.isIOS) return sections;
+  if (!global.isIOS) { sections.push({label: "Video", items: videoSettingsMenuItems()}); return sections; }
   const deferred = new Set(["Navigate", "Watch"]);
   return sections.map(section => {
     if (section.label === "Developer") return { ...section, items: [toggleSettingMenuItem(showBleBandwidthSetting)] };

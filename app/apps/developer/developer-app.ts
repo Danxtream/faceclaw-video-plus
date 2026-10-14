@@ -172,7 +172,7 @@ export function createDeveloperAppWindow(appContext: AppContext, options: InProc
     submitFrame: options.submitFrame,
     setSurfaceVisible: options.setSurfaceVisible,
     removeSurface: options.removeSurface,
-    onClosed: () => { activeVideoSession()?.stop(); options.onClosed(); },
+    onClosed: options.onClosed,
   });
   return created;
 }

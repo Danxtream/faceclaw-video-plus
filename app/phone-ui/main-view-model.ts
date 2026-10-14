@@ -899,6 +899,9 @@ export class MainViewModel extends Observable {
   onConversationsTap(): void {
     Frame.topmost()?.navigate("phone-ui/conversations-page");
   }
+  onVideoTap(): void { Frame.topmost()?.navigate("phone-ui/video-page"); }
+  onConvertVideoTap(): void { Frame.topmost()?.navigate({moduleName: "phone-ui/video-page", context: {tab: 2}}); }
+  get videoMenuVisibility(): "visible" | "collapse" { return global.isAndroid ? "visible" : "collapse"; }
 
   /**
    * Preview-only users have no glasses paired, so the Connect and Uninstall

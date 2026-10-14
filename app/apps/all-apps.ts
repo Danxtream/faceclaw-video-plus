@@ -5,6 +5,7 @@ import timerApp from "./timer";
 import calculatorApp from "./calculator";
 import terminalApp from "./terminal";
 import filesApp from "./files";
+import videoApp from "./video";
 import musicApp from "./music";
 import nightscoutApp from "./nightscout";
 import transcribeApp from "./transcribe";
@@ -38,6 +39,7 @@ export const ALL_APPS: readonly AppDefinition[] = [
   calculatorApp,
   terminalApp,
   filesApp,
+  videoApp,
   musicApp,
   nightscoutApp,
   transcribeApp,

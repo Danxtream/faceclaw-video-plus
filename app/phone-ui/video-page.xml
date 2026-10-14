@@ -1,0 +1,57 @@
+<Page xmlns="http://schemas.nativescript.org/tns.xsd" navigatingTo="navigatingTo" loaded="loaded" unloaded="unloaded">
+  <ActionBar title="Video">
+    <NavigationButton text="Back" tap="{{ onBackTap }}" android.systemIcon="ic_menu_back" />
+  </ActionBar>
+  <GridLayout rows="auto,auto,*" class="p-8">
+    <Button row="0" text="File access" tap="{{ onAccessTap }}" visibility="{{ accessVisibility }}" />
+    <Label row="1" text="{{ status }}" textWrap="true" />
+    <TabView row="2" selectedIndex="{{ tab }}">
+      <TabViewItem title="Library">
+        <ListView items="{{ videos }}" separatorColor="#bbbbbb">
+          <ListView.itemTemplate>
+            <GridLayout columns="*,auto" rows="auto" class="p-8">
+              <Label col="0" text="{{ name }}" textWrap="true" verticalAlignment="center" />
+              <Button col="1" text="&#x25B6;" width="48" height="48" accessibilityLabel="Play video" tap="{{ play }}" />
+            </GridLayout>
+          </ListView.itemTemplate>
+        </ListView>
+      </TabViewItem>
+      <TabViewItem title="Remote">
+        <ScrollView><StackLayout class="p-16">
+          <Label text="{{ title }}" textWrap="true" class="h2" />
+          <Label text="{{ timeLabel }}" />
+          <Slider minValue="0" maxValue="{{ duration }}" value="{{ position }}" valueChange="{{ onSeekChange }}" isEnabled="{{ canControl }}" />
+          <GridLayout columns="*,*,*,*" rows="auto">
+            <Button col="0" text="-30" tap="{{ onBack30Tap }}" isEnabled="{{ canControl }}" />
+            <Button col="1" text="-10" tap="{{ onBack10Tap }}" isEnabled="{{ canControl }}" />
+            <Button col="2" text="+10" tap="{{ onForward10Tap }}" isEnabled="{{ canControl }}" />
+            <Button col="3" text="+30" tap="{{ onForward30Tap }}" isEnabled="{{ canControl }}" />
+          </GridLayout>
+          <GridLayout columns="*,*" rows="auto">
+            <Button col="0" text="{{ playSymbol }}" height="48" accessibilityLabel="Play or pause" tap="{{ onToggleTap }}" isEnabled="{{ canControl }}" />
+            <Button col="1" text="&#x25A0;" height="48" accessibilityLabel="Stop video" tap="{{ onStopTap }}" isEnabled="{{ active }}" />
+          </GridLayout>
+          <GridLayout columns="*,auto" rows="auto">
+            <TextField col="0" text="{{ timeEntry }}" hint="Time" autocorrect="false" />
+            <Button col="1" text="&#x2192;" width="48" height="48" accessibilityLabel="Seek to time" tap="{{ onTimeTap }}" isEnabled="{{ canControl }}" />
+          </GridLayout>
+          <Label text="Video size" /><SegmentedBar selectedIndex="{{ scaleIndex }}" selectedIndexChanged="{{ onScaleChange }}"><SegmentedBarItem title="Native" /><SegmentedBarItem title="2x" /></SegmentedBar>
+          <Label text="2M radio" /><SegmentedBar selectedIndex="{{ radioIndex }}" selectedIndexChanged="{{ onRadioChange }}"><SegmentedBarItem title="Off" /><SegmentedBarItem title="Video-only" /></SegmentedBar>
+          <Label text="{{ radioLabel }}" textWrap="true" />
+          <GridLayout rows="auto" columns="*,auto"><Label col="0" text="Dithering" verticalAlignment="center" /><Switch col="1" checked="{{ dither }}" checkedChange="{{ onDitherChange }}" /></GridLayout>
+          <Label text="{{ fpsLabel }}" textWrap="true" /><Label text="{{ audioLabel }}" />
+        </StackLayout></ScrollView>
+      </TabViewItem>
+      <TabViewItem title="Convert">
+        <GridLayout rows="auto,auto,auto,*" class="p-8">
+          <GridLayout row="0" columns="*,auto" rows="auto"><Label col="0" text="Deblocking filter" verticalAlignment="center" /><Switch col="1" checked="{{ deblocking }}" checkedChange="{{ onDeblockingChange }}" /></GridLayout>
+          <Label row="1" text="{{ conversionStatus }}" textWrap="true" />
+          <GridLayout row="2" columns="*,auto" rows="auto"><Progress col="0" maxValue="100" value="{{ progress }}" verticalAlignment="center" /><Button col="1" text="Cancel" tap="{{ onCancelTap }}" visibility="{{ cancelVisibility }}" /></GridLayout>
+          <ListView row="3" items="{{ sources }}">
+            <ListView.itemTemplate><GridLayout rows="auto" columns="*,auto" class="p-8"><Label col="0" text="{{ name }}" textWrap="true" verticalAlignment="center" /><Button col="1" text="Convert" tap="{{ convert }}" /></GridLayout></ListView.itemTemplate>
+          </ListView>
+        </GridLayout>
+      </TabViewItem>
+    </TabView>
+  </GridLayout>
+</Page>

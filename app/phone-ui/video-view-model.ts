@@ -1,0 +1,140 @@
+import { Dialogs, Frame, Observable } from "@nativescript/core";
+import { dashboardController } from "../g2/dashboard-controller";
+import { hasAllFilesAccess, requestAllFilesAccess, statPath, type DirectoryEntry } from "../native/file-access";
+import { ensureG2VideoDirectory, listG2Videos, listG2ConversionSources, resolveG2H264Path, g2VideoMetadataPath } from "../native/g2-video-library";
+import { convertVideo, cancelVideoConversion, videoConversionState } from "../native/video-converter";
+import { openPhoneVideo } from "../apps/video";
+import { activeVideoSession, observeVideoSession } from "../apps/video/video-session";
+import { videoRadioSetting, videoScaleSetting, videoDitherSetting, videoDeblockingSetting } from "../apps/video/video-settings";
+
+/** Strict remote time input, with no changes to the source's fixed frame cadence. */
+export function parseVideoTime(text: string): number {
+  const parts = text.trim().split(":");
+  if (parts.length > 3 || !parts.length || parts.some((part) => !/^\d+$/.test(part)) ||
+      parts.slice(1).some((part) => Number(part) >= 60)) throw new Error("Enter seconds, mm:ss or hh:mm:ss");
+  const seconds = parts.reduce((total, part) => total * 60 + Number(part), 0);
+  if (!Number.isSafeInteger(seconds) || seconds * 1000 > 0xfffffffe) throw new Error("Invalid video time");
+  return seconds * 1000;
+}
+export function formatVideoTime(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const minutes = Math.floor(seconds / 60), tail = String(seconds % 60).padStart(2, "0");
+  return minutes >= 60 ? `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}:${tail}` : `${minutes}:${tail}`;
+}
+
+/** Library, converter and remote reuse the single Video session and native job. */
+export class VideoViewModel extends Observable {
+  private unsubscribers: Array<() => void> = [];
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private busy = false;
+  private seekTimer: ReturnType<typeof setTimeout> | null = null;
+  private refreshing = false;
+  private libraryStamp: string | null = null;
+  private programmaticPosition = 0;
+  constructor(tab = 0) { super(); this.set("tab", tab); this.set("status", ""); this.set("timeEntry", "0:00"); this.refresh(); }
+  attach(): void {
+    if (this.timer !== null) return;
+    this.unsubscribers.push(observeVideoSession(() => this.refresh()));
+    this.unsubscribers.push(dashboardController.subscribe((snapshot) => { this.set("connected", snapshot.phase === "connected"); }));
+    this.timer = setInterval(() => this.refresh(), 500); this.refresh();
+  }
+  dispose(): void {
+    for (const remove of this.unsubscribers.splice(0)) remove();
+    if (this.timer !== null) clearInterval(this.timer); this.timer = null;
+    if (this.seekTimer !== null) clearTimeout(this.seekTimer); this.seekTimer = null;
+  }
+  private refresh(): void {
+    this.refreshing = true;
+    try {
+      const access = hasAllFilesAccess();
+      this.set("accessVisibility", access ? "collapse" : "visible");
+      if (access) {
+        ensureG2VideoDirectory();
+        const videos = listG2Videos(), sources = listG2ConversionSources();
+        const stamp = [...videos, ...sources].map((entry) => `${entry.path}:${entry.modifiedMs}:${entry.sizeBytes}`).join(";");
+        if (stamp !== this.libraryStamp) {
+        this.libraryStamp = stamp;
+        this.set("videos", videos.filter((entry) => !entry.isDirectory).map((entry) => ({
+          name: entry.name, entry, play: () => void this.play(entry),
+        })));
+        this.set("sources", sources.map((entry) => ({name: entry.name, entry, convert: () => void this.convert(entry)})));
+        }
+      } else { this.libraryStamp = null; this.set("videos", []); this.set("sources", []); }
+      const session = activeVideoSession(), view = session?.view;
+      this.set("active", !!view?.active); this.set("canControl", !!view?.active && !this.busy);
+      this.set("title", session?.path.split(/[/\\]/).pop() ?? "Video");
+      this.set("playSymbol", view?.paused ? "\u25b6" : "\u23f8");
+      this.programmaticPosition = view?.position ?? 0;
+      this.set("position", this.programmaticPosition); this.set("duration", view?.duration ?? 1);
+      this.set("timeLabel", `${formatVideoTime(view?.position ?? 0)} / ${formatVideoTime(view?.duration ?? 0)}`);
+      this.set("fpsLabel", view?.fps === null || view?.fps === undefined ? "Copied fps: --" : `Copied ${view.fps.toFixed(1)} fps (${view.intervals} intervals)`);
+      this.set("audioLabel", session ? session.hasAudio ? "MP4 audio" : "Silent" : "");
+      this.set("radioIndex", videoRadioSetting.get() === "video" ? 1 : 0);
+      this.set("scaleIndex", videoScaleSetting.get() === "native" ? 0 : 1);
+      this.set("dither", videoDitherSetting.get()); this.set("deblocking", videoDeblockingSetting.get());
+      this.set("radioLabel", `Selected: ${videoRadioSetting.displayValue()} / Confirmed: ${view?.hostPhy ?? "Unknown"}`);
+      const conversion = videoConversionState();
+      this.set("conversionRunning", conversion.running); this.set("progress", conversion.progress * 100);
+      this.set("conversionStatus", conversion.error ?? conversion.stage);
+      this.set("cancelVisibility", conversion.running ? "visible" : "collapse");
+      if (session?.error || view?.error) this.set("status", session?.error ?? view?.error);
+    } catch (error) { this.set("status", String(error)); }
+    finally { this.refreshing = false; }
+  }
+  private async action(command: () => Promise<void>): Promise<void> {
+    if (this.busy) return;
+    this.busy = true; this.refresh();
+    try { await command(); } catch (error) { this.set("status", String(error)); }
+    finally { this.busy = false; this.refresh(); }
+  }
+  private async play(entry: DirectoryEntry): Promise<void> {
+    await this.action(async () => {
+      const path = resolveG2H264Path(entry.path);
+      if (!path) throw new Error("No converted H.264 stream");
+      await dashboardController.openVideoWindow(); await openPhoneVideo(path); this.set("tab", 1);
+    });
+  }
+  private async convert(entry: DirectoryEntry): Promise<void> {
+    const existing = resolveG2H264Path(entry.path) !== null || statPath(g2VideoMetadataPath(entry.path)) !== null;
+    if (existing && !await Dialogs.confirm({title: "Replace converted video?", message: entry.name, okButtonText: "Replace", cancelButtonText: "Cancel"})) return;
+    try { convertVideo(entry.path, videoDeblockingSetting.get(), existing); this.refresh(); }
+    catch (error) { this.set("status", String(error)); }
+  }
+  onAccessTap(): void { requestAllFilesAccess(); }
+  onBackTap(): void { Frame.topmost()?.goBack(); }
+  onCancelTap(): void { cancelVideoConversion(); }
+  onToggleTap(): void { void this.action(async () => { const player = activeVideoSession()?.engine; if (player) await player.pause(!player.view.paused); }); }
+  onStopTap(): void { activeVideoSession()?.stop(); }
+  private jump(delta: number): void { void this.action(async () => { const player = activeVideoSession()?.engine; if (player) await player.seek(player.view.position + delta); }); }
+  onBack30Tap(): void { this.jump(-30_000); }
+  onBack10Tap(): void { this.jump(-10_000); }
+  onForward10Tap(): void { this.jump(10_000); }
+  onForward30Tap(): void { this.jump(30_000); }
+  onTimeTap(): void { void this.action(async () => { const player = activeVideoSession()?.engine; if (player) await player.seek(parseVideoTime(String(this.get("timeEntry")))); }); }
+  onSeekChange(args: {value?: number; object?: {value?: number}}): void {
+    if (this.refreshing) return;
+    const value = Number(args.object?.value ?? args.value);
+    if (!Number.isFinite(value)) return;
+    if (Math.abs(value - this.programmaticPosition) < 1) return;
+    if (this.seekTimer !== null) clearTimeout(this.seekTimer);
+    this.seekTimer = setTimeout(() => { this.seekTimer = null; void this.action(async () => { await activeVideoSession()?.engine?.seek(value); }); }, 200);
+  }
+  onScaleChange(args: {object?: {selectedIndex?: number}}): void {
+    if (this.refreshing) return;
+    const native = args.object?.selectedIndex === 0;
+    if ((videoScaleSetting.get() === "native") === native) return;
+    videoScaleSetting.set(native ? "native" : "2x");
+    void this.action(async () => { await activeVideoSession()?.engine?.scale(native); });
+  }
+  onRadioChange(args: {object?: {selectedIndex?: number}}): void {
+    if (this.refreshing) return;
+    const value = args.object?.selectedIndex === 0 ? "off" : "video";
+    if (videoRadioSetting.get() !== value) videoRadioSetting.set(value);
+  }
+  onDitherChange(args: {object?: {checked?: boolean}}): void {
+    if (!this.refreshing && videoDitherSetting.get() !== !!args.object?.checked) videoDitherSetting.set(!!args.object?.checked);
+  }
+  onDeblockingChange(args: {object?: {checked?: boolean}}): void {
+    if (!this.refreshing && videoDeblockingSetting.get() !== !!args.object?.checked) videoDeblockingSetting.set(!!args.object?.checked);
+  }
+}

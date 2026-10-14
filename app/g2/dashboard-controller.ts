@@ -2341,6 +2341,8 @@ class DashboardController {
     }
     this.appendLog(`unknown app: ${appId}`);
   }
+  /** Phone Video uses the same authenticated display/app session, never a new connection. */
+  async openVideoWindow(): Promise<void> { await this.launchApp("video"); }
 
   private async uninstallApp(appId: string): Promise<void> {
     const packageId = installedEvenHubPackageId(appId);

@@ -75,11 +75,15 @@ for (const isIOS of [true, false]) {
     } });
     const menus = load('app/ui/dashboard/settings-menus.ts', { global: { isIOS }, require: id => {
       if (id === '../dashboard-settings') return settings;
+      if (id === '../../apps/video/video-settings') return load('app/apps/video/video-settings.ts', {
+        global: {isIOS}, require: dep => dep === '../../ui/dashboard-settings' ? settings : {},
+      });
       if (id === './settings-panel') return { SettingsPanelLayer: class { constructor(sections) { this.sections = sections; } } };
       return { LOCAL_MODEL: { sizeBytes: 1000 }, ASR_MODELS: { moonshine: {}, 'whisper-base-en': {} },
         uiFontPickerMenuItem: () => ({ label: 'Font' }), terminalFontPickerMenuItem: () => ({ label: 'Terminal font' }) };
     } });
     const sections = menus.createSettingsPanelLayer().sections;
+    assert.equal(sections.some(section => section.label === 'Video'), !isIOS);
     assert.ok(sections.find(section => section.label === 'Display').items.some(item => item.label === settings.lockScreenEnabledSetting.label));
     const assistant = sections.find(section => section.label === 'Assistant');
     assert.equal(assistant.items.some(item => item.disabled === true), false);

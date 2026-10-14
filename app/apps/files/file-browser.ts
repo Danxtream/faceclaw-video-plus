@@ -79,6 +79,9 @@ function fileIconName(name: string): IconName {
 }
 
 export type FileBrowserOptions = {
+  title?: string;
+  rootPath?: string;
+  includeEntry?: (entry: DirectoryEntry) => boolean;
   /** Files failing this are listed dimmed (not viewable); picking them still fires onFilePicked. */
   isSupportedFile: (name: string) => boolean;
   onFilePicked: (entry: DirectoryEntry, ctx: LayerContext) => void;
@@ -139,7 +142,11 @@ export class FileBrowserLayer implements Layer {
   private iconMode: IconMode = "row";
   private scrollRow = 0;
 
-  constructor(private readonly options: FileBrowserOptions) {}
+  constructor(private readonly options: FileBrowserOptions) {
+    if (options.rootPath) { this.location = options.rootPath; this.navRoot = options.rootPath; }
+  }
+  /** Refresh a library after background conversion without changing Files defaults. */
+  refreshEntries(): void { this.entries = null; }
 
   paint(ctx: LayerContext): GrayImage {
     const font = getDefaultSmallFont();
@@ -147,9 +154,10 @@ export class FileBrowserLayer implements Layer {
     const image = new GrayImage(width, height, 0);
     const rows = this.flatRows();
 
-    image.drawText(font, 20, 8, "Files", 220);
+    const title = this.options.title ?? "Files";
+    image.drawText(font, 20, 8, title, 220);
     const pathLabel = this.location === null ? "Places" : this.location;
-    const pathX = 20 + font.measureText("Files") + 14;
+    const pathX = 20 + font.measureText(title) + 14;
     image.drawText(font, pathX, 8, truncateLeft(font, pathLabel, width - pathX - 20), 130);
 
     if (filesViewModeSetting.get() === "list") {
@@ -530,6 +538,7 @@ export class FileBrowserLayer implements Layer {
 
   private navigateUp(): void {
     const from = this.location;
+    if (this.options.rootPath && from === this.options.rootPath) { this.options.onLeave(); return; }
     if (from === null) {
       this.options.onLeave();
       return;
@@ -650,7 +659,7 @@ export class FileBrowserLayer implements Layer {
     if (this.entries !== null || this.location === null) return;
     const listing = listDirectory(this.location);
     this.listingFailed = listing === null;
-    this.entries = listing ?? [];
+    this.entries = (listing ?? []).filter((entry) => this.options.includeEntry?.(entry) ?? true);
   }
 }
 

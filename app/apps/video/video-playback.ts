@@ -16,6 +16,7 @@ export type VideoPlaybackView = {
   position: number; duration: number; fps: number | null; intervals: number;
   lostReports: number; audioUncertainty: number | null; error: string | null;
   cleanupFailed: boolean;
+  hostPhy: string;
 };
 type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy">;
 type Intent = { kind: "pause" | "seek" | "scale" | "menu"; value: number | boolean; resolve: () => void; reject: (error: unknown) => void };
@@ -42,7 +43,7 @@ export class VideoPlayback {
     private readonly clock: () => number = () => Date.now(),
     private readonly sleep: (milliseconds: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms))) {
     this.view = { active: false, paused: false, menuOpen: false, selection: 0, native: false, position: 0,
-      duration: source.clip.duration, fps: null, intervals: 0, lostReports: 0, audioUncertainty: null, error: null, cleanupFailed: false };
+      duration: source.clip.duration, fps: null, intervals: 0, lostReports: 0, audioUncertainty: null, error: null, cleanupFailed: false, hostPhy: "Unknown" };
   }
   private notify(): void { this.changed({ ...this.view }); }
   private enqueue(kind: Intent["kind"], value: Intent["value"]): Promise<void> {
@@ -234,6 +235,9 @@ export class VideoPlayback {
     const picture = this.source.clip.pictures[g.idr + left.ordinal - 1];
     if (!picture || picture.pts !== left.pts || g.idr + left.ordinal - 1 < g.target) throw new Error("Shown picture does not match audited seek timeline");
     const phy = await this.phy();
+    const pairs = phy[0].links.filter((link) => link.bound && link.valid).map((link) =>
+      `${["", "1M", "2M", "Coded"][link.current & 255]}/${["", "1M", "2M", "Coded"][link.current >>> 8]}`);
+    this.view.hostPhy = pairs.length ? [...new Set(pairs)].join(", ") : "Unknown";
     const captures = [left, right];
     const ages = captures.map((row, i) => videoTickSpan(phy[i].tick, row.copyTick));
     g.reached = true;
