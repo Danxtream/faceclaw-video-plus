@@ -268,6 +268,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
 
     private final ArrayDeque<OutboundMessage> pendingMessages = new ArrayDeque<>();
     private final CfwTransport[] cfwTransports = { new CfwTransport(AndroidProtocolPlatform.INSTANCE), new CfwTransport(AndroidProtocolPlatform.INSTANCE) };
+    private final FaceclawVideoTransport videoTransport = new FaceclawVideoTransport(this::enqueueVideoRecord);
     private final ArrayDeque<OutboundMessage> inFlightMessages = new ArrayDeque<>();
     private OutboundMessage prewrittenMessage;
     private List<byte[]> prewrittenFrames = Collections.emptyList();
@@ -1031,6 +1032,26 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
         return activeInstance;
     }
 
+    /** Video uses this session's existing queue, connection and compression history. */
+    public FaceclawVideoTransport getVideoTransport() {
+        return videoTransport;
+    }
+
+    private boolean enqueueVideoRecord(VideoSubmission record) {
+        synchronized (lock) {
+            if (!running || !sessionReady || shutdownRequested || chargingMode || !fixedLayoutCreated
+                    || record.epoch != videoTransport.getEpoch()) return false;
+            OutboundMessage message = messageBuilder.customMessage(
+                "video", record.payload, "video record", -1, record.ingressLeft);
+            record.message = message;
+            message.onAck = record::delivered;
+            message.onTimeout = () -> record.failed("Video native ACK timeout");
+            pendingMessages.addLast(message);
+        }
+        interruptibleSleep.interrupt();
+        return true;
+    }
+
     /** Set the compositor's output frame size. Call before configuring surfaces. */
     public void configureCompositorScreen(int width, int height) {
         compositor.configureScreen(width, height);
@@ -1660,6 +1681,19 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
         if (!BleProtocol.NOTIFY_CHAR_UUID.equals(uuid)) {
             return;
         }
+        if (address.equalsIgnoreCase(leftAddress) || address.equalsIgnoreCase(rightAddress)) {
+            boolean videoPage = videoTransport.receive(address.equalsIgnoreCase(leftAddress), data);
+            synchronized (lock) {
+                for (VideoCompletion completion : videoTransport.drainCompleted()) {
+                    if (completion.epoch == videoTransport.getEpoch()
+                            && completion.message.magic == completion.attempt
+                            && inFlightMessages.contains(completion.message)) {
+                        resolveAckLocked(completion.message, data);
+                    }
+                }
+            }
+            if (videoPage) { interruptibleSleep.interrupt(); return; }
+        }
         if (data.length >= 7 && (data[6] & 255) == CfwTransport.SID) {
             CfwTransport.Ack[] acks = CfwTransport.parseAcks(data);
             if (acks == null) return;
@@ -1667,6 +1701,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
                 lastIncomingAtMs = SystemClock.elapsedRealtime();
                 for (CfwTransport.Ack ack : acks) {
                     for (OutboundMessage message : inFlightMessages) {
+                        if ("video".equals(message.kind)) continue;
                         String ingress = message.isLeftArmMessage ? leftAddress : rightAddress;
                         if (message.sid == CfwTransport.SID && address.equalsIgnoreCase(ingress) && message.magic == ack.streamId) {
                             message.acceptCfwAck(ack);
@@ -2610,7 +2645,8 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
         } else if (message.sid == CfwTransport.SID) {
             if (message.cfwRetries > 0) cfwTransports[message.isLeftArmMessage ? 0 : 1].reset();
             frames = cfwTransports[message.isLeftArmMessage ? 0 : 1].encode(
-                    message.message, message.magic, CfwTransport.BOTH,
+                    message.message, message.magic,
+                    "video".equals(message.kind) ? videoTransport.targetsFor(message) : CfwTransport.BOTH,
                     bleManager.getNegotiatedMtu(writeAddress));
         } else {
             frames = BleProtocol.framePb(
@@ -3603,6 +3639,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
      * direct prelude write.
      */
     private void clearAllMessagesPreservingWakeLeaseLocked(String reason) {
+        videoTransport.retire(reason);
         Iterator<OutboundMessage> pendingIterator = pendingMessages.iterator();
         while (pendingIterator.hasNext()) {
             OutboundMessage message = pendingIterator.next();
@@ -3639,6 +3676,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
     }
 
     private void clearPendingMessagesLocked(String reason) {
+        videoTransport.retire(reason);
         while (!pendingMessages.isEmpty()) {
             var message = pendingMessages.removeFirst();
             discardPrewriteIfMatchesLocked(message);
