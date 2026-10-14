@@ -73,6 +73,26 @@ export function parseVideoPhy(raw: Uint8Array, lens: number): VideoPhy {
   return { lens, tick: videoU32(raw, 4), links };
 }
 
+/** Check every bound host link, including the bridge peer's lease-only link. */
+export function videoLive(before: readonly VideoPhy[], after: readonly VideoPhy[]): void {
+  for (let side = 0; side < 2; side++) for (let i = 0; i < 3; i++) {
+    const old = before[side].links[i], now = after[side].links[i];
+    if ((old.bound || now.bound) && (!now.bound || !now.connected || !now.valid ||
+        now.epoch !== old.epoch || now.pending || now.uncertain || now.status ||
+        [5, 6, 7, 9].includes(now.phase))) throw new Error("Video host link health or generation changed");
+  }
+}
+
+/** Retain original-pair evidence after firmware clears lifecycle ownership. */
+export function videoOwnedSnapshot(before: readonly VideoPhy[], after: readonly VideoPhy[]): VideoPhy[] {
+  return after.map((side, s) => ({ ...side, links: side.links.map((link, i) => {
+    const old = before[s].links[i];
+    if (old.bound && (!link.bound || link.epoch !== old.epoch))
+      throw new Error("Video link generation changed before retirement");
+    return old.owners || old.permission ? old : link;
+  }) }));
+}
+
 /** Every old bound link must survive; every lifecycle-owned original pair returns. */
 export function videoRestored(before: readonly VideoPhy[], after: readonly VideoPhy[]): boolean {
   let ready = true;

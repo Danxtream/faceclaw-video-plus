@@ -1,6 +1,6 @@
 import { videoSeekPoint, type VideoSource } from "./video-clip";
 import { VIDEO, VideoProtocol, videoU32, type VideoStatus } from "./video-protocol";
-import { parsePlayback, parseShown, parseVideoPhy, videoRestored, videoTickSpan, videoCopyRate,
+import { parsePlayback, parseShown, parseVideoPhy, videoRestored, videoLive, videoOwnedSnapshot, videoTickSpan, videoCopyRate,
   type VideoPhy, type VideoShown, type VideoPlaybackState } from "./video-observations";
 
 /** Audio stays on the phone's existing media route; all methods are asynchronous. */
@@ -101,7 +101,9 @@ export class VideoPlayback {
     this.validateStatus(await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused), stream);
     const ready = await this.waitReady(stream);
     this.generation.tokens = ready.map((row) => row.token);
-    this.generation.oldPhy = await this.phy();
+    const ownedPhy = await this.phy();
+    videoLive(oldPhy, ownedPhy);
+    this.generation.oldPhy = videoOwnedSnapshot(oldPhy, ownedPhy);
     this.view.native = selection.native;
     this.view.paused = paused;
     this.copyFirst = this.copyPrevious = null;
@@ -118,11 +120,7 @@ export class VideoPlayback {
     let before = generation.oldPhy;
     let sampleFailure: unknown = null;
     try {
-      before = await this.phy();
-      for (let side = 0; side < 2; side++) for (let i = 0; i < 3; i++) {
-        const old = generation.oldPhy[side].links[i], now = before[side].links[i];
-        if (old.bound && (!now.bound || now.epoch !== old.epoch)) throw new Error("Video link generation changed before retirement");
-      }
+      before = videoOwnedSnapshot(generation.oldPhy, await this.phy());
     } catch (error) { before = generation.oldPhy; sampleFailure = error; }
     this.validateStatus(await this.protocol.status(reset ? VIDEO.reset : VIDEO.stop, generation.stream));
     const deadline = this.clock() + 30_000;
@@ -228,18 +226,23 @@ export class VideoPlayback {
   private async observe(): Promise<void> {
     const g = this.generation!;
     const began = this.clock();
+    const phy = await this.phy();
+    videoLive(g.oldPhy, phy);
+    g.oldPhy = videoOwnedSnapshot(g.oldPhy, phy);
     const left = parseShown(await this.protocol.shown(g.stream, g.tokens[0], 1), 1, g.stream, g.tokens[0]);
     if (!left) return;
     const right = parseShown(await this.protocol.shown(g.stream, g.tokens[1], 2, left.serial), 2, g.stream, g.tokens[1]);
     if (!right || left.ordinal !== right.ordinal || left.pts !== right.pts) return;
     const picture = this.source.clip.pictures[g.idr + left.ordinal - 1];
     if (!picture || picture.pts !== left.pts || g.idr + left.ordinal - 1 < g.target) throw new Error("Shown picture does not match audited seek timeline");
-    const phy = await this.phy();
+    const capturedPhy = await this.phy();
+    videoLive(g.oldPhy, capturedPhy);
+    g.oldPhy = videoOwnedSnapshot(g.oldPhy, capturedPhy);
     const pairs = phy[0].links.filter((link) => link.bound && link.valid).map((link) =>
       `${["", "1M", "2M", "Coded"][link.current & 255]}/${["", "1M", "2M", "Coded"][link.current >>> 8]}`);
     this.view.hostPhy = pairs.length ? [...new Set(pairs)].join(", ") : "Unknown";
     const captures = [left, right];
-    const ages = captures.map((row, i) => videoTickSpan(phy[i].tick, row.copyTick));
+    const ages = captures.map((row, i) => videoTickSpan(capturedPhy[i].tick, row.copyTick));
     g.reached = true;
     this.view.position = left.pts;
     this.view.lostReports = Math.max(left.lost, right.lost);
@@ -311,7 +314,7 @@ export class VideoPlayback {
     finally {
       try { await this.audio.pause(); } catch (error) { failure ??= error; }
       try { await this.retire(false); } catch (error) {
-        this.view.cleanupFailed = true;
+        this.view.cleanupFailed = this.generation !== null;
         failure = new Error(`${failure ? String(failure) + "; " : ""}cleanup failed: ${error}`);
       }
       try { await this.audio.close(); } catch (error) { failure ??= error; }

@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { VideoPlayback, silentVideoAudio } = require('../.test-build/app/apps/video/video-playback');
 const { VIDEO } = require('../.test-build/app/apps/video/video-protocol');
-const { parseVideoPhy, videoRestored, parsePlayback, parseShown, videoTickSpan, videoCopyRate } = require('../.test-build/app/apps/video/video-observations');
+const { parseVideoPhy, videoRestored, videoLive, parsePlayback, parseShown, videoTickSpan, videoCopyRate } = require('../.test-build/app/apps/video/video-observations');
 
 function put(raw, offset, value) { new DataView(raw.buffer).setUint32(offset, value, true); }
 function phy(lens, owned = false, tick = 100) {
@@ -227,6 +227,47 @@ test('Paired NAL failure still STOPs; evidence failure never prevents a STOP att
   h.protocol.sendNals = async () => { h.state.failedSample = true; throw new Error('send failed'); };
   await assert.rejects(h.player.run(), /cleanup failed/);
   assert.ok(h.calls.some(row => Array.isArray(row) && row[0] === 'status' && row[1] === VIDEO.stop));
+  assert.equal(h.player.view.cleanupFailed, false);
+});
+
+test('Cleared ownership cannot erase the original-pair restoration obligation', async () => {
+  const f = fixture(5), sample = f.protocol.phy, send = f.protocol.sendNals;
+  let clear = false;
+  f.protocol.sendNals = async (...args) => { await send(...args); clear = true; };
+  f.protocol.phy = async () => {
+    const rows = await sample();
+    if (clear) for (const row of rows) {
+      row[13] &= ~32; row[38] = 0; put(row, 40, 0);
+      row[34] = row[36] = 2;
+    }
+    return rows;
+  };
+  await assert.rejects(f.player.run(), /restored/);
+  assert.equal(f.player.view.cleanupFailed, true);
+  assert.ok(f.calls.some(row => Array.isArray(row) && row[0] === 'status' && row[1] === VIDEO.stop));
+});
+
+test('Every bound peer remains checked even when it carries no video or SHOWN is busy', async () => {
+  const baseline = [1, 2].map(lens => parseVideoPhy(phy(lens, true), lens));
+  videoLive(baseline, baseline);
+  for (const change of [{epoch: 41}, {valid: false}, {pending: true}, {uncertain: true},
+      {status: 1}, {bound: false}, {phase: 9}]) {
+    const current = structuredClone(baseline);
+    Object.assign(current[1].links[0], change);
+    assert.throws(() => videoLive(baseline, current), /health/);
+  }
+  const f = fixture(5), sample = f.protocol.phy, send = f.protocol.sendNals;
+  let unsafe = false;
+  f.protocol.sendNals = async (...args) => { await send(...args); unsafe = true; };
+  f.protocol.shown = async (_stream, _token, lens) => shown(lens, 0, 0, 0, 0, 0);
+  f.protocol.phy = async () => {
+    const rows = await sample();
+    if (unsafe && f.state.active) rows[1][15] = 1;
+    return rows;
+  };
+  await assert.rejects(f.player.run(), /health/);
+  assert.equal(f.player.view.cleanupFailed, false);
+  assert.ok(f.calls.some(row => Array.isArray(row) && row[0] === 'status' && row[1] === VIDEO.stop));
 });
 
 test('An audio pause error cannot prevent STOP and an unsafe restore remains explicit', async () => {
