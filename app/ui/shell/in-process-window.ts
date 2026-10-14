@@ -41,6 +41,10 @@ export type InProcessWindowOptions = {
   /** Dedicated chat gestures: click menu, hold microphone, tap-hold system menu. */
   holdToTalk?: boolean;
   isVoiceCapturing?: () => boolean;
+  /** A native video presenter owns output while this is true. */
+  shouldSuppressRender?: () => boolean;
+  /** Suspend the normal idle timeout while this window plays media. */
+  keepsScreenOn?: () => boolean;
   onSystemMenuOpened?: () => void;
   onAppMenuOpened?: () => void;
   setScreenOn?: ShellWindow["setScreenOn"];
@@ -112,10 +116,10 @@ export function createInProcessWindow(options: InProcessWindowOptions): InProces
   let closed = false;
 
   async function render(frameId: number): Promise<void> {
-    if (closed) {
+    if (closed || options.shouldSuppressRender?.()) {
       // The surface is gone (e.g. Close window picked from this window's own
       // menu); dropping the frame beats submitting to a removed surface.
-      frameTimings.finishFrame(frameId, "discarded: window closed");
+      frameTimings.finishFrame(frameId, closed ? "discarded: window closed" : "discarded: native video owns display");
       return;
     }
     frameTimings.annotateFrame(frameId, `window=${options.windowId}`);
@@ -162,6 +166,8 @@ export function createInProcessWindow(options: InProcessWindowOptions): InProces
     acceptsDirectional: true,
     holdToTalk: options.holdToTalk,
     isVoiceCapturing: options.isVoiceCapturing,
+    shouldSuppressRender: options.shouldSuppressRender,
+    keepsScreenOn: options.keepsScreenOn,
     setScreenOn: options.setScreenOn,
     heightMode,
     hasAppMenu: () => appMenuItems().length > 0,

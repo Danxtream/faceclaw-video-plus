@@ -57,6 +57,7 @@ import { type InputEvent } from "../ui/gestures";
 import { registerSystemTools } from "../assistant/system-tools";
 import { updateGlassesPresence } from "./glasses-presence";
 import { timerEngine } from "../apps/timer/timer-engine";
+import { activeVideoSession } from "../apps/video/video-session";
 import { registerNavigateTools } from "../assistant/navigate-tools";
 import { registerRoamTools } from "../assistant/roam-tools";
 import { assistantBridge } from "../assistant/bridge-client";
@@ -2380,6 +2381,10 @@ class DashboardController {
 
   /** Submit a painted frame for an in-process window (e.g. the launcher). */
   private async submitWindowFrame(surfaceId: string, planes: Plane[], paintMs: number, frameId: number): Promise<void> {
+    if (activeVideoSession()?.ownsDisplay || shell.getWindows().some((window) => window.shouldSuppressRender?.())) {
+      frameTimings.finishFrame(frameId, "discarded: native video owns display");
+      return;
+    }
     const display = this.display;
     if (!display || this.phase === "charging") {
       frameTimings.finishFrame(frameId, "discarded: window frame with no display target");
@@ -2447,6 +2452,10 @@ class DashboardController {
     const causeFrameId = this.pendingShellRenderCauseFrameId;
     this.pendingShellRenderCauseFrameId = 0;
     const frameId = frameTimings.startFrame("render:shell", causeFrameId);
+    if (activeVideoSession()?.ownsDisplay || shell.getWindows().some((window) => window.shouldSuppressRender?.())) {
+      frameTimings.finishFrame(frameId, "discarded: native video owns display");
+      return;
+    }
     frameTimings.annotateFrame(frameId, shell.describeInputTarget());
     const wantFreshData = this.nextShellRenderWantsFreshData;
     this.nextShellRenderWantsFreshData = false;

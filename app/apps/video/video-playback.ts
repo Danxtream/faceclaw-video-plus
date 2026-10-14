@@ -15,6 +15,7 @@ export type VideoPlaybackView = {
   active: boolean; paused: boolean; menuOpen: boolean; selection: number; native: boolean;
   position: number; duration: number; fps: number | null; intervals: number;
   lostReports: number; audioUncertainty: number | null; error: string | null;
+  cleanupFailed: boolean;
 };
 type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy">;
 type Intent = { kind: "pause" | "seek" | "scale" | "menu"; value: number | boolean; resolve: () => void; reject: (error: unknown) => void };
@@ -41,7 +42,7 @@ export class VideoPlayback {
     private readonly clock: () => number = () => Date.now(),
     private readonly sleep: (milliseconds: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms))) {
     this.view = { active: false, paused: false, menuOpen: false, selection: 0, native: false, position: 0,
-      duration: source.clip.duration, fps: null, intervals: 0, lostReports: 0, audioUncertainty: null, error: null };
+      duration: source.clip.duration, fps: null, intervals: 0, lostReports: 0, audioUncertainty: null, error: null, cleanupFailed: false };
   }
   private notify(): void { this.changed({ ...this.view }); }
   private enqueue(kind: Intent["kind"], value: Intent["value"]): Promise<void> {
@@ -177,7 +178,7 @@ export class VideoPlayback {
     this.view.paused = settled.every((row) => row.paused);
     if (wasPaused !== this.view.paused) this.copyFirst = this.copyPrevious = null;
     if (this.view.paused) await this.audio.pause();
-    if (request.kind === "menu" || request.kind === "scale") {
+    if (request.kind === "menu" || request.kind === "scale" || request.kind === "pause") {
       const menu = await this.playback(VIDEO.menu, 5);
       if (menu.some((row) => row.result)) throw new Error("Video menu result refused");
       const right = menu[1];
@@ -304,9 +305,13 @@ export class VideoPlayback {
       }
     } catch (error) { failure = error; }
     finally {
-      try { await this.audio.pause(); await this.retire(false); } catch (error) { failure = new Error(`${failure ? String(failure) + "; " : ""}cleanup failed: ${error}`); }
+      try { await this.audio.pause(); } catch (error) { failure ??= error; }
+      try { await this.retire(false); } catch (error) {
+        this.view.cleanupFailed = true;
+        failure = new Error(`${failure ? String(failure) + "; " : ""}cleanup failed: ${error}`);
+      }
       try { await this.audio.close(); } catch (error) { failure ??= error; }
-      this.source.close();
+      try { this.source.close(); } catch (error) { failure ??= error; }
       for (const intent of this.intents.splice(0)) intent.reject(new Error("Video ended before control completed"));
       this.view.active = false;
       this.view.error = failure ? String(failure) : null;

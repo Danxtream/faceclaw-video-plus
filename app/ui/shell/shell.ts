@@ -149,6 +149,10 @@ export type ShellWindow = {
   onFocus?: (lastInput: InputEvent | null) => void;
   /** Screen turned on/off; hidden or screen-off windows should stop painting. */
   setScreenOn?: (on: boolean) => void;
+  /** A native presenter temporarily owns output without a new display lease. */
+  shouldSuppressRender?: () => boolean;
+  /** Playing media suspends the foreground window's idle screen timeout. */
+  keepsScreenOn?: () => boolean;
   /**
    * Input focus arrived at or left this window: it is (no longer) where
    * ordinary input goes. Unlike setForeground / onFocus, this also tracks
@@ -643,7 +647,7 @@ class Shell {
     // ring. An in-flight assistant turn suspends it for the same reason (a
     // tool loop can run for a while with no input); once the turn ends and
     // the Follow-up/Done menu is showing, the normal idle timeout resumes.
-    if (this.activeVoiceLayer || this.activeKeyboardLayer || this.assistantSession?.isTurnActive() || this.foregroundWindow()?.isVoiceCapturing?.()) {
+    if (this.activeVoiceLayer || this.activeKeyboardLayer || this.assistantSession?.isTurnActive() || this.foregroundWindow()?.isVoiceCapturing?.() || this.foregroundWindow()?.keepsScreenOn?.()) {
       this.lastInputAtMs = nowMs;
       return false;
     }

@@ -229,6 +229,18 @@ test('Paired NAL failure still STOPs; evidence failure never prevents a STOP att
   assert.ok(h.calls.some(row => Array.isArray(row) && row[0] === 'status' && row[1] === VIDEO.stop));
 });
 
+test('An audio pause error cannot prevent STOP and an unsafe restore remains explicit', async () => {
+  const f = fixture(5);
+  f.player.audio.pause = async () => {throw new Error('audio pause failed');};
+  await assert.rejects(f.player.run(), /audio pause/);
+  assert.ok(f.calls.some(row => Array.isArray(row) && row[0] === 'status' && row[1] === VIDEO.stop));
+  assert.equal(f.player.view.cleanupFailed, false);
+  const h = fixture(5); const send = h.protocol.sendNals;
+  h.protocol.sendNals = async (...args) => {await send(...args); h.state.wrongRestore = true;};
+  await assert.rejects(h.player.run(), /restored/);
+  assert.equal(h.player.view.cleanupFailed, true);
+});
+
 test('Bounded control queue refuses overflow and explicit STOP rejects outstanding intents', async () => {
   const f = fixture(); const requests = [];
   f.onView = v => {

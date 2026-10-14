@@ -5,6 +5,9 @@ import { AccelerometerDemoLayer } from "./accelerometer-demo";
 import { BandwidthBenchmarkLayer } from "./bandwidth-benchmark";
 import { LightSensorDemoLayer } from "./light-sensor-demo";
 import { ResourceUsageLayer } from "./resource-usage";
+import { FileBrowserLayer } from "../files/file-browser";
+import { VideoPlaybackLayer } from "../video/video-playback-layer";
+import { activeVideoSession } from "../video/video-session";
 import { LoadAppFromQrLayer, LoadAppFromUrlLayer } from "./load-app";
 import { unicodeTestMenu } from "./unicode-test";
 import { type AppContext } from "../app-definition";
@@ -52,6 +55,19 @@ function debugTestsMenu(): MenuLayer {
   return new MenuLayer(
     "Debug tests",
     [
+      {
+        label: "H.264 video",
+        disabled: global.isIOS,
+        onSelect: (ctx) => {
+          ctx.stack.push(new FileBrowserLayer({
+            isSupportedFile: (name) => /\.h264$/i.test(name),
+            onFilePicked: (entry, picked) => {
+              if (/\.h264$/i.test(entry.name)) picked.stack.push(new VideoPlaybackLayer(entry.path, picked.actions.requestRender));
+            },
+            onLeave: () => ctx.stack.pop(),
+          }));
+        },
+      },
       {
         label: "Dither test",
         onSelect: (ctx) => {
@@ -144,6 +160,8 @@ export function createDeveloperAppWindow(appContext: AppContext, options: InProc
     iconLetter: "Dv",
     icon: "wrench",
     closeable: true,
+    shouldSuppressRender: () => activeVideoSession()?.ownsDisplay ?? false,
+    keepsScreenOn: () => activeVideoSession()?.view?.active ?? false,
     actions: options.actions,
     // Dictating a URL is the one thing worth speaking at in this app; the
     // load pages take the text and every other page ignores it.
@@ -154,7 +172,7 @@ export function createDeveloperAppWindow(appContext: AppContext, options: InProc
     submitFrame: options.submitFrame,
     setSurfaceVisible: options.setSurfaceVisible,
     removeSurface: options.removeSurface,
-    onClosed: options.onClosed,
+    onClosed: () => { activeVideoSession()?.stop(); options.onClosed(); },
   });
   return created;
 }
