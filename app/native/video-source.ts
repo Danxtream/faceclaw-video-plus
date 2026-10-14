@@ -5,7 +5,7 @@ declare const com: any;
 
 /** Open a sidecar and stream the encoded source through the native bounded reader. */
 export async function openVideoSource(path: string, cancelled: () => boolean = () => false): Promise<VideoSource> {
-  if (!global.isAndroid || !path.toLowerCase().endsWith(".h264")) throw new Error("Select an Android H.264 video");
+  if (!global.isAndroid || !/\.(h264|264)$/i.test(path)) throw new Error("Select an Android H.264 video");
   const reader = new com.faceclaw.app.VideoFileReader(path);
   let closed = false;
   async function collect(): Promise<any> {
@@ -19,7 +19,7 @@ export async function openVideoSource(path: string, cancelled: () => boolean = (
   try {
     reader.beginAudit();
     const audit: VideoAudit = await collect();
-    const sidecar = path.replace(/\.h264$/i, ".g2.json");
+    const sidecar = path.replace(/\.(h264|264)$/i, ".g2.json");
     const clip = parseVideoClip(JSON.parse(await File.fromPath(sidecar).readText()), audit);
     return {
       clip,

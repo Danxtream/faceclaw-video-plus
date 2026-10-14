@@ -11,6 +11,7 @@ export function createVideoProtocol(ingressLeft = true): VideoProtocol {
   if (!active || !active.isSessionReady()) throw new Error("Glasses session is not ready");
   const transport = active.getVideoTransport();
   const legacyNext = Number(getStringSetting("video.requestId", "1"));
+  if (!Number.isInteger(legacyNext) || legacyNext < 1 || legacyNext >= 0xfffffffe) throw new Error("Invalid legacy video request identity");
   const identities = new com.faceclaw.app.VideoIdentityAllocator(Utils.android.getApplicationContext(), legacyNext);
   async function collect(id: number): Promise<any> {
     const deadline = Date.now() + 30_000;

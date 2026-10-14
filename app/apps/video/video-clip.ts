@@ -21,7 +21,7 @@ export function parseVideoClip(value: unknown, audit: VideoAudit): VideoClip {
       clip.range !== "full" || typeof clip.deblocking !== "boolean" || !integer(clip.duration, 1) ||
       typeof clip.encoder !== "string" || !clip.encoder || !Array.isArray(clip.options) ||
       !clip.options.every((option) => typeof option === "string") || !clip.source ||
-      typeof clip.source.name !== "string" || !clip.source.name || !integer(clip.source.bytes, 1, Number.MAX_SAFE_INTEGER) ||
+      typeof clip.source.name !== "string" || !/^[^/\\]+\.mp4$/i.test(clip.source.name) || !integer(clip.source.bytes, 1, Number.MAX_SAFE_INTEGER) ||
       !hash(clip.source.sha256) || !clip.h264 || !hash(clip.h264.sha256) ||
       clip.h264.bytes !== audit.bytes || clip.h264.sha256 !== audit.sha256 ||
       !Array.isArray(clip.h264.nals) || clip.h264.nals.length !== audit.nals.length || !audit.nals.length)

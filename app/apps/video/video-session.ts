@@ -1,7 +1,9 @@
 import { openVideoSource } from "../../native/video-source";
 import { openVideoAudio } from "../../native/video-audio";
 import { createVideoProtocol } from "../../native/video-transport";
-import { VideoPlayback, type VideoOptions, type VideoPlaybackView } from "./video-playback";
+import { statPath } from "../../native/file-access";
+import { saveVideoResumeState } from "../../native/g2-video-library";
+import { VideoPlayback, silentVideoAudio, type VideoOptions, type VideoPlaybackView } from "./video-playback";
 
 declare const com: any;
 
@@ -14,6 +16,9 @@ export class VideoSession {
   view: VideoPlaybackView | null = null;
   opening = true;
   error: string | null = null;
+  hasAudio = false;
+  shownCopies = 0;
+  private savedAt = 0;
   private cancelled = false;
   private started = false;
   private transportEpoch: number | null = null;
@@ -36,13 +41,21 @@ export class VideoSession {
     try {
       source = await openVideoSource(this.path, () => this.cancelled);
       if (this.cancelled) return;
-      audio = await openVideoAudio(this.path, source.clip, () => this.cancelled);
+      const audioPath = this.path.replace(/[^/\\]+$/, source.clip.source.name);
+      if (statPath(audioPath)) { audio = await openVideoAudio(this.path, source.clip, () => this.cancelled); this.hasAudio = true; }
+      else audio = silentVideoAudio;
       if (this.cancelled) return;
       const active = com.faceclaw.app.FaceclawBleCommunicator.getActive();
       this.transportEpoch = Number(active?.getVideoTransport().getEpoch());
       this.engine = new VideoPlayback(createVideoProtocol(), source, audio, this.options, (view) => {
-        this.view = view; this.notify();
+        this.view = view;
+        if (this.shownCopies && (Date.now() - this.savedAt >= 1000 || !view.active)) {
+          saveVideoResumeState(this.path, !view.active && !view.error && view.position + 63 >= view.duration ? 0 : view.position);
+          this.savedAt = Date.now();
+        }
+        this.notify();
       }, (count) => {
+        this.shownCopies += count;
         for (let i = 0; i < count; i++) com.faceclaw.app.FaceclawBleManager.recordDisplayFrameSent();
       });
       this.opening = false;

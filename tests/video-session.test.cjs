@@ -4,12 +4,14 @@ const {loader} = require('./helpers/load-typescript.cjs');
 
 test('Session opens audited media before one supplied transport and counts only shown copies', async () => {
   const events = []; let finish, publish, epoch = 10, ready = true;
-  const source = {clip: {}, close: () => events.push('source-close')};
+  const source = {clip: {source: {name: 'clip.mp4'}}, close: () => events.push('source-close')};
   const audio = {close: async () => events.push('audio-close')};
   const load = loader({com: {faceclaw: {app: {
     FaceclawBleCommunicator: {getActive: () => ({isSessionReady: () => ready, getVideoTransport: () => ({getEpoch: () => epoch})})},
     FaceclawBleManager: {recordDisplayFrameSent: () => events.push('copy')},
   }}}}, {
+    '../../native/file-access': {statPath: () => ({isDirectory: false})},
+    '../../native/g2-video-library': {saveVideoResumeState() {}},
     '../../native/video-source': {openVideoSource: async () => {events.push('source'); return source;}},
     '../../native/video-audio': {openVideoAudio: async () => {events.push('audio'); return audio;}},
     '../../native/video-transport': {createVideoProtocol: () => {events.push('protocol'); return {}; }},
@@ -40,6 +42,7 @@ test('Session opens audited media before one supplied transport and counts only 
 test('Cancellation during source audit does not prepare audio or create transport', async () => {
   let resolve, closed = 0;
   const load = loader({}, {
+    '../../native/file-access': {}, '../../native/g2-video-library': {},
     '../../native/video-source': {openVideoSource: () => new Promise(done => resolve = done)},
     '../../native/video-audio': {openVideoAudio: () => {throw new Error('must not prepare');}},
     '../../native/video-transport': {createVideoProtocol: () => {throw new Error('must not send');}},
@@ -54,7 +57,8 @@ test('Cancellation during source audit does not prepare audio or create transpor
 test('Failed media preparation closes the source and creates no BLE writer', async () => {
   let closed = 0;
   const load = loader({}, {
-    '../../native/video-source': {openVideoSource: async () => ({clip: {}, close: () => closed++})},
+    '../../native/file-access': {statPath: () => ({isDirectory: false})}, '../../native/g2-video-library': {},
+    '../../native/video-source': {openVideoSource: async () => ({clip: {source: {name: 'clip.mp4'}}, close: () => closed++})},
     '../../native/video-audio': {openVideoAudio: async () => {throw new Error('MP4 mismatch');}},
     '../../native/video-transport': {createVideoProtocol: () => {throw new Error('must not send');}},
     './video-playback': {},
