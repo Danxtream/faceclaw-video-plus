@@ -371,7 +371,7 @@ export class VideoPlayback {
     const deadline = this.clock() + 30_000;
     while (!this.generation!.reached && !this.stopping) {
       const uploaded = await this.upload();
-      if (this.generation!.detailedReports || this.reportSafe || this.view.paused) await this.report();
+      if (this.generation!.detailedReports || this.reportSafe) await this.report();
       if (this.clock() > deadline) throw new Error("Seek target was not shown by both lenses");
       if (!uploaded && !this.metadataStaged) await this.sleep(10);
     }
@@ -395,7 +395,7 @@ export class VideoPlayback {
         }
         const g = this.generation!;
         const uploaded = await this.upload();
-        const report = (g.detailedReports || this.reportSafe || this.view.paused) && this.clock() >= this.reportDue;
+        const report = (g.detailedReports || this.reportSafe) && this.clock() >= this.reportDue;
         if (report) await this.report();
         if (this.ended && !this.intents.length) break;
         if (!this.view.paused && this.clock() - this.progressAt > 30_000) throw new Error("Video stopped making copy progress");

@@ -298,3 +298,19 @@ test('Bounded control queue refuses overflow and explicit STOP rejects outstandi
   assert.equal(f.closed(), true);
   assert.ok(!f.calls.some(row => Array.isArray(row) && row[0] === 'start'));
 });
+
+test('Paused seek previews do not sample ahead of available input credits', async () => {
+  const f = fixture(20), shown = f.protocol.shown;
+  f.onView = view => { if (view.position === 688 && view.active) f.player.stop(); };
+  f.protocol.shown = async (...args) => {
+    const generation = f.player.generation;
+    assert.ok(!generation.paused || generation.index === generation.count,
+      'This fake always grants four credits: a paused preview must send its input before passive sampling');
+    return shown(...args);
+  };
+  await f.player.run(700, true).catch(error => {
+    f.player.stop(); throw error;
+  });
+  assert.equal(f.player.view.position, 688);
+  assert.equal(f.closed(), true);
+});
