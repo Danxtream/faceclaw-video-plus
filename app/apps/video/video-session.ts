@@ -34,9 +34,9 @@ export class VideoSession {
     let source: Awaited<ReturnType<typeof openVideoSource>> | null = null;
     let audio: Awaited<ReturnType<typeof openVideoAudio>> | null = null;
     try {
-      source = await openVideoSource(this.path);
+      source = await openVideoSource(this.path, () => this.cancelled);
       if (this.cancelled) return;
-      audio = await openVideoAudio(this.path, source.clip);
+      audio = await openVideoAudio(this.path, source.clip, () => this.cancelled);
       if (this.cancelled) return;
       const active = com.faceclaw.app.FaceclawBleCommunicator.getActive();
       this.transportEpoch = Number(active?.getVideoTransport().getEpoch());

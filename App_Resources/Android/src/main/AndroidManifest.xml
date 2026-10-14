@@ -36,6 +36,8 @@
 	<uses-permission android:name="android.permission.VIBRATE"/>
 	<uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
 	<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
+	<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING"/>
+	<uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
 	<uses-permission android:name="android.permission.READ_CALENDAR"/>
 	<uses-permission android:name="android.permission.RECORD_AUDIO"/>
 	<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
@@ -106,6 +108,11 @@
 			</intent-filter>
 		</activity>
 		<activity android:name="com.tns.ErrorReportActivity"/>
+		<service
+			android:name="com.faceclaw.app.VideoConversionService"
+			android:enabled="true"
+			android:exported="false"
+			android:foregroundServiceType="mediaProcessing|dataSync" />
 		<service
 			android:name="com.faceclaw.app.FaceclawForegroundService"
 			android:enabled="true"

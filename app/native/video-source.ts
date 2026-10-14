@@ -4,12 +4,15 @@ import { parseVideoClip, type VideoSource, type VideoAudit } from "../apps/video
 declare const com: any;
 
 /** Open a sidecar and stream the encoded source through the native bounded reader. */
-export async function openVideoSource(path: string): Promise<VideoSource> {
+export async function openVideoSource(path: string, cancelled: () => boolean = () => false): Promise<VideoSource> {
   if (!global.isAndroid || !path.toLowerCase().endsWith(".h264")) throw new Error("Select an Android H.264 video");
   const reader = new com.faceclaw.app.VideoFileReader(path);
   let closed = false;
   async function collect(): Promise<any> {
-    while (!closed && Number(reader.poll()) === 0) await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    while (!closed && Number(reader.poll()) === 0) {
+      if (cancelled()) { closed = true; reader.close(); break; }
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
     if (closed) throw new Error("Video source closed");
     return JSON.parse(String(reader.takeResult()));
   }

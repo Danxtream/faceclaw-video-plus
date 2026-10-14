@@ -31,7 +31,15 @@ private class AndroidVideoAudioDevice : VideoAudioDevice {
         player.setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
             .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE).build())
         player.setDataSource(path)
-        player.prepare()
+        val prepared = CountDownLatch(1)
+        var failure: String? = null
+        player.setOnPreparedListener { prepared.countDown() }
+        player.setOnErrorListener { _, what, extra -> failure = "Phone audio preparation failed: $what/$extra"; prepared.countDown(); true }
+        try {
+            player.prepareAsync()
+            check(prepared.await(10, TimeUnit.SECONDS)) { "Phone audio preparation timed out" }
+            check(failure == null) { failure!! }
+        } finally { player.setOnPreparedListener(null); player.setOnErrorListener(null) }
     }
     override fun seek(position: Int) {
         val complete = CountDownLatch(1)
@@ -58,6 +66,8 @@ class VideoAudioPlayer internal constructor(private val factory: () -> VideoAudi
     private var pending: Future<Int>? = null
     private var closed = false
     private var speed = 1f
+    @Volatile private var preparingMedia = false
+    fun isPreparingMedia(): Boolean = preparingMedia
 
     @Synchronized fun beginPrepare(path: String, bytes: Long, sha256: String) {
         require(bytes > 0 && sha256.matches(Regex("[0-9a-f]{64}"))) { "Invalid source audio identity" }
@@ -81,7 +91,8 @@ class VideoAudioPlayer internal constructor(private val factory: () -> VideoAudi
             check(device == null) { "Phone audio already prepared" }
             val created = factory()
             try {
-                created.prepare(path)
+                preparingMedia = true
+                try { created.prepare(path) } finally { preparingMedia = false }
                 require(created.duration > 0 && file.length() == bytes && file.lastModified() == modified) { "Invalid or changed source audio" }
                 device = created
                 created.duration
