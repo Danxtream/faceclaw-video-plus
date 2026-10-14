@@ -99,13 +99,14 @@ export class VideoProtocol {
     raw[8] = 1;
     return this.query(raw, 128);
   }
-  async start(stream: number, native: boolean, dither: boolean, radio: boolean, preroll = 0, paused = false): Promise<VideoStatus[]> {
+  async start(stream: number, native: boolean, dither: boolean, radio: boolean, preroll = 0, paused = false, targets = 3): Promise<VideoStatus[]> {
+    if (![1, 2, 3].includes(targets)) throw new Error("Invalid START lens mask");
     const raw = await this.header(VIDEO.start, 24);
     if (!Number.isInteger(preroll) || preroll < 0 || preroll > 255) throw new Error("Unsupported seek preroll");
     put(raw, 8, stream);
     raw.set([64, 1, 192, 0, 1, 2, 4 | 8 | (native ? 1 : 0) | (dither ? 16 : 0) | (!radio ? 2 : 0) | (paused ? 32 : 0), preroll], 12);
     put(raw, 20, 63);
-    return (await this.query(raw, 128)).map(parseVideoStatus);
+    return (await this.query(raw, 128, targets)).map(parseVideoStatus);
   }
   async timeline(stream: number, duration: number, pts: number): Promise<VideoStatus[]> {
     const raw = await this.header(VIDEO.timeline, 24);

@@ -1040,9 +1040,12 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
     }
 
     private void enqueueVideoCacheLeaseLocked(int operation, boolean left,
-            Runnable acknowledged, Runnable failed) {
-        OutboundMessage message = messageBuilder.faceclawFramebufferControl(operation, left);
-        message.onAck = acknowledged::run;
+            Runnable written, Runnable failed) {
+        OutboundMessage control = messageBuilder.faceclawFramebufferControl(operation, left);
+        OutboundMessage message = new OutboundMessage("video-cache-lease", control.label,
+                control.sid, control.flag, control.magic, control.message, control.ackTimeoutMs,
+                control.tileIndex, control.isLeftArmMessage);
+        message.onSent = written::run;
         message.onTimeout = failed::run;
         if (operation == BleProtocol.FACECLAW_FB_OP_ACQUIRE)
             lastFaceclawFramebufferLeaseQueuedAtMs = SystemClock.elapsedRealtime();
@@ -1068,12 +1071,17 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
             record.message = message;
             message.onAck = record::delivered;
             message.onTimeout = () -> record.failed("Video native ACK timeout");
-            if (record.payload.length >= 2 && record.payload[1] == 1) {
-                videoTextureCacheGate.prepare(() -> {
+            if (record.payload.length >= 12 && record.payload[1] == 1) {
+                long stream = (record.payload[8] & 255L) | (record.payload[9] & 255L) << 8
+                        | (record.payload[10] & 255L) << 16 | (record.payload[11] & 255L) << 24;
+                videoTextureCacheGate.prepare(stream, () -> {
                     if (record.epoch == videoTransport.getEpoch() && running && sessionReady)
                         pendingMessages.addLast(message);
                     else record.failed("Video cache preparation generation retired");
-                }, () -> record.failed("Video texture-cache lease transition failed"));
+                }, () -> {
+                    clearMessagesOfKindLocked("video-cache-lease");
+                    record.failed("Video texture-cache lease transition failed or timed out");
+                });
             } else pendingMessages.addLast(message);
         }
         interruptibleSleep.interrupt();
@@ -2355,6 +2363,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
 
             synchronized (lock) {
                 drainCfwAcknowledgementsLocked();
+                videoTextureCacheGate.poll();
                 if (cfwCleanupDelivered) {
                     /* Successful mode 11 must be the last Faceclaw write. Drop
                      * anything a late external producer attempted to enqueue
@@ -2363,6 +2372,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
                     return 250;
                 }
                 if (sessionReady
+                        && !videoTextureCacheGate.preparing()
                         && now - lastFaceclawFramebufferLeaseQueuedAtMs >= FACECLAW_WAKE_LEASE_RENEW_MS
                         && !hasPendingOrInflightKindLocked("framebuffer-lease-control")) {
                     enqueueFaceclawFramebufferControlLocked(

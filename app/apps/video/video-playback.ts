@@ -166,7 +166,28 @@ export class VideoPlayback {
       count: prefix.length + this.source.clip.h264.nals.length - firstNal, metadata: 0,
       paused, reached: false, oldPhy, started: this.clock(), anchor: oldPhy, anchorAt: this.clock(),
       anchorUncertainty: 0, detailedReports: !!selection.detailedReports };
-    this.validateStatus(await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused), VIDEO.start, stream);
+    const start = await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused);
+    const retryDeadline = this.clock() + 1_000;
+    for (let attempt = 0; ; attempt++) {
+      const mask = start.reduce((bits, row, i) => bits | (row.result === 4 && !row.error &&
+        row.state === 0 && row.stream === 0 && row.high < stream ? 1 << i : 0), 0);
+      // Only a proven unadmitted LEASE refusal may be retried. Preserve the
+      // already-admitted peer and use a fresh request ID, not cached refusal.
+      this.validateStatus(start.map((row, i) => mask & 1 << i ? {...row, result: 0} : row), VIDEO.start, stream);
+      if (!mask) break;
+      if (attempt >= 3 || this.stopping || this.clock() >= retryDeadline) {
+        this.validateStatus(start, VIDEO.start, stream);
+        break;
+      }
+      await this.sleep(200);
+      if (this.stopping || this.clock() >= retryDeadline) {
+        this.validateStatus(start, VIDEO.start, stream);
+        break;
+      }
+      const retry = await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused, mask);
+      let index = 0;
+      for (let i = 0; i < 2; i++) if (mask & 1 << i) start[i] = retry[index++];
+    }
     const ready = await this.waitReady(stream);
     this.generation.tokens = ready.map((row) => row.token);
     const anchorBegin = this.clock();
@@ -197,7 +218,11 @@ export class VideoPlayback {
     try {
       before = videoOwnedSnapshot(generation.oldPhy, await this.phy());
     } catch (error) { before = generation.oldPhy; sampleFailure = error; }
-    this.validateStatus(await this.protocol.status(reset ? VIDEO.reset : VIDEO.stop, generation.stream), reset ? VIDEO.reset : VIDEO.stop);
+    const stopped = await this.protocol.status(reset ? VIDEO.reset : VIDEO.stop, generation.stream);
+    // Firmware retains stream_high after admission. Idle/no-stream STALE with
+    // a lower high-water proves this attempted stream never acquired an owner.
+    this.validateStatus(stopped.map((row) => row.result === 2 && !row.error && row.state === 0 &&
+      row.stream === 0 && row.high < generation.stream ? {...row, result: 0} : row), reset ? VIDEO.reset : VIDEO.stop);
     const deadline = this.clock() + 30_000;
     while (true) {
       const rows = await this.protocol.status();

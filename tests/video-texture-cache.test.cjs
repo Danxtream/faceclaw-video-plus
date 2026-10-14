@@ -5,12 +5,12 @@ const os = require('node:os');
 const path = require('node:path');
 const {execFileSync} = require('node:child_process');
 
-test('Video cache release is ACK-fenced before START and cannot be recreated until resume', () => {
+test('Video cache release is write-fenced before START and cannot be recreated until resume', () => {
   const source = fs.readFileSync('App_Resources/Android/src/main/java/com/faceclaw/app/FaceclawBleCommunicator.java', 'utf8');
   assert.ok(source.includes('videoTextureCacheGate.prepare'), 'START must release cached textures before admission');
   assert.ok(source.includes('!videoTextureCacheGate.suspended()'), 'Video must disable texture planning');
   assert.match(source, /videoTextureCacheGate\.preparing\(\)\s*\? inFlightMessages\.isEmpty\(\)/);
-  assert.ok(source.includes('message.onAck = acknowledged::run'));
+  assert.ok(source.includes('message.onSent = written::run'));
   assert.ok(source.includes('message.onTimeout = failed::run'));
   const boundaries = require('../native/kotlin/android-java-boundaries.json');
   assert.ok(boundaries.flatMap(group => group.files).includes('com/faceclaw/app/VideoTextureCacheGate.java'));

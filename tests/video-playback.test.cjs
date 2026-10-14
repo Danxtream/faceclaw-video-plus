@@ -286,6 +286,57 @@ test('Single writer finishes paired copies, uses metadata identity and cleans al
   await assert.rejects(f.player.run(), /single use/);
 });
 
+test('LEASE refusal retries the same stream only on the unadmitted lens', async () => {
+  const f = fixture(5), start = f.protocol.start, calls = [];
+  f.protocol.start = async (...args) => {
+    calls.push(args);
+    if (calls.length === 1) {
+      const rows = await start(...args);
+      rows[1] = {...rows[1], result: 4, state: 0, stream: 0, high: 0, token: 0};
+      return rows;
+    }
+    assert.equal(args[6], 2);
+    return (await start(...args)).slice(1);
+  };
+  await f.player.run();
+  assert.equal(calls.length, 2); assert.deepEqual(calls[0].slice(0, 6), calls[1].slice(0, 6));
+  assert.equal(f.copied(), 5);
+});
+
+test('Persistent LEASE refusal stops after three same-stream retries and cleans up', async () => {
+  const f = fixture(5), status = f.protocol.status, attempts = [];
+  f.protocol.start = async (...args) => {
+    attempts.push(args);
+    return (await status()).map(row => ({...row, result: 4}));
+  };
+  await assert.rejects(f.player.run(), /result=4/);
+  assert.equal(attempts.length, 4);
+  assert.ok(attempts.every(args => args[0] === attempts[0][0]));
+  assert.ok(attempts.slice(1).every(args => args[6] === 3));
+  assert.equal(f.copied(), 0);
+  assert.equal(f.player.view.cleanupFailed, false);
+});
+
+test('Unadmitted idle STALE STOP cleans up, but admitted or foreign owners do not', async () => {
+  for (const mode of ['unadmitted', 'admitted', 'foreign', 'error']) {
+    const f = fixture(5), status = f.protocol.status;
+    f.protocol.start = async () => { throw new Error('START record timed out'); };
+    f.protocol.status = async (...args) => {
+      const rows = await status(...args);
+      if (args[0] === VIDEO.stop) for (const row of rows) {
+        row.result = 2;
+        if (mode === 'admitted') row.high = 1;
+        if (mode === 'foreign') { row.state = 2; row.stream = 99; }
+        if (mode === 'error') row.error = 8;
+      }
+      return rows;
+    };
+    await assert.rejects(f.player.run(), /START record timed out/);
+    assert.equal(f.player.view.cleanupFailed, mode !== 'unadmitted');
+    assert.equal(f.closed(), true);
+  }
+});
+
 test('A busy metadata queue retries without relabelling NALs or skipping pictures', async () => {
   const f = fixture(5); f.state.busyMetadata = 3;
   await f.player.run();

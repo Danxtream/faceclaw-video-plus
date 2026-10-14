@@ -56,6 +56,19 @@ test('START keeps fixed cadence, dither generation and bounded preroll', async (
   await assert.rejects(protocol.start(4, false, false, true, 256), /preroll/);
 });
 
+test('START retry targets only the refused lens with a fresh request ID', async () => {
+  const requests = []; let id = 10;
+  const protocol = new VideoProtocol({epoch: () => 1, exchange: async (raw, bytes, targets) => {
+    requests.push({raw, targets});
+    return Array.from({length: targets === 3 ? 2 : 1}, () => status().slice(0, bytes));
+  }}, () => id++);
+  for (const targets of [3, 2, 1]) await protocol.start(4, true, true, false, 9, true, targets);
+  assert.deepEqual(requests.map(row => row.targets), [3, 2, 1]);
+  assert.deepEqual(requests.map(row => videoU32(row.raw, 4)), [10, 11, 12]);
+  assert.ok(requests.every(row => Buffer.from(row.raw.slice(8)).equals(Buffer.from(requests[0].raw.slice(8)))));
+  await assert.rejects(protocol.start(4, false, false, true, 0, false, 0), /lens mask/);
+});
+
 test('Queries require both lenses and durable nonwrapping request IDs', async () => {
   const protocol = new VideoProtocol({ epoch: () => 1, exchange: async () => [status()] }, () => 1);
   await assert.rejects(protocol.status(), /Missing lens/);
