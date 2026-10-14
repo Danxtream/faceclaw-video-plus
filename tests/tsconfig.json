@@ -11,6 +11,7 @@
     "outDir": "../.test-build"
   },
   "include": [
+    "../app/apps/video/video-clip.ts",
     "../app/apps/video/video-protocol.ts",
     "../app/g2/ancs-client.ts",
     "../app/g2/ble-protocol.ts",
