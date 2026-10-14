@@ -20,6 +20,7 @@ kotlin {
     sourceSets {
         commonMain { kotlin.srcDir("../../native/kotlin/shared/src/commonMain/kotlin") }
         androidMain { kotlin.srcDir("../../native/kotlin/shared/src/androidMain/kotlin") }
+        androidMain.dependencies { implementation("dev.ffmpegkit-maintained:ffmpeg-kit-min-gpl:8.1.7") }
         iosMain { kotlin.srcDir("../../native/kotlin/shared/src/iosMain/kotlin") }
         commonTest.dependencies { implementation(kotlin("test")) }
     }

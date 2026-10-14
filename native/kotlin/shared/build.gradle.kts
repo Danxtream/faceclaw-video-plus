@@ -6,6 +6,9 @@ plugins {
     id("com.android.kotlin.multiplatform.library")
 }
 kotlin {
+    sourceSets.androidMain.dependencies {
+        implementation("dev.ffmpegkit-maintained:ffmpeg-kit-min-gpl:8.1.7")
+    }
     android {
         namespace = "com.faceclaw.shared"
         compileSdk = 35

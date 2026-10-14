@@ -25,3 +25,13 @@ https://github.com/adobe-fonts/source-han-sans. It is distributed under the SIL
 Open Font License, Version 1.1; see app/fonts/source-han-sans/LICENSE.txt.
 Faceclaw includes the G2's serialized 20 px LVGL build of the font so
 phone-side rendering matches the glasses.
+
+Video conversion uses the maintained FFmpegKit Min GPL Android artifact
+dev.ffmpegkit-maintained:ffmpeg-kit-min-gpl:8.1.7, distributed as GPL-3.0:
+https://github.com/ffmpegkit-maintained/ffmpeg
+The artifact includes FFmpeg (GPL-enabled build) and VideoLAN's x264
+(GPL-2.0-or-later): https://ffmpeg.org and https://www.videolan.org/developers/x264.html
+Their original license resources remain bundled in the Android dependency.
+Public APK distribution requires matching corresponding source for this
+exact artifact and its external libraries; the bundled source notice alone
+does not establish that match.
