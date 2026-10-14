@@ -111,7 +111,10 @@ tasks.register("prepareFaceclawNativeLibs") {
     if (ndkRoot == null || !ndkRoot.exists()) {
       throw new GradleException("Android NDK is required to build libfaceclaw_lc3.so")
     }
-    def clang = file("$ndkRoot/toolchains/llvm/prebuilt/${faceclawNdkHostTag()}/bin/aarch64-linux-android24-clang")
+    def windowsHost = Os.isFamily(Os.FAMILY_WINDOWS)
+    def compilerBin = file("$ndkRoot/toolchains/llvm/prebuilt/${faceclawNdkHostTag()}/bin")
+    // The target-prefixed executable is a shell script in Windows NDKs.
+    def clang = file("$compilerBin/${windowsHost ? 'clang.exe' : 'aarch64-linux-android24-clang'}")
     if (!clang.exists()) {
       throw new GradleException("Could not find Android clang at $clang")
     }
@@ -124,7 +127,8 @@ tasks.register("prepareFaceclawNativeLibs") {
 
     exec {
       commandLine([
-        clang.absolutePath,
+        clang.absolutePath
+      ] + (windowsHost ? ["--target=aarch64-linux-android24"] : []) + [
         "-shared",
         "-fPIC",
         "-O3",

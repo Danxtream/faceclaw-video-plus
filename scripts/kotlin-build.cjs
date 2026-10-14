@@ -33,7 +33,15 @@ async function buildKotlin(platform, configuration = 'debug') {
   const wrapper = path.join(root, 'wear', process.platform === 'win32' ? 'gradlew.bat' : 'gradlew');
   console.log(`[kotlin] Building ${platform} (${configuration})`);
   await new Promise((resolve, reject) => {
-    const child = spawn(wrapper, [task, '--console=plain'], { cwd: kotlin, stdio: 'inherit' });
+    // Batch wrappers require cmd.exe on Windows; task names above are fixed.
+    const windows = process.platform === 'win32';
+    const command = windows ? process.env.ComSpec || 'cmd.exe' : wrapper;
+    const args = windows
+      ? ['/d', '/s', '/c', `""${wrapper}" ${task} --console=plain"`]
+      : [task, '--console=plain'];
+    const child = spawn(command, args, {
+      cwd: kotlin, stdio: 'inherit', windowsVerbatimArguments: windows,
+    });
     child.on('error', reject);
     child.on('exit', (code, signal) => {
       if (code === 0) resolve();
