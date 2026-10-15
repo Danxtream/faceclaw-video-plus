@@ -1,5 +1,6 @@
 import { videoSeekPoint, type VideoSource } from "./video-clip";
 import { type VideoUploadPump, type VideoUploadProgress } from "./video-upload";
+import { VideoAvSync, type VideoAvAction } from "./video-av-sync";
 import { VIDEO, VideoProtocol, VideoReportUnavailable, videoU32, type VideoStatus } from "./video-protocol";
 import { parsePlayback, parseShown, parseVideoPhy, videoRestored, videoLive, videoOwnedSnapshot, videoTickSpan, videoCopyRate, videoPhyDetails,
   type VideoPhy, type VideoShown, type VideoPlaybackState } from "./video-observations";
@@ -11,6 +12,8 @@ export interface VideoAudio {
   sync(position: number, playing: boolean, speed: number, tolerance: number): Promise<void>;
   pause(): Promise<void>;
   close(): Promise<void>;
+  /** Media time being heard now (ms), including output latency; enables picture-led sync. */
+  position?(): number | null;
 }
 export const silentVideoAudio: VideoAudio = { sync: async () => {}, pause: async () => {}, close: async () => {} };
 export type VideoOptions = { native: boolean; dither: boolean; radio: boolean; detailedReports?: boolean };
@@ -48,6 +51,9 @@ export class VideoPlayback {
   private consumed = -1;
   private creditBudget = 0;
   private metadataStaged = false;
+  private av: VideoAvSync | null = null;
+  private audioPlaying = false;
+  private positionShownAt = 0;
   constructor(private readonly protocol: Protocol, private readonly source: VideoSource,
     private readonly audio: VideoAudio, private readonly options: () => VideoOptions,
     private readonly changed: (view: VideoPlaybackView) => void = () => {},
@@ -242,6 +248,7 @@ export class VideoPlayback {
     this.creditBudget = 0;
     this.progressAt = this.clock(); this.progress = -1;
     this.lastSeek = 0;
+    this.av = this.audio.position ? new VideoAvSync(this.source.clip.duration) : null;
     const g = this.generation;
     g.pump = this.protocol.createUploadPump?.(this.source.uploadHandle, {
       stream, tokens: g.tokens, prefix: g.prefix, firstNal: g.firstNal, count: g.count,
@@ -309,7 +316,7 @@ export class VideoPlayback {
     await this.suspendUpload();
     if (!this.generation!.reached) await this.preview();
     if (request.kind === "seek") {
-      await this.audio.pause();
+      await this.pauseAudio();
       await this.retire(true);
       await this.begin(Number(request.value), this.view.paused);
       await this.preview();
@@ -332,8 +339,11 @@ export class VideoPlayback {
     this.view.paused = settled.every((row) => row.paused);
     if (wasPaused !== this.view.paused) {
       this.copyFirst = this.copyPrevious = null;
+      // A resumed picture starts moving now from the frame the lenses held.
+      if (!this.view.paused) this.av?.restart(Math.max(...settled.map((row) => row.position)), this.clock());
     }
-    if (this.view.paused) await this.audio.pause();
+    if (this.view.paused) await this.pauseAudio();
+    else await this.syncAudio();
     if (request.kind === "menu" || request.kind === "scale" || request.kind === "pause") {
       const menu = await this.playback(VIDEO.menu, 5);
       if (menu.some((row) => row.result)) throw new Error("Video menu result refused");
@@ -342,7 +352,7 @@ export class VideoPlayback {
       this.view.native = right.nativeSelected;
       if (right.seekSerial !== this.lastSeek) {
         this.lastSeek = right.seekSerial;
-        await this.audio.pause();
+        await this.pauseAudio();
         await this.retire(true);
         await this.begin(right.seekTarget, right.paused);
         await this.preview();
@@ -445,6 +455,47 @@ export class VideoPlayback {
     this.creditBudget -= records.length;
     return true;
   }
+  private async pauseAudio(): Promise<void> {
+    await this.audio.pause();
+    this.audioPlaying = false;
+  }
+  /** Presentation time of the newest picture either decoder has taken, if shown. */
+  private consumedPts(): number | null {
+    const g = this.generation;
+    if (!g || this.consumed <= g.prefix.length) return null;
+    const source = g.firstNal + this.consumed - 1 - g.prefix.length, pictures = this.source.clip.pictures;
+    let low = g.idr, high = pictures.length - 1, found = -1;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      if (pictures[middle].nal <= source) { found = middle; low = middle + 1; } else high = middle - 1;
+    }
+    return found >= g.target ? pictures[found].pts : null;
+  }
+  /** Keep audio on the estimated picture: hold when ahead, seek when behind. */
+  private async syncAudio(): Promise<void> {
+    const g = this.generation;
+    if (!this.av || !g?.reached || !this.audio.position) return;
+    this.av.available(this.consumedPts());
+    const now = this.clock();
+    const action: VideoAvAction = this.av.decide(now, this.audio.position(), this.audioPlaying, this.view.paused);
+    if (action.kind === "pause") {
+      await this.pauseAudio();
+      console.error(`Video audio hold: ${action.reason}${action.lag === null ? "" : ` lag=${Math.round(action.lag)}ms`}`);
+    } else if (action.kind === "play") {
+      // A huge tolerance keeps MediaPlayer's position when no seek is wanted.
+      const began = this.clock();
+      await this.audio.sync(action.position, true, action.speed, action.seek ? 0 : 1_000_000_000);
+      if (action.seek) this.av.seekTook(this.clock() - began);
+      this.audioPlaying = true;
+      console.error(`Video audio ${action.seek ? "seek" : "play"}: ${action.reason} lag=${Math.round(action.lag ?? 0)}ms ` +
+        `speed=${action.speed} rate=${this.av.measuredRate.toFixed(3)}`);
+    }
+    // Display only: let the time move between exact SHOWN reports.
+    const video = this.view.paused ? null : this.av.video(now);
+    if (video !== null && now - this.positionShownAt >= 1000) {
+      this.view.position = Math.round(video); this.positionShownAt = now; this.notify();
+    }
+  }
   private updateHostPhy(phy: VideoPhy[]): void {
     const pairs = phy[0].links.filter((link) => link.bound && link.valid).map((link) =>
       `${["", "1M", "2M", "Coded"][link.current & 255]}/${["", "1M", "2M", "Coded"][link.current >>> 8]}`);
@@ -493,6 +544,15 @@ export class VideoPlayback {
       speed = Math.max(0.25, Math.min(2, speed));
     }
     this.copyPrevious = captures;
+    if (this.av) {
+      const age = Math.min(...ages);
+      // An old capture says little about when its picture appeared.
+      if (age <= 2000) this.av.anchor(left.pts, this.clock() - age);
+      this.positionShownAt = this.clock();
+      await this.syncAudio();
+      this.notify();
+      return;
+    }
     if (this.view.paused) await this.audio.sync(left.pts, false, 1, 0);
     else if (ages.some((age) => age > 2000)) await this.audio.pause();
     else await this.audio.sync(Math.min(this.source.clip.duration, left.pts + Math.min(...ages) * speed), true,
@@ -556,7 +616,7 @@ export class VideoPlayback {
       }
     } else if (g.index === g.count) this.updatePlayback(await this.playback());
     else await this.credits();
-    if (this.view.paused) await this.audio.pause();
+    if (this.view.paused) await this.pauseAudio();
     this.notify();
   }
   private async preview(): Promise<void> {
@@ -604,13 +664,14 @@ export class VideoPlayback {
         const stale = this.clock() - this.reportAt >= 1500;
         const report = (!g.reached || g.detailedReports || this.reportSafe || stale) && this.clock() >= this.reportDue;
         if (report) await this.report();
+        await this.syncAudio();
         if (this.ended && !this.intents.length) break;
         if (!this.view.paused && this.clock() - this.progressAt > 30_000) throw new Error("Video stopped making copy progress");
         if ((!uploaded || this.view.paused) && !report && !this.metadataStaged) await this.sleep(20);
       }
     } catch (error) { if (!(error instanceof VideoCancelled)) failure = error; }
     finally {
-      try { await this.audio.pause(); } catch (error) { failure ??= error; }
+      try { await this.pauseAudio(); } catch (error) { failure ??= error; }
       try { await this.retire(false); } catch (error) {
         this.view.cleanupFailed = this.generation !== null;
         failure = new Error(`${failure ? String(failure) + "; " : ""}cleanup failed: ${error}`);

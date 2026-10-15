@@ -594,3 +594,26 @@ test('Cancel during a NAL read still retires owners without reporting a source f
   assert.equal(f.player.view.cleanupFailed, false);
   assert.ok(f.calls.some(row => Array.isArray(row) && row[0] === 'status' && row[1] === VIDEO.stop));
 });
+
+test('Picture-led audio starts at the first shown frame with a seek, then plays or holds without extra seeks', async () => {
+  const f = fixture(40);
+  const clock = {playing: false, base: 0, at: 0, speed: 1}, events = [];
+  const now = () => f.player.clock();
+  const position = () => clock.playing ? clock.base + (now() - clock.at) * clock.speed : clock.base;
+  f.player.audio = {
+    sync: async (target, playing, speed, tolerance) => {
+      const current = position();
+      clock.base = Math.abs(current - target) > tolerance ? target : current; clock.at = now();
+      clock.playing = playing; clock.speed = speed; events.push({kind: 'sync', target, tolerance});
+    },
+    pause: async () => { clock.base = position(); clock.at = now(); clock.playing = false; events.push({kind: 'pause'}); },
+    close: async () => {},
+    position,
+  };
+  await f.player.run();
+  assert.equal(f.player.view.error, null);
+  const first = events.findIndex(e => e.kind === 'sync');
+  assert.ok(first >= 0 && events[first].tolerance === 0, 'starts with a seek to the shown picture');
+  assert.ok(events.every(e => e.kind !== 'sync' || e.tolerance === 0 || e.tolerance === 1_000_000_000));
+  assert.ok(f.player.view.position > 0);
+});

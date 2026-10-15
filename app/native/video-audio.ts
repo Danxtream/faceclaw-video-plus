@@ -32,5 +32,10 @@ export async function openVideoAudio(encodedPath: string, clip: VideoClip, cance
     },
     pause: async () => { if (inactive()) return; player.beginPause(); await collect(); },
     close: async () => close(),
+    position: () => {
+      if (closed) return null;
+      const value = Number(player.presentedPosition());
+      return Number.isFinite(value) && value >= 0 ? value : null;
+    },
   };
 }

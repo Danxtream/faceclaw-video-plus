@@ -3,6 +3,7 @@ package com.faceclaw.app
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.media.PlaybackParams
+import android.os.Build
 import java.io.File
 import java.security.MessageDigest
 import java.util.concurrent.CountDownLatch
@@ -15,6 +16,8 @@ internal interface VideoAudioDevice : AutoCloseable {
     val duration: Int
     val position: Int
     val playing: Boolean
+    /** Media time being heard now (ms), or -1 when unknown. */
+    val presented: Long
     fun prepare(path: String)
     fun seek(position: Int)
     fun speed(value: Float)
@@ -27,6 +30,17 @@ private class AndroidVideoAudioDevice : VideoAudioDevice {
     override val duration: Int get() = player.duration
     override val position: Int get() = player.currentPosition
     override val playing: Boolean get() = player.isPlaying
+    override val presented: Long get() {
+        // getTimestamp follows the audio output clock, including Bluetooth
+        // sink latency where Android reports it; currentPosition does not.
+        val stamp = try { player.timestamp } catch (_: IllegalStateException) { null }
+        if (stamp == null) return try { player.currentPosition.toLong() } catch (_: IllegalStateException) { -1L }
+        // API 29 renamed Android's misspelled anchor getter; minSdk is 24.
+        val anchor = if (Build.VERSION.SDK_INT >= 29) stamp.anchorSystemNanoTime
+            else @Suppress("DEPRECATION") stamp.anchorSytemNanoTime
+        val elapsedUs = (System.nanoTime() - anchor) / 1000L
+        return (stamp.anchorMediaTimeUs + (elapsedUs * stamp.mediaClockRate).toLong()).coerceAtLeast(0L) / 1000L
+    }
     override fun prepare(path: String) {
         player.setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
             .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE).build())
@@ -62,7 +76,7 @@ private class AndroidVideoAudioDevice : VideoAudioDevice {
 class VideoAudioPlayer internal constructor(private val factory: () -> VideoAudioDevice) : AutoCloseable {
     constructor() : this({ AndroidVideoAudioDevice() })
     private val worker = Executors.newSingleThreadExecutor { task -> Thread(task, "video-audio").apply { isDaemon = true } }
-    private var device: VideoAudioDevice? = null
+    @Volatile private var device: VideoAudioDevice? = null
     private var pending: Future<Int>? = null
     private var closed = false
     private var speed = 1f
@@ -115,6 +129,9 @@ class VideoAudioPlayer internal constructor(private val factory: () -> VideoAudi
             audio.position
         }
     }
+
+    /** Read on the caller's thread; MediaPlayer synchronizes its own clock queries. */
+    fun presentedPosition(): Long = try { device?.presented ?: -1L } catch (_: IllegalStateException) { -1L }
 
     @Synchronized fun beginPause() {
         submit { device?.let { if (it.playing) it.pause() }; 0 }

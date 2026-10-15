@@ -14,6 +14,7 @@ class VideoAudioTest {
         override val duration = 2000
         override var position = 0
         override var playing = false
+        override val presented: Long get() = position.toLong()
         override fun prepare(path: String) { events.add("prepare") }
         override fun seek(position: Int) { check(!playing); this.position = position; events.add("seek:$position") }
         override fun speed(value: Float) { events.add("speed:$value"); playing = true }
