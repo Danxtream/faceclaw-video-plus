@@ -3,6 +3,7 @@ package com.faceclaw.app
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.media.PlaybackParams
+import android.os.Build
 import java.io.File
 import java.security.MessageDigest
 import java.util.concurrent.CountDownLatch
@@ -51,7 +52,10 @@ private class AndroidVideoAudioDevice : VideoAudioDevice {
         val complete = CountDownLatch(1)
         player.setOnSeekCompleteListener { complete.countDown() }
         try {
-            player.seekTo(position)
+            // The default mode (previous sync) starts audio at the MP4's earlier
+            // video keyframe, seconds early on long-GOP files; sync needs exact.
+            if (Build.VERSION.SDK_INT >= 26) player.seekTo(position.toLong(), MediaPlayer.SEEK_CLOSEST)
+            else player.seekTo(position)
             check(complete.await(10, TimeUnit.SECONDS)) { "Phone audio seek timed out" }
         } finally { player.setOnSeekCompleteListener(null) }
     }
