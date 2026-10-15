@@ -17,6 +17,7 @@ export interface VideoBackend {
   createUploadPump?(reader: unknown, plan: VideoUploadPlan): VideoUploadPump;
   configureEvidence?(enabled: boolean): void;
   measurementSnapshot?(): unknown;
+  beginMeasurement?(stream: number): void;
 }
 
 export const VIDEO = {
@@ -126,6 +127,7 @@ export class VideoProtocol {
     this.backend.configureEvidence?.(this.evidence);
   }
   measurementSnapshot(): unknown { return this.backend.measurementSnapshot?.() ?? null; }
+  beginMeasurement(stream: number): void { this.check(); this.backend.beginMeasurement?.(stream); }
   /** One bounded paired snapshot per normal report turn; no per-frame polling. */
   async rateEvidenceRows(stream: number, cursors: readonly number[], mode = 0): Promise<Uint8Array[] | null> {
     if (!this.rateEvidence) return null;

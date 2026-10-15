@@ -25,6 +25,7 @@ export function createVideoProtocol(ingressLeft = true): VideoProtocol {
   }
   const backend: VideoBackend = {
     epoch: () => Number(transport.getEpoch()),
+    beginMeasurement: stream => transport.beginMeasurement(stream),
     measurementSnapshot: () => ({transport: JSON.parse(String(transport.measurementSnapshot())),
       identity: JSON.parse(String(identities.identityMeasurement()))}),
     configureEvidence: enabled => transport.configureEvidence(identities, enabled),

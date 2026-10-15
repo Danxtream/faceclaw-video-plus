@@ -2,6 +2,7 @@ import { videoSeekPoint, type VideoSource } from "./video-clip";
 import { type VideoUploadPump, type VideoUploadProgress } from "./video-upload";
 import { VideoAvSync, type VideoAvAction } from "./video-av-sync";
 import { VideoMeasurement } from "./video-measurement";
+import { videoMeasurementLogs } from "./video-measurement-log";
 import { VIDEO, VideoProtocol, VideoReportUnavailable, videoU32, type VideoStatus } from "./video-protocol";
 import { parsePlayback, parseShown, parseVideoPhy, videoRestored, videoLive, videoOwnedSnapshot, videoTickSpan, videoCopyRate, videoPhyDetails,
   type VideoPhy, type VideoShown, type VideoPlaybackState } from "./video-observations";
@@ -25,7 +26,7 @@ export type VideoPlaybackView = {
   cleanupFailed: boolean;
   hostPhy: string;
 };
-type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot">>;
+type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement">>;
 type Intent = { kind: "pause" | "seek" | "scale" | "menu"; value: number | boolean; resolve: () => void; reject: (error: unknown) => void };
 type Generation = { stream: number; tokens: number[]; idr: number; target: number; prefix: number[]; firstNal: number; index: number; count: number; metadata: number; paused: boolean; reached: boolean; oldPhy: VideoPhy[]; started: number; anchor: VideoPhy[]; anchorAt: number; anchorUncertainty: number; detailedReports: boolean; pump?: VideoUploadPump };
 
@@ -58,6 +59,7 @@ export class VideoPlayback {
   private rate = { at: 0, sent: 0, consumed: 0, sentPictures: 0, consumedPictures: 0, drops: 0 };
   private measurement: VideoMeasurement | null = null;
   private nativeMeasurement: unknown = null;
+  private measurementSample = 0;
   constructor(private readonly protocol: Protocol, private readonly source: VideoSource,
     private readonly audio: VideoAudio, private readonly options: () => VideoOptions,
     private readonly changed: (view: VideoPlaybackView) => void = () => {},
@@ -260,7 +262,10 @@ export class VideoPlayback {
     this.av = this.audio.position ? new VideoAvSync(this.source.clip.duration) : null;
     this.rate = { at: this.clock(), sent: 0, consumed: Math.max(0, this.consumed), sentPictures: 0, consumedPictures: 0, drops: 0 };
     this.measurement = new VideoMeasurement(stream, this.generation.tokens);
-    console.error(`Video measurement start stream=${stream} transportBaseline=${JSON.stringify(this.readMeasurement())}`);
+    this.nativeMeasurement = null;
+    this.measurementSample = 0;
+    this.protocol.beginMeasurement?.(stream);
+    this.logMeasurement("start", {transportBaseline: this.readMeasurement()});
     const g = this.generation;
     g.pump = this.protocol.createUploadPump?.(this.source.uploadHandle, {
       stream, tokens: g.tokens, prefix: g.prefix, firstNal: g.firstNal, count: g.count,
@@ -304,8 +309,8 @@ export class VideoPlayback {
         await this.protocol.rateEvidenceRows?.(generation.stream, [0, 0], 2) : null;
       if (histogram) this.measurement?.accept(histogram, 2);
     } catch (error) { this.measurement?.unavailableSample(error); }
-    console.error(`Video measurement final=${JSON.stringify({shown: this.measurement?.summary(true) ?? null,
-      native: this.nativeMeasurement, transport: this.readMeasurement()})}`);
+    this.logMeasurement("final", {shown: this.measurement?.summary(true) ?? null,
+      pump: this.nativeMeasurement, transport: this.readMeasurement()});
     this.generation = null;
     await this.clockEvidence(2);
     if (sampleFailure) throw sampleFailure;
@@ -500,18 +505,22 @@ export class VideoPlayback {
     const sentPictures = this.pictureBound(g.index), consumedPictures = this.pictureBound(consumed);
     const video = this.av?.video(now) ?? null, audio = this.audio.position?.() ?? null;
     const lag = video === null || audio === null || !this.audioPlaying ? "--" : `${Math.round(audio - video)}ms`;
-    console.error(`Video rate: nalsSent=${((g.index - this.rate.sent) / seconds).toFixed(1)}/s ` +
-      `consumedNals=${((consumed - this.rate.consumed) / seconds).toFixed(1)}/s lag=${lag} ` +
-      `sentPictureBound=${((sentPictures - this.rate.sentPictures) / seconds).toFixed(1)}/s ` +
-      `consumedPictureBound=${((consumedPictures - this.rate.consumedPictures) / seconds).toFixed(1)}/s admitted=${g.metadata} ` +
-      `paused=${this.view.paused} drops=${this.rate.drops} native=${JSON.stringify(this.nativeMeasurement)} ` +
-      `transport=${JSON.stringify(this.readMeasurement())} ` +
-      `shown=${JSON.stringify(this.measurement?.summary() ?? null)}`);
+    this.logMeasurement("rate", {rate: {
+      nalsSent: (g.index - this.rate.sent) / seconds, consumedNals: (consumed - this.rate.consumed) / seconds, lag,
+      sentPictureBound: (sentPictures - this.rate.sentPictures) / seconds,
+      consumedPictureBound: (consumedPictures - this.rate.consumedPictures) / seconds,
+      admitted: g.metadata, paused: this.view.paused, drops: this.rate.drops},
+      pump: this.nativeMeasurement, transport: this.readMeasurement(), shown: this.measurement?.summary() ?? null});
     this.rate = { at: now, sent: g.index, consumed, sentPictures, consumedPictures, drops: 0 };
   }
   private readMeasurement(): unknown {
     try { return this.protocol.measurementSnapshot?.() ?? null; }
     catch (error) { this.measurement?.unavailableSample(error); return null; }
+  }
+  private logMeasurement(phase: string, groups: Record<string, unknown>): void {
+    const g = this.generation;
+    if (g) for (const line of videoMeasurementLogs({stream: g.stream, tokens: g.tokens},
+      this.measurementSample++, phase, groups)) console.error(line);
   }
   private async collectMeasurement(dips = false): Promise<void> {
     const g = this.generation, measurement = this.measurement;

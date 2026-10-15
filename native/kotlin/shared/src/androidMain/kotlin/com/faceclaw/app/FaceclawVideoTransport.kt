@@ -31,6 +31,7 @@ class VideoSubmission internal constructor(
     internal var failure: String? = null
     internal val queuedAt = System.nanoTime()
     internal var writtenAt = 0L
+    internal val timing = transport.recordMeasurement.queued(payload, epoch, transport.queryTimingOp)
 
     fun delivered() = transport.delivered(this)
     fun written() = transport.written(this)
@@ -51,7 +52,15 @@ class VideoCompletion(
  */
 class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
     internal val measurement = VideoMeasurement()
-    fun measurementSnapshot(): String = measurement.snapshot()
+    internal val recordMeasurement = VideoRecordMeasurement()
+    internal var queryTimingOp = 0
+    fun measurementSnapshot(): String =
+        "{\"lifetime\":${measurement.snapshot()},\"generation\":${recordMeasurement.snapshot()}}"
+    /** Called once after START while the single writer is fenced. */
+    fun beginMeasurement(stream: Long) = synchronized(monitor) {
+        check(pending.isEmpty() && request == 0L) { "Video measurement writer is not fenced" }
+        recordMeasurement.begin(stream, epoch)
+    }
     private val writer = ReentrantLock()
     private val pagePadding = SecureRandom()
     private val monitor = java.lang.Object()
@@ -111,6 +120,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
     }
 
     internal fun delivered(record: VideoSubmission) = synchronized(monitor) {
+        recordMeasurement.acknowledged(record.timing)
         if (record.epoch == epoch && record in pending) {
             if (record.writtenAt != 0L && !record.delivered) measurement.add(VideoMeasurement.ACK, System.nanoTime() - record.writtenAt)
             record.delivered = true
@@ -118,6 +128,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         }
     }
     internal fun written(record: VideoSubmission) = synchronized(monitor) {
+        recordMeasurement.written(record.timing)
         if (record.epoch == epoch && record in pending && record.writtenAt == 0L) {
             record.writtenAt = System.nanoTime()
             measurement.add(VideoMeasurement.QUEUE, record.writtenAt - record.queuedAt)
@@ -139,6 +150,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         evidenceReserve = null
         refusalEvidenceTargets = 0
         pending.forEach { it.failure = reason }
+        pending.forEach { recordMeasurement.finished(it.timing) }
         pending.clear()
         completions.clear()
         pages.clear()
@@ -242,6 +254,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         fun room() = await(generation, deadline) {
             val done = submitted.filter { it in pending && it.delivered }
             check(done.all { it.accepted == targets }) { "Paired NAL transport refused" }
+            done.forEach { recordMeasurement.finished(it.timing) }
             pending.removeAll(done.toSet())
             pending.size < 3
         }
@@ -267,7 +280,10 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             check(submitted.all { it.accepted == targets }) { "Paired NAL transport refused" }
             intArrayOf(submitted.size, admitted)
         } finally {
-            synchronized(monitor) { pending.removeAll(submitted.toSet()) }
+            synchronized(monitor) {
+                submitted.forEach { recordMeasurement.finished(it.timing) }
+                pending.removeAll(submitted.toSet())
+            }
             flushRefusalEvidence(ingressLeft, generation)
         }
     }
@@ -399,7 +415,10 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             await(generation, deadline) { submitted.all { it.delivered } }
             return submitted.map { it.accepted }.toIntArray()
         } finally {
-            synchronized(monitor) { pending.removeAll(submitted.toSet()) }
+            synchronized(monitor) {
+                submitted.forEach { recordMeasurement.finished(it.timing) }
+                pending.removeAll(submitted.toSet())
+            }
         }
     }
 
@@ -415,6 +434,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             check(epoch == generation) { "Video query generation retired" }
             check(request == 0L) { "Video query already active" }
             request = id
+            queryTimingOp = unsigned(payload[1])
             requestedTargets = targets
             queryIngressLeft = ingressLeft
             replyFailure = null
