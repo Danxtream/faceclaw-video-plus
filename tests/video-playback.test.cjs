@@ -338,6 +338,34 @@ test('Unadmitted idle STALE STOP cleans up, but admitted or foreign owners do no
   }
 });
 
+test('Idle retired stream IDs permit LEASE retries and STALE cleanup, but never this attempted stream', async () => {
+  const f = fixture(5), start = f.protocol.start;
+  f.state.high = f.state.stream = 6;
+  let attempts = 0;
+  f.protocol.start = async (...args) => {
+    const rows = await start(...args);
+    if (++attempts === 1) { rows[0] = {...rows[0], result: 4, state: 0, stream: 6, high: 6}; return rows; }
+    assert.equal(args[0], 7); assert.equal(args[6], 1); return rows.slice(0, 1);
+  };
+  await f.player.run(); assert.equal(attempts, 2);
+  for (const mode of ['retired', 'attempted', 'admitted', 'error']) {
+    const h = fixture(5), status = h.protocol.status;
+    h.state.high = h.state.stream = 6;
+    h.protocol.start = async () => { throw new Error('START not admitted'); };
+    h.protocol.status = async (...args) => {
+      const rows = await status(...args);
+      if (args[0] === VIDEO.stop) for (const row of rows) {
+        row.result = 2; row.stream = mode === 'attempted' ? 7 : 6;
+        if (mode === 'admitted') row.high = 7;
+        if (mode === 'error') row.error = 8;
+      }
+      return rows;
+    };
+    await assert.rejects(h.player.run(), /START not admitted/);
+    assert.equal(h.player.view.cleanupFailed, mode !== 'retired');
+  }
+});
+
 test('A busy metadata queue retries without relabelling NALs or skipping pictures', async () => {
   const f = fixture(5); f.state.busyMetadata = 3;
   await f.player.run();

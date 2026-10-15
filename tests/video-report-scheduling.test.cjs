@@ -12,6 +12,8 @@ test('Link-limited playback still reports and starts audio before EOF', async ()
   const player = new VideoPlayback(f.protocol, f.source, {...silentVideoAudio,
     sync: async (...args) => sync.push({args, at: f.clock(), copies: f.copies.length})},
     () => ({native: true, dither: false, radio: true}), () => {}, () => {}, f.clock, f.sleep);
+  const report = player.report.bind(player);
+  player.report = () => f.report(report);
   await player.run();
   assert.ok(f.observations.some(row => row.free > 0 && row.kind.startsWith('shown')));
   assert.ok(sync.some(row => row.args[1] && row.copies < 160), 'Audio must start during playback');
@@ -44,10 +46,70 @@ test('Playback pipeline batches only granted credits and retries busy metadata w
   assert.equal(player.view.cleanupFailed, false);
 });
 
+test('Paged passive steps are rate-capped even with blocked credit and paused polls stay compact', async () => {
+  for (const decodeMs of [70, 250]) {
+    const f = latencyTransport(160, decodeMs, 35); let counted = 0;
+    const player = new VideoPlayback(f.protocol, f.source, silentVideoAudio,
+      () => ({native: true, dither: false, radio: true}), () => {}, n => counted += n, f.clock, f.sleep);
+    const steps = [], report = player.report.bind(player);
+    player.report = async () => {
+      const first = f.calls.length, at = f.clock(), blocked = player.reportSafe, feeding = player.generation.index < player.generation.count;
+      await report();
+      const calls = f.calls.slice(first);
+      steps.push({at, blocked, feeding,
+        pages: calls.reduce((sum, row) => sum + (row.pages ?? 0), 0),
+        trips: calls.reduce((sum, row) => sum + (row.trips ?? 0), 0)});
+    };
+    await player.run();
+    assert.ok(steps.every((row, i) => !i || row.at - steps[i - 1].at >= 1500), 'Blocked credits must not trigger a report burst');
+    if (decodeMs === 250) assert.ok(steps.some(row => row.blocked && row.feeding));
+    assert.ok(steps.some(row => row.pages === 2 && row.trips === 1), 'Prefer compact credit state to paged playback while feeding');
+    assert.equal(counted, 160);
+    const sends = f.calls.filter(row => row.kind === 'send');
+    const rate = 163e3 / (sends.at(-1).at + sends.at(-1).records * 45 - sends[0].at);
+    console.log('Paged fake decode ms:', decodeMs, 'NAL/s:', rate, 'pages/step:', [...new Set(steps.map(row => row.pages))]);
+    const before = f.calls.length;
+    player.generation = {stream: 1, tokens: [101, 102], reached: true, index: 10, count: 100, detailedReports: false};
+    player.view.paused = true;
+    f.protocol.owned = async op => {
+      assert.equal(op, 10); const raw = new Uint8Array(6); raw[0] = 10; raw[4] = 32;
+      return [raw, raw];
+    };
+    await player.report();
+    assert.equal(f.calls.length, before, 'Paused passive report must not fetch SHOWN/playback pages');
+  }
+});
+
+test('Confirmed pause keeps compact polls alive without uploading until resume', async () => {
+  const f = latencyTransport(160, 70, 35);
+  let pause, resume, pausedAt = null, polls = 0;
+  const player = new VideoPlayback(f.protocol, f.source, silentVideoAudio,
+    () => ({native: true, dither: false, radio: true}), view => {
+      if (view.paused && pausedAt === null) pausedAt = f.calls.length;
+    }, () => {}, f.clock, f.sleep);
+  const report = player.report.bind(player);
+  player.report = async () => {
+    const first = f.calls.length, paused = player.view.paused;
+    await report();
+    if (!pause && player.generation.reached) pause = player.pause(true);
+    if (paused && !resume) {
+      assert.deepEqual(f.calls.slice(first).map(row => row.kind), ['credit']);
+      assert.ok(f.calls.slice(pausedAt).every(row => row.kind !== 'send'));
+      if (++polls === 3) resume = player.pause(false);
+    }
+  };
+  await player.run(); await pause; await resume;
+  assert.equal(polls, 3);
+  assert.equal(f.copies.length, 160);
+  assert.equal(player.view.cleanupFailed, false);
+});
+
 test('Default observations keep a primed 70ms decoder fed with bounded staleness', async () => {
   const f = latencyTransport(); let counted = 0;
   const player = new VideoPlayback(f.protocol, f.source, silentVideoAudio,
     () => ({native: true, dither: false, radio: true}), () => {}, n => counted += n, f.clock, f.sleep);
+  const report = player.report.bind(player);
+  player.report = () => f.report(report);
   await player.run();
   assert.equal(f.copies.length, 160); assert.equal(counted, 160); assert.equal(f.closed(), true);
   assert.equal(f.primed(), true);
@@ -59,7 +121,7 @@ test('Default observations keep a primed 70ms decoder fed with bounded staleness
   assert.ok(f.calls.some(row => row.kind === 'shown-1') && f.calls.some(row => row.kind === 'shown-2'));
 });
 
-test('Detailed mode deliberately restores both-lens 500ms full reports for diagnostics', async () => {
+test('Detailed mode retains both-lens full reports within the passive rate cap', async () => {
   const f = latencyTransport(40);
   const player = new VideoPlayback(f.protocol, f.source, silentVideoAudio,
     () => ({native: true, dither: false, radio: true, detailedReports: true}), () => {}, () => {}, f.clock, f.sleep);

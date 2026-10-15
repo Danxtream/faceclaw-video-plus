@@ -217,6 +217,18 @@ class VideoTransportTest {
     private fun metadata(sequence: Int) = byteArrayOf(31, 14, 1, 0, (100 + sequence).toByte(), 0, 0, 0,
         50, 0, 0, 0, sequence.toByte(), 0, 0, 0, sequence.toByte(), 0, 0, 0, 0, 0, 0, 0)
 
+    @Test fun acknowledgedQueryWithoutFrozenReplyNamesItsOperationAndMissingLenses() {
+        val f = Fixture()
+        f.respond = { record -> f.ack(record, 1); f.ack(record, 2) }
+        val command = byteArrayOf(31, 10, 1, 0, 77, 0, 0, 0, 50, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0)
+        val error = assertFailsWith<IllegalStateException> {
+            f.transport.exchange(command, 6, 3, true, 5, deadline = System.nanoTime() + 50_000_000L)
+        }
+        assertTrue(error.message!!.contains("op=10 request=77"))
+        assertTrue(error.message!!.contains("waiting=page0"))
+        assertTrue(error.message!!.contains("missing=1,2"))
+    }
+
     @Test fun asynchronousPipelineCopiesAndBoundsItsPacket() {
         val f = Fixture()
         f.respond = { record -> f.ack(record, 1); f.ack(record, 2) }

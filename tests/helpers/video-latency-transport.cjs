@@ -9,9 +9,9 @@ function replyLatency(bytes) {
 function put(raw, offset, value) { new DataView(raw.buffer).setUint32(offset, value >>> 0, true); }
 
 /** Decoder consumption continues during every awaited request, not just polling. */
-function latencyTransport(frames = 160, decodeMs = 70) {
+function latencyTransport(frames = 160, decodeMs = 70, pageMs = 0) {
   let now = 100, expected = 0, accepted = 0, active = false, stream = 0, high = 0;
-  let work = null, primed = false, paused = false, closed = false;
+  let work = null, primed = false, paused = false, closed = false, passiveStep = false;
   const queue = [], metadata = [], copies = [], calls = [], stalls = [], observations = [];
   const types = [7, 8, 6, ...Array.from({length: frames}, (_, i) => i % 32 ? 1 : 5)];
   const clip = {duration: Math.round(frames * 62.5), h264: {nals: types.map(type => ({type}))},
@@ -40,10 +40,11 @@ function latencyTransport(frames = 160, decodeMs = 70) {
     }
     now = end;
   }
-  async function request(kind, bytes, passive = false) {
-    calls.push({kind, bytes, at: now, occupied: occupied(), active, accepted});
-    if (passive && active && accepted < types.length) observations.push({kind, free: 4 - occupied(), at: now});
-    advance(replyLatency(bytes));
+  async function request(kind, bytes, passive = false, lenses = 2) {
+    const pages = Math.ceil(bytes / 6), trips = 1 + lenses * (pages - 1);
+    calls.push({kind, bytes, pages: pages * lenses, trips, at: now, occupied: occupied(), active, accepted});
+    if ((passive || passiveStep) && active && accepted < types.length) observations.push({kind, free: 4 - occupied(), pages: pages * lenses, trips, at: now});
+    advance(pageMs ? trips * pageMs : replyLatency(bytes));
   }
   const protocol = {
     capabilities: async () => request('caps', 16),
@@ -56,9 +57,10 @@ function latencyTransport(frames = 160, decodeMs = 70) {
     timeline: async () => { await request('timeline', 128); return status(); },
     start: async value => { await request('start', 128); active = true; stream = high = value; return status(); },
     phy: async () => {
+      const capturedAt = now;
       await request('phy', 128, copies.length > 0);
       return [1, 2].map(lens => {
-        const raw = new Uint8Array(128); raw.set([1, 7, 0, 1]); put(raw, 4, now); raw.set([1, 32, 3, lens], 8);
+        const raw = new Uint8Array(128); raw.set([1, 7, 0, 1]); put(raw, 4, capturedAt); raw.set([1, 32, 3, lens], 8);
         for (let i = 0; i < 3; i++) {
           const p = 12 + i * 32; raw[p] = i + 1;
           if (i) continue;
@@ -80,11 +82,12 @@ function latencyTransport(frames = 160, decodeMs = 70) {
       for (const record of records) queue.push({index: accepted++, type: record[0] & 31});
       if (occupied() === 4 && copies.length > 0) primed = true;
       calls.push({kind: 'send', at: now, records: records.length, first});
-      advance(records.length * 20);
+      advance(records.length * (pageMs ? 45 : 20));
     },
     owned: async (op, _stream, tokens, length) => {
       assert.deepEqual(tokens, [101, 102]);
-      await request(op === VIDEO.credits ? 'credit' : 'playback', length, op === VIDEO.playback);
+      await request(op === VIDEO.credits ? 'credit' : 'playback', length, op === VIDEO.playback || paused);
+      if (op === VIDEO.pause || op === VIDEO.resume) paused = op === VIDEO.pause;
       if (op === VIDEO.credits) return [1, 2].map(() => {
         const raw = new Uint8Array(6); put(raw, 0, expected); raw[4] = 32 | (4 - occupied()); return raw;
       });
@@ -96,12 +99,14 @@ function latencyTransport(frames = 160, decodeMs = 70) {
       });
     },
     shown: async (_stream, token, lens, cursor = 0) => {
-      await request('shown-' + lens, 72, true);
+      // Frozen replies retain the command-time snapshot across all PAGE fetches.
       const first = Math.max(1, copies.length - 31);
       const row = cursor ? copies[Math.max(first, cursor) - 1] : copies.at(-1);
+      const last = copies.length;
+      await request('shown-' + lens, 72, true, 1);
       const raw = new Uint8Array(72); raw.set([1, VIDEO.shown, row ? 0 : 3, lens]);
       if (row) [stream, token, row.serial, row.ordinal, row.pts, row.tick, row.tick - 3, row.tick - decodeMs,
-        1, first, copies.length, first - 1, 0, 0, 0xffffffff].forEach((value, i) => put(raw, 4 + i * 4, value));
+        1, first, last, first - 1, 0, 0, 0xffffffff].forEach((value, i) => put(raw, 4 + i * 4, value));
       return raw;
     },
   };
@@ -111,6 +116,7 @@ function latencyTransport(frames = 160, decodeMs = 70) {
     return protocol.metadata(id, next.ordinal, next.nal, next.pts);
   };
   return {protocol, source: {clip, readNal: async i => Uint8Array.of(types[i] | 0x60, i), close: () => {closed = true;}},
+    report: async action => { passiveStep = true; try { return await action(); } finally { passiveStep = false; } },
     clock: () => now, sleep: async ms => advance(ms), copies, calls, stalls, observations,
     primed: () => primed, closed: () => closed};
 }

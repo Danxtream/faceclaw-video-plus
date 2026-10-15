@@ -376,11 +376,13 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             replyFailure = null
             pages.clear()
         }
+        var waiting = "transport ACK"
         try {
             val masks = send(leading + payload, targets, ingressLeft, generation, deadline, overlap)
             check(masks.take(leading.size).all { it == targets }) { "Paired NAL transport refused" }
             val accepted = masks.last()
             val sides = (1..2).filter { targets and it != 0 }
+            waiting = "page0"
             await(generation, deadline) { sides.all { Pair(it, 0) in pages } }
             val result = mutableListOf<ByteArray>()
             for (side in sides) {
@@ -390,9 +392,11 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                 first.second.copyInto(data)
                 var offset = first.second.size
                 for (page in 1 until first.first) {
+                    waiting = "page=$page lens=$side ACK"
                     val command = byteArrayOf(31, 5, 1, 0,
                         id.toByte(), (id shr 8).toByte(), (id shr 16).toByte(), (id shr 24).toByte(), page.toByte())
                     check(send(arrayOf(command), side, ingressLeft, generation, deadline)[0] == side) { "Frozen page refused" }
+                    waiting = "page=$page lens=$side reply"
                     await(generation, deadline) { Pair(side, page) in pages }
                     val part = synchronized(monitor) { pages[Pair(side, page)]!! }
                     require(part.first == first.first && part.second.size == minOf(first.second.size, length - offset))
@@ -403,6 +407,14 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                 result.add(data)
             }
             result.toTypedArray()
+        } catch (error: IllegalStateException) {
+            if (error.message != "Video exact ACK or frozen page timed out") throw error
+            val missing = synchronized(monitor) {
+                (1..2).filter { targets and it != 0 && Pair(it, 0) !in pages }.joinToString(",")
+            }
+            val ingress = if (ingressLeft) "LEFT" else "RIGHT"
+            throw IllegalStateException("Video query op=${unsigned(payload[1])} request=$id targets=$targets " +
+                "ingress=$ingress waiting=$waiting missing=$missing: ${error.message}", error)
         } finally {
             synchronized(monitor) { request = 0; pages.clear() }
         }
