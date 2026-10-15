@@ -6,6 +6,9 @@ import java.security.SecureRandom
 import java.util.concurrent.Executors
 import kotlin.concurrent.withLock
 
+/** Missing transport evidence, not an invalid owner, reply or decoder state. */
+internal class VideoQueryUnavailable(message: String) : IllegalStateException("Video query unavailable: $message")
+
 /** Enqueues records on the existing authenticated communicator, never a new link. */
 fun interface VideoRecordQueue {
     fun enqueue(record: VideoSubmission): Boolean
@@ -54,6 +57,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
     private var requestedTargets = 0
     private var queryIngressLeft = true
     private var replyFailure: String? = null
+    private var uncertainContexts = 0
     private class Operation(val epoch: Long) {
         var complete = false
         var result = ""
@@ -80,6 +84,14 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         record.targets
     }
 
+    /** A refused record invalidates the ingress inflater; reset on the writer. */
+    fun needsContextReset(message: OutboundMessage): Boolean = synchronized(monitor) {
+        val record = pending.firstOrNull { it.message === message && it.epoch == epoch }
+            ?: throw IllegalStateException("Video record generation retired")
+        val bit = if (record.ingressLeft) 1 else 2
+        (uncertainContexts and bit != 0).also { uncertainContexts = uncertainContexts and bit.inv() }
+    }
+
     /** Remove native queue entries only after every selected lens answered exactly. */
     fun drainCompleted(): Array<VideoCompletion> = synchronized(monitor) {
         completions.toTypedArray().also { completions.clear() }
@@ -103,6 +115,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
     fun retire(reason: String) = synchronized(monitor) {
         check(epoch != Long.MAX_VALUE) { "Video connection epoch exhausted" }
         epoch++
+        uncertainContexts = 0
         pending.forEach { it.failure = reason }
         pending.clear()
         completions.clear()
@@ -319,6 +332,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                 if (ack.messageId != 0 || record.targets and ack.lens == 0 ||
                     (!ack.nack && (ack.size != message.message.size || ack.checksum != message.cfwChecksum))) continue
                 if (record.acknowledged and ack.lens == 0) {
+                    if (ack.nack) uncertainContexts = uncertainContexts or if (ingressLeft) 1 else 2
                     record.acknowledged = record.acknowledged or ack.lens
                     if (!ack.nack) record.accepted = record.accepted or ack.lens
                 }
@@ -378,12 +392,18 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             replyFailure = null
             pages.clear()
         }
+        val began = System.nanoTime()
         var waiting = "transport ACK"
         try {
             val masks = send(leading + payload, targets, ingressLeft, generation, deadline, overlap)
             check(masks.take(leading.size).all { it == targets }) { "Paired NAL transport refused" }
             val accepted = masks.last()
             val sides = (1..2).filter { targets and it != 0 }
+            for (side in sides.filter { accepted and it == 0 }) {
+                val count = synchronized(monitor) { pages[Pair(side, 0)]?.first ?: 0 }
+                System.err.println("Video command refused op=${unsigned(payload[1])} request=$id side=$side " +
+                    "page=0 pages=$count attempt=1 elapsedMs=${(System.nanoTime() - began) / 1_000_000}")
+            }
             waiting = "page0"
             await(generation, deadline) { sides.all { Pair(it, 0) in pages } }
             val result = mutableListOf<ByteArray>()
@@ -395,7 +415,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                 var offset = first.second.size
                 for (page in 1 until first.first) {
                     waiting = "page=$page lens=$side ACK"
-                    for (attempt in 1..3) {
+                    for (attempt in 1..4) {
                         // Refresh padding on retries too: persistent compression
                         // must not erase the proof of the reply packet budget.
                         val command = ByteArray(VIDEO_REPLY_MAX_BYTES - 5).also {
@@ -403,15 +423,20 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                             byteArrayOf(31, 5, 1, 0, id.toByte(), (id shr 8).toByte(),
                                 (id shr 16).toByte(), (id shr 24).toByte(), page.toByte()).copyInto(it)
                         }
+                        val attemptAt = System.nanoTime()
                         val acceptedPage = send(arrayOf(command), side, ingressLeft, generation, deadline)[0] == side
                         if (acceptedPage) break
-                        check(attempt < 3) {
-                            "Frozen page refused op=${unsigned(payload[1])} request=$id side=$side page=$page pages=${first.first} attempts=$attempt"
-                        }
+                        val evidence = "Frozen page refused op=${unsigned(payload[1])} request=$id side=$side " +
+                            "page=$page pages=${first.first} attempt=$attempt attempts=$attempt " +
+                            "elapsedMs=${(System.nanoTime() - began) / 1_000_000} " +
+                            "attemptMs=${(System.nanoTime() - attemptAt) / 1_000_000}"
+                        System.err.println(evidence)
+                        if (attempt == 4) throw VideoQueryUnavailable(evidence)
                         // Only repeat the read-only PAGE, never its owning command or NAL.
                         await(generation, deadline) { true }
-                        check(deadline - System.nanoTime() > 100_000_000L) { "Video exact ACK or frozen page timed out" }
-                        Thread.sleep(100)
+                        val backoff = longArrayOf(50, 150, 400)[attempt - 1]
+                        check(deadline - System.nanoTime() > backoff * 1_000_000) { "Video exact ACK or frozen page timed out" }
+                        Thread.sleep(backoff)
                     }
                     waiting = "page=$page lens=$side reply"
                     await(generation, deadline) { Pair(side, page) in pages }
@@ -425,13 +450,15 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             }
             result.toTypedArray()
         } catch (error: IllegalStateException) {
-            if (error.message != "Video exact ACK or frozen page timed out") throw error
+            if (error.message !in listOf("Video exact ACK or frozen page timed out", "Video native ACK timeout")) throw error
             val missing = synchronized(monitor) {
+                if (epoch == generation) uncertainContexts = uncertainContexts or if (ingressLeft) 1 else 2
                 (1..2).filter { targets and it != 0 && Pair(it, 0) !in pages }.joinToString(",")
             }
             val ingress = if (ingressLeft) "LEFT" else "RIGHT"
-            throw IllegalStateException("Video query op=${unsigned(payload[1])} request=$id targets=$targets " +
-                "ingress=$ingress waiting=$waiting missing=$missing: ${error.message}", error)
+            throw VideoQueryUnavailable("Video query op=${unsigned(payload[1])} request=$id targets=$targets " +
+                "ingress=$ingress waiting=$waiting missing=$missing " +
+                "elapsedMs=${(System.nanoTime() - began) / 1_000_000}: ${error.message}")
         } finally {
             synchronized(monitor) { request = 0; pages.clear() }
         }

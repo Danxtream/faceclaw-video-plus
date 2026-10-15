@@ -2683,7 +2683,9 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
             prewrittenMessage = null;
             prewrittenFrames = Collections.emptyList();
         } else if (message.sid == CfwTransport.SID) {
-            if (message.cfwRetries > 0) cfwTransports[message.isLeftArmMessage ? 0 : 1].reset();
+            if (message.cfwRetries > 0 ||
+                "video".equals(message.kind) && videoTransport.needsContextReset(message))
+                cfwTransports[message.isLeftArmMessage ? 0 : 1].reset();
             frames = cfwTransports[message.isLeftArmMessage ? 0 : 1].encode(
                     message.message, message.magic,
                     "video".equals(message.kind) ? videoTransport.targetsFor(message) : CfwTransport.BOTH,

@@ -1,5 +1,12 @@
 import { type VideoUploadPlan, type VideoUploadPump } from "./video-upload";
 
+declare const console: { error(...args: unknown[]): void };
+
+/** Only missing query transport evidence may be dropped by passive callers. */
+export class VideoReportUnavailable extends Error {
+  constructor(readonly op: number, detail: string) { super(detail); }
+}
+
 /** Reviewed ID31 commands on a supplied, already authenticated transport. */
 export interface VideoBackend {
   epoch(): number;
@@ -75,11 +82,25 @@ export class VideoProtocol {
   }
   private async query(raw: Uint8Array, length: number, targets = 3, resultOffset = 2): Promise<Uint8Array[]> {
     this.check();
-    const rows = await this.backend.exchange(raw, length, targets, resultOffset);
-    this.check();
-    if (rows.length !== (targets === 3 ? 2 : 1) || rows.some((row) => row.length !== length))
-      throw new Error("Missing lens video reply");
-    return rows;
+    const readOnly = [VIDEO.caps, VIDEO.status, 7, VIDEO.credits, VIDEO.playbackCaps, VIDEO.shown, VIDEO.playback].includes(raw[1]);
+    for (let attempt = 0; ; attempt++) {
+      let rows: Uint8Array[];
+      try { rows = await this.backend.exchange(raw, length, targets, resultOffset); }
+      catch (error) {
+        this.check();
+        if (!readOnly || !String(error).includes("Video query unavailable:")) throw error;
+        console.error(`Video read query op=${raw[1]} request=${videoU32(raw, 4)} targets=${targets} attempt=${attempt + 1}: ${error}`);
+        if (attempt) throw new VideoReportUnavailable(raw[1], String(error));
+        const fresh = await this.header(raw[1], raw.length);
+        fresh.set(raw.subarray(8), 8);
+        raw = fresh;
+        continue;
+      }
+      this.check();
+      if (rows.length !== (targets === 3 ? 2 : 1) || rows.some((row) => row.length !== length))
+        throw new Error("Missing lens video reply");
+      return rows;
+    }
   }
   async status(op: number = VIDEO.status, stream = 0): Promise<VideoStatus[]> {
     const raw = await this.header(op, op === VIDEO.reset || op === VIDEO.stop ? 12 : 8);

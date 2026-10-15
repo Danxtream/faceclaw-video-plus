@@ -2,6 +2,45 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {VideoPlayback, silentVideoAudio} = require('../.test-build/app/apps/video/video-playback');
 const {latencyTransport, replyLatency} = require('./helpers/video-latency-transport.cjs');
+const {VideoReportUnavailable, VIDEO} = require('../.test-build/app/apps/video/video-protocol');
+
+test('Passive SHOWN, credits and playback transport failures back off without ending video', async () => {
+  for (const kind of ['shown', 'credits', 'playback']) {
+    const f = latencyTransport(160, 2, 35);
+    let failed = false, failureAt, sentAtFailure;
+    const shown = f.protocol.shown, owned = f.protocol.owned;
+    const unavailable = async op => {
+      failed = true; failureAt = f.clock();
+      sentAtFailure = f.calls.filter(row => row.kind === 'send').length;
+      await f.sleep(31_000);
+      throw new VideoReportUnavailable(op, 'Video query unavailable: simulated PAGE timeout');
+    };
+    f.protocol.shown = async (...args) => kind === 'shown' && !failed ? unavailable(VIDEO.shown) : shown(...args);
+    f.protocol.owned = async (op, ...args) => {
+      if (!failed && (kind === 'credits' && op === VIDEO.credits || kind === 'playback' && op === VIDEO.playback)) return unavailable(op);
+      return owned(op, ...args);
+    };
+    const player = new VideoPlayback(f.protocol, f.source, silentVideoAudio,
+      () => ({native: true, dither: false, radio: true}), () => {}, () => {}, f.clock, f.sleep);
+    await player.run();
+    assert.ok(failed, kind);
+    assert.equal(player.view.error, null);
+    assert.equal(player.view.cleanupFailed, false);
+    assert.equal(f.copies.length, 160);
+    if (kind !== 'playback') assert.ok(f.calls.filter(row => row.kind === 'send').length > sentAtFailure);
+    assert.ok(f.calls.filter(row => row.at > failureAt && row.kind.startsWith('shown')).every(row => row.at >= failureAt + 1500));
+  }
+});
+
+test('Required preview and control replies still fail instead of losing evidence', async () => {
+  for (const required of [true, false]) {
+    const f = latencyTransport();
+    const player = new VideoPlayback(f.protocol, f.source, silentVideoAudio,
+      () => ({native: true, dither: false, radio: true}), () => {}, () => {}, f.clock, f.sleep);
+    player.reportStep = async () => { throw required ? new VideoReportUnavailable(VIDEO.shown, 'PAGE missing') : new Error('Video owner credit window failed'); };
+    await assert.rejects(player.report(required), required ? /PAGE missing/ : /owner credit/);
+  }
+});
 
 function assertNoUploadStallsOutsidePairedReports(f) {
   const captures = f.calls.filter(row => row.kind.startsWith('shown')).map(row => ({

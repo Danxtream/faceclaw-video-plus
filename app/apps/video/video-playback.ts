@@ -1,6 +1,6 @@
 import { videoSeekPoint, type VideoSource } from "./video-clip";
 import { type VideoUploadPump, type VideoUploadProgress } from "./video-upload";
-import { VIDEO, VideoProtocol, videoU32, type VideoStatus } from "./video-protocol";
+import { VIDEO, VideoProtocol, VideoReportUnavailable, videoU32, type VideoStatus } from "./video-protocol";
 import { parsePlayback, parseShown, parseVideoPhy, videoRestored, videoLive, videoOwnedSnapshot, videoTickSpan, videoCopyRate, videoPhyDetails,
   type VideoPhy, type VideoShown, type VideoPlaybackState } from "./video-observations";
 
@@ -502,8 +502,23 @@ export class VideoPlayback {
       rows.every((row) => !row.paused && !row.pending &&
       row.shown === this.source.clip.pictures.length - g.target);
   }
+  private deferReport(error: unknown, began: number): boolean {
+    if (!(error instanceof VideoReportUnavailable) || this.stopping) return false;
+    const now = this.clock();
+    console.error(`Video passive report dropped; retry after backoff: ${error}`);
+    this.reportAt = now; this.reportDue = now + 1500; this.shownDue = now + 5000;
+    // Missing evidence is not proof of stalled copies; do not invent progress.
+    this.progressAt += now - began;
+    return true;
+  }
+  /** Controls require evidence; passive reports may lose a transport sample. */
+  private async report(required = false): Promise<void> {
+    const began = this.clock();
+    try { await this.reportStep(); }
+    catch (error) { if (required || !this.deferReport(error, began)) throw error; }
+  }
   /** One passive step per blocked or stale turn; recheck input before the next. */
-  private async report(): Promise<void> {
+  private async reportStep(): Promise<void> {
     await this.suspendUpload();
     const g = this.generation!;
     const began = this.clock();
@@ -539,7 +554,7 @@ export class VideoPlayback {
     const deadline = this.clock() + 30_000;
     while (!this.generation!.reached && !this.stopping) {
       const uploaded = await this.upload();
-      await this.report();
+      await this.report(true);
       if (this.clock() > deadline) throw new Error("Seek target was not shown by both lenses");
       if (!uploaded && !this.metadataStaged) await this.sleep(10);
     }
@@ -565,7 +580,17 @@ export class VideoPlayback {
         const g = this.generation!;
         let uploaded = false;
         if (this.view.paused && g.reached) { this.reportSafe = true; this.metadataStaged = false; }
-        else uploaded = await this.upload();
+        else {
+          const began = this.clock();
+          try { uploaded = await this.upload(); }
+          catch (error) {
+            if (!this.deferReport(error, began)) throw error;
+            this.creditBudget = 0;
+            await this.sleep(1500);
+            this.progressAt += this.clock() - this.reportAt;
+            continue;
+          }
+        }
         if (this.stopping) break;
         const stale = this.clock() - this.reportAt >= 1500;
         const report = (!g.reached || g.detailedReports || this.reportSafe || stale) && this.clock() >= this.reportDue;

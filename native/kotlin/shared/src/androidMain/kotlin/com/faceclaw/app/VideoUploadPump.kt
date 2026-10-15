@@ -44,26 +44,41 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
             (u(it[5]) != 0 || word(it, 0) == word(command, 12)) }) { "Picture metadata refused" }
         return rows.all { u(it[5]) == 0 }
     }
-    private fun credits() {
-        val command = query(10, 20)
-        put(command, 12, plan.tokens[0]); put(command, 16, plan.tokens[1])
-        val rows = exchange(command); checkEpoch()
-        require(rows.size == 2 && rows.all { it.size == 6 }) { "Missing lens video reply" }
+    private fun credits(shouldContinue: () -> Boolean): Boolean {
+        var rows: Array<ByteArray>? = null
+        for (attempt in 1..2) {
+            val command = query(10, 20)
+            put(command, 12, plan.tokens[0]); put(command, 16, plan.tokens[1])
+            try { rows = exchange(command); break }
+            catch (error: VideoQueryUnavailable) {
+                checkEpoch()
+                System.err.println("Video upload credits request=${word(command, 4)} attempt=$attempt: ${error.message}")
+                budget = 0; blocked = true
+                // Yield to a waiting control before starting another bounded query.
+                if (!shouldContinue()) return false
+                Thread.sleep(if (attempt == 1) 50 else 400)
+            }
+        }
+        checkEpoch()
+        val credit = rows ?: return false
+        require(credit.size == 2 && credit.all { it.size == 6 }) { "Missing lens video reply" }
         budget = 4
-        for (raw in rows) {
+        for (raw in credit) {
             val expected = word(raw, 0)
             val packed = u(raw[4]); val capacity = if (packed and 8 != 0) 6 else 4; val free = packed and 7
             check(u(raw[5]) == 0 && packed and 128 == 0 && (packed shr 4 and 7) == 2 && free <= capacity &&
                 expected <= index && index - expected <= capacity) { "Video owner credit window failed" }
             budget = minOf(budget, free, (capacity + expected - index).toInt())
         }
-        consumed = rows.minOf { word(it, 0) }
+        consumed = credit.minOf { word(it, 0) }
+        blocked = false
+        return true
     }
     /** Finish exactly one existing native pipeline batch before any writer handoff. */
-    fun step(): Boolean {
+    fun step(shouldContinue: () -> Boolean = { true }): Boolean {
         checkEpoch(); blocked = false
         if (done) return false
-        if (budget == 0) credits()
+        if (budget == 0 && !credits(shouldContinue)) return false
         val first = plan.pictures.getOrNull(metadata)
         if (first?.source == source(index)) {
             if (!metadataAccepted(metadataCommand(metadata + 1, index))) { blocked = true; return false }
@@ -143,7 +158,7 @@ class VideoUploadPump internal constructor(create: () -> VideoUploadEngine) {
                     }
                     engine.refreshCredits()
                     while (synchronized(monitor) { requested && !closed }) {
-                        engine.step()
+                        engine.step { synchronized(monitor) { requested && !closed } }
                         synchronized(monitor) {
                             progress = "\"index\":${engine.index},\"metadata\":${engine.metadata},\"consumed\":${engine.consumed}," +
                                 "\"budget\":${engine.budget},\"blocked\":${engine.blocked}"

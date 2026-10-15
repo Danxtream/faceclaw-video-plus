@@ -258,9 +258,13 @@ class VideoTransportTest {
         assertTrue(error.message!!.contains("missing=1,2"))
     }
 
-    @Test fun refusedPageRetriesOnlyThatReadAndNamesItsExactIdentityAfterThreeFailures() {
+    @Test fun refusedPageUsesThreeBackoffsAndLogsEveryExactRefusal() {
         for (permanent in listOf(false, true)) {
             val f = Fixture(); var tries = 0; var parents = 0
+            val times = mutableListOf<Long>()
+            val log = java.io.ByteArrayOutputStream()
+            val previous = System.err
+            System.setErr(java.io.PrintStream(log))
             val encoder = CfwTransport(testPlatform())
             f.respond = { record ->
                 val parent = record.payload[1].toInt() != 5
@@ -269,7 +273,8 @@ class VideoTransportTest {
                     .maxOf { it.size - 11 } >= FaceclawVideoTransport.VIDEO_REPLY_MAX_BYTES)
                 val page = if (parent) 0 else record.payload[8].toInt()
                 for (side in 1..2) if (record.targets and side != 0) {
-                    val refuse = side == 2 && page == 1 && (++tries <= 2 || permanent)
+                    if (side == 2 && page == 1) times.add(System.nanoTime())
+                    val refuse = side == 2 && page == 1 && (++tries <= 3 || permanent)
                     if (!refuse) {
                         val raw = byteArrayOf(1, 7, 0, side.toByte(), 9, 8)
                         f.page(70, side, page, 3, raw.copyOfRange(page * 2, page * 2 + 2), true)
@@ -278,12 +283,54 @@ class VideoTransportTest {
                 }
             }
             val query = byteArrayOf(31, 4, 1, 0, 70, 0, 0, 0)
-            if (permanent) {
-                val error = assertFailsWith<IllegalStateException> { f.transport.exchange(query, 6, 3, true, 2) }
-                assertTrue(error.message!!.contains("op=4 request=70 side=2 page=1 pages=3 attempts=3"))
-            } else assertContentEquals(byteArrayOf(1, 7, 0, 2, 9, 8), f.transport.exchange(query, 6, 3, true, 2)[1])
-            assertEquals(3, tries); assertEquals(1, parents)
-            encoder.close()
+            try {
+                if (permanent) {
+                    val error = assertFailsWith<VideoQueryUnavailable> { f.transport.exchange(query, 6, 3, true, 2) }
+                    assertTrue(error.message!!.contains("op=4 request=70 side=2 page=1 pages=3 attempt=4 attempts=4"))
+                } else assertContentEquals(byteArrayOf(1, 7, 0, 2, 9, 8), f.transport.exchange(query, 6, 3, true, 2)[1])
+                assertEquals(4, tries); assertEquals(1, parents)
+                val entries = log.toString().lineSequence().filter { it.contains("Frozen page refused") }.toList()
+                assertEquals(if (permanent) 4 else 3, entries.size)
+                entries.forEachIndexed { i, line ->
+                    assertTrue(line.contains("op=4 request=70 side=2 page=1 pages=3 attempt=${i + 1}"))
+                    assertTrue(line.contains("elapsedMs=") && line.contains("attemptMs="))
+                }
+                for (i in 1..3) assertTrue(times[i] - times[i - 1] >= longArrayOf(50, 150, 400)[i - 1] * 1_000_000)
+            } finally { System.setErr(previous); encoder.close() }
+        }
+    }
+
+    @Test fun exactNackResetsOnlyItsIngressContextOnTheNextWriterRecord() {
+        for (left in listOf(true, false)) {
+            val f = Fixture(); var calls = 0
+            f.respond = { record ->
+                when (calls++) {
+                    0 -> {
+                        f.ack(record, 1, success = false, left = !left)
+                        f.ack(record, 1, success = false, attempt = (record.message!!.magic + 1) and 255)
+                        assertFalse(f.transport.needsContextReset(record.message!!))
+                        f.ack(record, 1, success = false)
+                    }
+                    1 -> { assertFalse(f.transport.needsContextReset(record.message!!)); f.ack(record, 1) }
+                    2 -> {
+                        assertTrue(f.transport.needsContextReset(record.message!!))
+                        assertFalse(f.transport.needsContextReset(record.message!!))
+                        f.ack(record, 1)
+                    }
+                    3 -> f.ack(record, 1, success = false)
+                    else -> {
+                        assertFalse(f.transport.needsContextReset(record.message!!))
+                        f.page(91, 1, 0, 1, byteArrayOf(1, 7, 0, 1, 0, 0), left)
+                        f.ack(record, 1)
+                    }
+                }
+            }
+            assertContentEquals(intArrayOf(0), f.transport.sendWindow(arrayOf(nal(1)), 1, left))
+            assertContentEquals(intArrayOf(1), f.transport.sendWindow(arrayOf(nal(2)), 1, !left))
+            assertContentEquals(intArrayOf(1), f.transport.sendWindow(arrayOf(nal(3)), 1, left))
+            assertContentEquals(intArrayOf(0), f.transport.sendWindow(arrayOf(nal(4)), 1, left))
+            f.transport.retire("reconnect")
+            assertEquals(1, f.transport.exchange(byteArrayOf(31, 4, 1, 0, 91, 0, 0, 0), 6, 1, left, 2).size)
         }
     }
 

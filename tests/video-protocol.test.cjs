@@ -1,6 +1,46 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { VideoProtocol, VIDEO, parseVideoStatus, videoU32 } = require('../.test-build/app/apps/video/video-protocol');
+const { VideoProtocol, VideoReportUnavailable, VIDEO, parseVideoStatus, videoU32 } = require('../.test-build/app/apps/video/video-protocol');
+
+test('Read-only queries get exactly one fresh durable ID after unavailable pages', async () => {
+  for (const op of [VIDEO.shown, VIDEO.credits, VIDEO.playback]) {
+    let id = 40, fail = 1;
+    const requests = [];
+    const protocol = new VideoProtocol({epoch: () => 1, exchange: async (raw, length) => {
+      requests.push(raw.slice());
+      if (fail-- > 0) throw new Error('Video query unavailable: Frozen page refused op=' + op);
+      return [new Uint8Array(length), new Uint8Array(length)];
+    }}, () => id++);
+    await protocol.owned(op, 12, [101, 102], 6);
+    assert.deepEqual(requests.map(raw => videoU32(raw, 4)), [40, 41]);
+    assert.deepEqual(requests[0].slice(8), requests[1].slice(8));
+    fail = 2;
+    await assert.rejects(protocol.owned(op, 12, [101, 102], 6), VideoReportUnavailable);
+    assert.equal(requests.length, 4);
+  }
+});
+
+test('Missing reports cannot hide malformed replies, changed epochs or retry controls', async () => {
+  for (const op of [VIDEO.start, VIDEO.stop, VIDEO.pause, VIDEO.menu, VIDEO.metadata]) {
+    let calls = 0;
+    const protocol = new VideoProtocol({epoch: () => 1, exchange: async () => {
+      calls++; throw new Error('Video query unavailable: Frozen page refused');
+    }}, () => 1);
+    await assert.rejects(protocol.owned(op, 12, [101, 102], 6), /unavailable/);
+    assert.equal(calls, 1);
+  }
+  for (const mode of ['epoch', 'malformed', 'owner']) {
+    let epoch = 1, calls = 0;
+    const protocol = new VideoProtocol({epoch: () => epoch, exchange: async () => {
+      calls++;
+      if (mode === 'epoch') { epoch++; throw new Error('Video query unavailable: timeout'); }
+      if (mode === 'owner') throw new Error('Video owner credit window failed');
+      return [];
+    }}, () => 1);
+    await assert.rejects(protocol.owned(VIDEO.credits, 12, [101, 102], 6), error => !(error instanceof VideoReportUnavailable));
+    assert.equal(calls, 1);
+  }
+});
 
 function status() {
   const raw = new Uint8Array(192);

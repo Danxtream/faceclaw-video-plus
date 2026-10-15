@@ -18,6 +18,32 @@ class VideoUploadPumpTest {
     private fun plan(count: Int = 8) = VideoUploadPlan(50, longArrayOf(101, 102), intArrayOf(), 0, count,
         (0 until count).map { VideoUploadPicture(it, it * 63L) })
 
+    @Test fun missingCreditsRetryFreshIdsThenWaitWithoutInventingCreditOrFailingPump() {
+        var id = 1L; var failures = 2; var pipelines = 0
+        val requests = mutableListOf<Long>()
+        val engine = VideoUploadEngine(plan(), 8, { byteArrayOf(0x65) }, { id++ }, {}, { command ->
+            if (command[1].toInt() == 10) {
+                requests.add(word(command, 4))
+                if (failures-- > 0) throw VideoQueryUnavailable("Frozen page refused op=10")
+                arrayOf(reply(0, 33), reply(0, 33))
+            } else arrayOf(reply(word(command, 12), 1), reply(word(command, 12), 1))
+        }, { records, following -> pipelines++; intArrayOf(records.size, following.count { it != null }) })
+        assertFalse(engine.step()); assertTrue(engine.blocked)
+        assertEquals(listOf(1L, 2L), requests); assertEquals(0, engine.budget)
+        assertEquals(0, engine.index); assertEquals(0, pipelines)
+        assertTrue(engine.step()); assertEquals(1, engine.index); assertEquals(1, pipelines)
+        assertEquals(listOf(1L, 2L, 3L), requests)
+    }
+
+    @Test fun waitingControlPreventsAnotherCreditRetryAfterTimeout() {
+        var requests = 0
+        val engine = VideoUploadEngine(plan(), 8, { error("Uncredited read") }, { 1 }, {}, {
+            requests++; throw VideoQueryUnavailable("Video exact ACK or frozen page timed out")
+        }, { _, _ -> error("Uncredited send") })
+        assertFalse(engine.step { false }); assertTrue(engine.blocked)
+        assertEquals(1, requests); assertEquals(0, engine.index); assertEquals(0, engine.budget)
+    }
+
     @Test fun pumpUsesDurableIdsAndExistingPipelineForBusyMetadataOnBothIngresses() {
         for (left in listOf(true, false)) {
             val f = VideoTransportTest.Fixture()
