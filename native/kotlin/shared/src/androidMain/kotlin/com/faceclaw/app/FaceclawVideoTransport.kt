@@ -434,6 +434,8 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                  generation: Long = epoch, leading: Array<ByteArray> = emptyArray(), overlap: Boolean = false,
                  deadline: Long = System.nanoTime() + 15_000_000_000L): Array<ByteArray> = writer.withLock {
         require(payload.size >= 8 && length in 1..192 && resultOffset in 0 until length)
+        // A flagged credits request (op 10, 24 bytes) packs timeline room above its 5-bit result.
+        val resultMask = if (unsigned(payload[1]) == 10 && payload.size == 24) 31 else 255
         val id = u32(payload, 4)
         require(id in 1..0xfffffffeL)
         require(leading.size <= 1 && leading.all { it.size in 11..4096 && unsigned(it[0]) == MESSAGE && unsigned(it[1]) == 6 })
@@ -508,7 +510,9 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                     part.second.copyInto(data, offset)
                     offset += part.second.size
                 }
-                require(offset == length && (accepted and side != 0) == (unsigned(data[resultOffset]) == 0))
+                require(offset == length && (accepted and side != 0) == (unsigned(data[resultOffset]) and resultMask == 0)) {
+                    "Video reply result disagrees with its ACK op=${unsigned(payload[1])} side=$side result=${unsigned(data[resultOffset])}"
+                }
                 result.add(data)
                 measurement.add(VideoMeasurement.REPLY_BYTES, count = data.size.toLong())
             }

@@ -6,6 +6,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFails
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -413,6 +414,25 @@ class VideoTransportTest {
         assertEquals(31, f.records.poll()!!.payload[0].toInt())
         for (invalid in listOf(byteArrayOf(5), byteArrayOf(1, 11, 0), byteArrayOf(1, 11, 0) + nal(1) + byteArrayOf(1)))
             assertFailsWith<IllegalArgumentException> { f.transport.beginPipeline(java.nio.ByteBuffer.wrap(invalid), 3, true) }
+    }
+
+    @Test fun flaggedCreditRepliesCarryTimelineRoomBesideAnAcceptedResult() {
+        for (code in listOf(0, 2)) {
+            val f = Fixture()
+            f.respond = { record -> for (side in 1..2) {
+                f.page(105, side, 0, 1, byteArrayOf(4, 0, 0, 0, 46, ((3 shl 5) or code).toByte()), true)
+                f.ack(record, side) // An accepted ACK must agree with a zero 5-bit code.
+            } }
+            val request = byteArrayOf(31, 10, 1, 0, 105, 0, 0, 0, 50, 0, 0, 0, 101, 0, 0, 0, 102, 0, 0, 0, 1, 0, 0, 0)
+            if (code == 0) assertEquals(listOf(3 shl 5, 3 shl 5), f.transport.exchange(request, 6, 3, true, 5).map { it[5].toInt() and 255 })
+            else assertFails { f.transport.exchange(request, 6, 3, true, 5) }
+        }
+        // The plain 20-byte request still requires a zero result byte with an accepted ACK.
+        val f = Fixture()
+        f.respond = { record -> for (side in 1..2) {
+            f.page(106, side, 0, 1, byteArrayOf(4, 0, 0, 0, 46, (3 shl 5).toByte()), true); f.ack(record, side)
+        } }
+        assertFails { f.transport.exchange(byteArrayOf(31, 10, 1, 0, 106, 0, 0, 0, 50, 0, 0, 0, 101, 0, 0, 0, 102, 0, 0, 0), 6, 3, true, 5) }
     }
 
     @Test fun timedNalRecordsUseTheirOwnHeaderAndCannotCarryFollowingMetadata() {
