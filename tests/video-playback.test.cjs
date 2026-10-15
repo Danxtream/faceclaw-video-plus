@@ -35,7 +35,7 @@ function shown(lens, stream, token, ordinal, pts, tick) {
     0, 1, ordinal, 0, 0, 0, 0xffffffff].forEach((v, i) => put(raw, 4 + i * 4, v));
   return raw;
 }
-function fixture(frames = 20) {
+function fixture(frames = 20, step = 63) {
   let now = 100;
   const calls = [], audio = [], view = [];
   const nals = [7, 8, 6, ...Array.from({length: frames}, (_, i) => i % 5 === 0 ? 5 : 1)]
@@ -51,7 +51,7 @@ function fixture(frames = 20) {
   function advance() {
     if (state.paused || !state.decoded.length) return;
     const row = state.decoded.shift();
-    now += 63; state.shown.push({...row, tick: now});
+    now += step; state.shown.push({...row, tick: now});
     if (state.preview) { state.paused = true; state.preview = false; state.menu = true; }
   }
   const protocol = {
@@ -118,7 +118,9 @@ function fixture(frames = 20) {
       });
     },
     shown: async (stream, token, lens, cursor = 0) => {
-      const row = cursor ? state.shown.find(r => r.ordinal === cursor) : state.shown.at(-1);
+      // The firmware's 32-row ring (patches/video/shown.c) answers cursor 0 with its oldest retained row.
+      const row = cursor ? state.shown.find(r => r.ordinal === cursor) :
+        state.oldestShown ? state.shown[Math.max(0, state.shown.length - 32)] : state.shown.at(-1);
       return shown(lens, stream, token, row?.ordinal ?? 0, row?.pts ?? 0, row?.tick ?? 0);
     },
   };
@@ -593,6 +595,22 @@ test('Cancel during a NAL read still retires owners without reporting a source f
   assert.equal(f.player.view.error, null);
   assert.equal(f.player.view.cleanupFailed, false);
   assert.ok(f.calls.some(row => Array.isArray(row) && row[0] === 'status' && row[1] === VIDEO.stop));
+});
+
+test('Audio sync anchors on the oldest retained SHOWN row, which is over two seconds old below 13 fps', async () => {
+  const sync = require('../.test-build/app/apps/video/video-av-sync').VideoAvSync.prototype, anchor = sync.anchor;
+  const anchors = [];
+  sync.anchor = function (pts, at) { anchors.push(pts); return anchor.call(this, pts, at); };
+  try {
+    const f = fixture(240, 80);
+    f.state.oldestShown = true;
+    f.player.audio = {sync: async () => {}, pause: async () => {}, close: async () => {}, position: () => 0};
+    f.onView = () => { if (anchors.length >= 3) f.player.stop(); };
+    await f.player.run();
+    assert.equal(f.player.view.error, null);
+    assert.ok(anchors.length >= 3, `anchors=${anchors.join(',')}`);
+    assert.ok(anchors.at(-1) > anchors[0]);
+  } finally { sync.anchor = anchor; }
 });
 
 test('Picture-led audio starts at the first shown frame with a seek, then plays or holds without extra seeks', async () => {
