@@ -12,7 +12,7 @@ export interface VideoAudio {
   sync(position: number, playing: boolean, speed: number, tolerance: number): Promise<void>;
   pause(): Promise<void>;
   close(): Promise<void>;
-  /** Media time being heard now (ms), including output latency; enables picture-led sync. */
+  /** Audio renderer position now (ms); enables picture-led sync. */
   position?(): number | null;
 }
 export const silentVideoAudio: VideoAudio = { sync: async () => {}, pause: async () => {}, close: async () => {} };

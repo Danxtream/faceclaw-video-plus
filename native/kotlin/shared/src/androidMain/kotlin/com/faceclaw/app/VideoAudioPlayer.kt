@@ -3,7 +3,6 @@ package com.faceclaw.app
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.media.PlaybackParams
-import android.os.Build
 import java.io.File
 import java.security.MessageDigest
 import java.util.concurrent.CountDownLatch
@@ -30,17 +29,10 @@ private class AndroidVideoAudioDevice : VideoAudioDevice {
     override val duration: Int get() = player.duration
     override val position: Int get() = player.currentPosition
     override val playing: Boolean get() = player.isPlaying
-    override val presented: Long get() {
-        // getTimestamp follows the audio output clock, including Bluetooth
-        // sink latency where Android reports it; currentPosition does not.
-        val stamp = try { player.timestamp } catch (_: IllegalStateException) { null }
-        if (stamp == null) return try { player.currentPosition.toLong() } catch (_: IllegalStateException) { -1L }
-        // API 29 renamed Android's misspelled anchor getter; minSdk is 24.
-        val anchor = if (Build.VERSION.SDK_INT >= 29) stamp.anchorSystemNanoTime
-            else @Suppress("DEPRECATION") stamp.anchorSytemNanoTime
-        val elapsedUs = (System.nanoTime() - anchor) / 1000L
-        return (stamp.anchorMediaTimeUs + (elapsedUs * stamp.mediaClockRate).toLong()).coerceAtLeast(0L) / 1000L
-    }
+    // MediaPlayer's position follows its audio renderer clock and is fresh
+    // immediately after a seek. getTimestamp() stayed stale after seeks on a
+    // Galaxy S23+ (2026-10-15), which made picture-led sync seek in a loop.
+    override val presented: Long get() = try { player.currentPosition.toLong() } catch (_: IllegalStateException) { -1L }
     override fun prepare(path: String) {
         player.setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
             .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE).build())

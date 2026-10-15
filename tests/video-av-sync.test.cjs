@@ -37,10 +37,12 @@ test('Audio far behind the picture seeks forward; small offsets leave it alone',
   av.anchor(10_000, 0);
   assert.deepEqual(av.decide(0, 10_040, true, false), {kind: 'none'});
   assert.deepEqual(av.decide(0, 9_900, true, false), {kind: 'none'});
-  const behind = av.decide(0, 9_800, true, false);
+  // Behind must persist before a corrective seek.
+  assert.deepEqual(av.decide(0, 9_700, true, false), {kind: 'none'});
+  const behind = av.decide(300, 10_000, true, false);
   assert.equal(behind.kind, 'play');
   assert.equal(behind.seek, true);
-  assert.equal(behind.position, 10_000 + VIDEO_AV_DEFAULTS.seekLeadMs);
+  assert.equal(behind.position, 10_300 + VIDEO_AV_DEFAULTS.seekLeadMs);
 });
 
 test('A slow picture rate lowers audio speed within the floor, at most once per interval', () => {
@@ -81,7 +83,48 @@ test('The seek lead learns from real seeks but stays below the hold threshold', 
   av.anchor(1000, 0);
   av.seekTook(300);
   const lead = av.decide(0, 0, false, false).position - 1000;
-  assert.ok(lead > VIDEO_AV_DEFAULTS.seekLeadMs && lead < VIDEO_AV_DEFAULTS.holdMs);
+  assert.ok(lead > VIDEO_AV_DEFAULTS.seekLeadMs && lead <= 400);
   av.seekTook(-5); av.seekTook(Number.NaN);
   assert.equal(av.decide(0, 1000 + lead, true, false).kind, 'none');
+});
+
+// A 30 s run: picture at 0.83x with a 200 ms audio start latency and a reader
+// that stays stale for 300 ms after every seek (the phone's 198-seek storm).
+function simulate({rate = 0.83, startLatency = 200, staleAfterSeek = 300, seconds = 30} = {}) {
+  const av = new VideoAvSync(600_000);
+  let now = 0, playing = false, base = 0, at = 0, speed = 1, startedAt = 0, staleUntil = -1, staleValue = 0;
+  const seeks = [], holds = [];
+  const truePos = () => !playing ? base : base + Math.max(0, now - Math.max(at, startedAt)) * speed;
+  const reading = () => now < staleUntil ? staleValue : truePos();
+  for (; now <= seconds * 1000; now += 100) {
+    if (now % 1000 === 0) av.anchor(Math.round(now * rate), now);
+    const action = av.decide(now, reading(), playing, false);
+    if (action.kind === 'pause') { base = truePos(); playing = false; holds.push(now); }
+    else if (action.kind === 'play') {
+      const before = truePos();
+      if (action.seek) { seeks.push(now); staleValue = before; staleUntil = now + staleAfterSeek; base = action.position; }
+      else base = before;
+      at = now; startedAt = now + startLatency; speed = action.speed; playing = true;
+      av.seekTook(action.seek ? 150 : 0);
+    }
+  }
+  return {seeks, holds, lag: reading() - Math.round(now * rate)};
+}
+
+test('No seek storm when the audio reader is stale after seeks and the picture runs slow', () => {
+  const run = simulate();
+  assert.ok(run.seeks.length <= 3, `seeks ${run.seeks.length}`);
+  assert.ok(Math.abs(run.lag) < 400, `final lag ${run.lag}`);
+});
+
+test('Real start latency is learned: a steady picture needs a start and at most one correction, no holds', () => {
+  const run = simulate({rate: 1, staleAfterSeek: 0, startLatency: 200});
+  assert.ok(run.seeks.length <= 2, `seeks ${run.seeks.length}`);
+  assert.equal(run.holds.length, 0);
+});
+
+test('A steady small lag from start latency is corrected once the latency is learned', () => {
+  const run = simulate({rate: 1, staleAfterSeek: 0, startLatency: 200, seconds: 30});
+  assert.ok(run.seeks.length <= 3, `seeks ${run.seeks.length}`);
+  assert.ok(Math.abs(run.lag) < 100, `final lag ${run.lag}`);
 });

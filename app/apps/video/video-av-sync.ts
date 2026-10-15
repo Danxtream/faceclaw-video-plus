@@ -21,13 +21,26 @@ export type VideoAvOptions = {
   speedIntervalMs: number;
   /** Anchors this far apart measure the long-term picture rate. */
   rateWindowMs: number;
+  /** After a seek or start, wait this long and for audio to move before judging it. */
+  settleMs: number;
+  /** Give up waiting for audio to move after this long. */
+  settleLimitMs: number;
+  /** At most one corrective seek per interval. */
+  resyncIntervalMs: number;
+  /** Audio must stay behind this long before a corrective seek. */
+  behindConfirmMs: number;
+  /** A smaller steady lag is corrected once it has lasted this long. */
+  steadyBehindMs: number;
+  steadyConfirmMs: number;
 };
 
 // The sandbox's hold rule (playback-controller.ts updateAudioSyncHold):
 // hold beyond max(80 ms, 1.5 frames), resume at max(50 ms, half a frame) behind.
 export const VIDEO_AV_DEFAULTS: VideoAvOptions = {
-  frameMs: 62.5, holdMs: Math.max(80, 62.5 * 1.5), resumeMs: Math.max(50, 62.5 / 2), behindMs: 150,
+  frameMs: 62.5, holdMs: Math.max(80, 62.5 * 1.5), resumeMs: Math.max(50, 62.5 / 2), behindMs: 200,
   seekLeadMs: 60, minSpeed: 0.95, speedStep: 0.015, speedIntervalMs: 3000, rateWindowMs: 4000,
+  settleMs: 500, settleLimitMs: 2000, resyncIntervalMs: 1500, behindConfirmMs: 300,
+  steadyBehindMs: 100, steadyConfirmMs: 2000,
 };
 
 /**
@@ -47,17 +60,21 @@ export class VideoAvSync {
   private holding = false;
   private started = false;
   private lead: number;
+  private actionAt: number | null = null;
+  private actionPosition = 0;
+  private resyncAt = Number.NEGATIVE_INFINITY;
+  private behindSince: number | null = null;
 
   constructor(private readonly duration: number, private readonly options: VideoAvOptions = VIDEO_AV_DEFAULTS) {
     this.lead = options.seekLeadMs;
   }
 
   /** The picture kept moving for `milliseconds` while audio sought and started. */
-  seekTook(milliseconds: number): void {
+  seekTook(milliseconds: number): void { this.learnLead(milliseconds); }
+
+  private learnLead(milliseconds: number): void {
     if (!Number.isFinite(milliseconds) || milliseconds < 0) return;
-    // Stay below the hold threshold so a fast seek never starts ahead of a hold.
-    const bounded = Math.min(milliseconds, this.options.holdMs - 20);
-    this.lead = Math.round((this.lead + bounded) / 2);
+    this.lead = Math.round((this.lead + Math.min(milliseconds, 400)) / 2);
   }
 
   get measuredRate(): number { return this.rate; }
@@ -87,7 +104,9 @@ export class VideoAvSync {
   /** The estimated picture time on screen now, or null before the first anchor. */
   video(now: number): number | null {
     if (this.anchorPts === null) return null;
-    let estimate = this.anchorPts + Math.max(0, now - this.anchorAt);
+    // Advance at the measured long-term picture rate, so a slow picture does
+    // not overshoot between anchors and then snap back.
+    let estimate = this.anchorPts + Math.max(0, now - this.anchorAt) * this.rate;
     // The decoder's newest picture may still be decoding; the screen trails it.
     if (this.cap !== null) estimate = Math.min(estimate, Math.max(this.anchorPts, this.cap - this.options.frameMs));
     return Math.min(estimate, this.duration);
@@ -101,9 +120,24 @@ export class VideoAvSync {
     return this.speed;
   }
 
-  private play(position: number, seek: boolean, speed: number, reason: string, lag: number): VideoAvAction {
+  private play(now: number, position: number, seek: boolean, speed: number, reason: string, lag: number): VideoAvAction {
+    const target = Math.max(0, Math.min(this.duration, position));
     this.playingSpeed = speed;
-    return { kind: "play", position: Math.max(0, Math.min(this.duration, position)), seek, speed, reason, lag };
+    this.actionAt = now; this.actionPosition = target; this.behindSince = null;
+    if (seek) this.resyncAt = now;
+    return { kind: "play", position: target, seek, speed, reason, lag };
+  }
+
+  /** A fresh seek or start needs time, and audible progress, before its lag means anything. */
+  private settled(now: number, audio: number): boolean {
+    if (this.actionAt === null) return true;
+    const elapsed = now - this.actionAt;
+    if (elapsed < this.options.settleMs) return false;
+    if (audio < this.actionPosition + 50 && elapsed < this.options.settleLimitMs) return false;
+    // Time audio stood still after the command is the real start latency.
+    if (audio >= this.actionPosition + 50) this.learnLead(elapsed - (audio - this.actionPosition) / this.playingSpeed);
+    this.actionAt = null;
+    return true;
   }
 
   /** One decision; the caller performs it before asking again. */
@@ -118,24 +152,34 @@ export class VideoAvSync {
     const lag = audio - video, speed = this.targetSpeed(now);
     const resync = (reason: string): VideoAvAction => {
       this.started = true; this.holding = false;
-      return this.play(video + this.lead, true, speed, reason, lag);
+      return this.play(now, video + this.lead * this.rate, true, speed, reason, lag);
     };
     if (!playing) {
       if (!this.started) return resync("start at the shown picture");
       if (!this.holding) return resync("restart at the shown picture");
-      if (lag < -this.options.behindMs) return resync("picture far ahead of held audio");
-      if (lag <= -this.options.resumeMs) {
+      if (lag < -this.options.behindMs && now - this.resyncAt >= this.options.resyncIntervalMs)
+        return resync("picture far ahead of held audio");
+      // Resume early by the start latency so audio begins just behind the picture.
+      if (lag <= this.lead * this.rate - this.options.resumeMs) {
         this.holding = false;
-        return this.play(audio, false, speed, "picture caught up", lag);
+        return this.play(now, audio, false, speed, "picture caught up", lag);
       }
       return { kind: "none" };
     }
+    if (!this.settled(now, audio)) return { kind: "none" };
     if (lag > this.options.holdMs) {
-      this.holding = true;
+      this.holding = true; this.behindSince = null;
       return { kind: "pause", reason: "audio ahead of the picture", lag };
     }
-    if (lag < -this.options.behindMs) return resync("audio behind the picture");
-    if (speed !== this.playingSpeed) return this.play(audio, false, speed, "match the picture rate", lag);
+    if (lag < -this.options.steadyBehindMs) {
+      this.behindSince ??= now;
+      const confirm = lag < -this.options.behindMs ? this.options.behindConfirmMs : this.options.steadyConfirmMs;
+      if (now - this.behindSince >= confirm && now - this.resyncAt >= this.options.resyncIntervalMs)
+        return resync(lag < -this.options.behindMs ? "audio behind the picture" : "audio steadily behind the picture");
+      return { kind: "none" };
+    }
+    this.behindSince = null;
+    if (speed !== this.playingSpeed) return this.play(now, audio, false, speed, "match the picture rate", lag);
     return { kind: "none" };
   }
 }
