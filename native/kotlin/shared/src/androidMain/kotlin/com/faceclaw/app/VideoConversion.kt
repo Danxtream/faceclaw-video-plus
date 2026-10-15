@@ -26,6 +26,23 @@ internal fun <T> withVideoReport(report: String, read: () -> String? = { System.
     finally { if (previous == null) unset() else write(previous) }
 }
 
+/** Pair no-reordering access units with decoded pictures; FFmpeg 8 omits frame packet fields. */
+internal fun <T> videoDecodedPictures(frames: List<T>, packets: List<T>, number: (T, String) -> Long,
+    text: (T, String) -> String, checkActive: () -> Unit = {}): List<VideoDecodedPicture> {
+    require(frames.size == packets.size) { "Packet and decoded picture counts disagree" }
+    return frames.mapIndexed { index, frame ->
+        checkActive()
+        val packet = packets[index]
+        val key = number(frame, "key_frame")
+        require(key in 0L..1L && text(packet, "flags").contains('K') == (key == 1L)) {
+            "Packet and decoded keyframe flags disagree at picture $index"
+        }
+        VideoDecodedPicture(number(packet, "pos"), number(packet, "size"), key == 1L,
+            number(frame, "width").toInt(), number(frame, "height").toInt(), text(frame, "pix_fmt"), text(frame, "pict_type"),
+            number(frame, "interlaced_frame").toInt(), number(frame, "repeat_pict").toInt())
+    }
+}
+
 /** A single native conversion job; no BLE, firmware, repair pass or auto-downrate. */
 class VideoConversion(private val input: File, private val deblocking: Boolean, private val overwrite: Boolean,
     private val progress: (String, Double) -> Unit) {
@@ -110,17 +127,15 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
             headerAudit.finish()
             val audit = VideoFileReader.audit(publication.candidate)
             progress("decoding audit", 0.99)
+            // Keep arrays separate: combined packet/frame probes interleave JSON records.
+            val packets = probe(arrayOf("-v", "error", "-framerate", "16", "-f", "h264", "-show_packets",
+                "-show_entries", "packet=pos,size,flags", "-of", "json", publication.candidate.path)).getJSONArray("packets")
             val decoded = probe(arrayOf("-v", "error", "-err_detect", "explode", "-framerate", "16", "-f", "h264",
-                "-show_frames", "-show_entries", "frame=pkt_pos,pkt_size,key_frame,width,height,pix_fmt,pict_type,repeat_pict,interlaced_frame",
+                "-show_frames", "-show_entries", "frame=key_frame,width,height,pix_fmt,pict_type,repeat_pict,interlaced_frame",
                 "-of", "json", publication.candidate.path)).getJSONArray("frames")
-            val frames = ArrayList<VideoDecodedPicture>()
-            for (i in 0 until decoded.length()) {
-                checkActive()
-                val frame = decoded.getJSONObject(i)
-                frames.add(VideoDecodedPicture(frame.getLong("pkt_pos"), frame.getLong("pkt_size"), frame.getInt("key_frame") == 1,
-                    frame.getInt("width"), frame.getInt("height"), frame.getString("pix_fmt"), frame.getString("pict_type"),
-                    frame.getInt("interlaced_frame"), frame.getInt("repeat_pict")))
-            }
+            val frames = videoDecodedPictures((0 until decoded.length()).map(decoded::getJSONObject),
+                (0 until packets.length()).map(packets::getJSONObject),
+                JSONObject::getLong, JSONObject::getString, ::checkActive)
             val pictures = VideoPictureMap.build(audit, frames)
             require(headerAudit.slices == pictures.size) { "Header and decoded picture counts disagree" }
             require(input.length() == bytes && input.lastModified() == modified && hash(input) == sourceHash) { "MP4 changed during conversion" }

@@ -107,4 +107,31 @@ class VideoConversionAuditTest {
         assertFails { VideoPictureMap.build(audit.copy(nals = nals.mapIndexed { i, n -> if (i == 2) n.copy(type = 1) else n }), frames) }
         assertFails { VideoPictureMap.build(audit, frames.map { it.copy(bytes = 1) }) }
     }
+
+    @Test fun ffmpegEightProbePairsPacketPositionsWithFramesWithoutLegacyPacketFields() {
+        val packets = listOf(mapOf("pos" to "0", "size" to "32", "flags" to "K__"),
+            mapOf("pos" to "32", "size" to "8", "flags" to "___"))
+        val frames = listOf(mapOf("key_frame" to 1, "width" to 320, "height" to 192, "pix_fmt" to "yuvj420p",
+            "pict_type" to "I", "interlaced_frame" to 0, "repeat_pict" to 0),
+            mapOf("key_frame" to 0, "width" to 320, "height" to 192, "pix_fmt" to "yuvj420p",
+                "pict_type" to "P", "interlaced_frame" to 0, "repeat_pict" to 0))
+        // FFmpeg 8 provides these in separate probes, not frame pkt_pos/pkt_size.
+        fun ffprobe(section: String) = mapOf("packets" to packets, "frames" to frames).getValue(section)
+        fun decode(f: List<Map<String, Any>>, p: List<Map<String, Any>>) =
+            videoDecodedPictures(f, p, { row, field -> row.getValue(field).toString().toLong() }, { row, field -> row.getValue(field).toString() })
+        val nals = listOf(7, 8, 6, 5, 1).mapIndexed { index, type -> VideoFileReader.Nal(index * 8L + 4, 4, type, "a".repeat(64)) }
+        val audit = VideoFileReader.Audit(40, "b".repeat(64), nals)
+        val decoded = decode(ffprobe("frames"), ffprobe("packets"))
+        assertEquals(listOf(0L, 32L), decoded.map { it.offset })
+        assertEquals(listOf(32L, 8L), decoded.map { it.bytes })
+        assertEquals(listOf(3, 4), VideoPictureMap.build(audit, decoded).map { it.nal })
+        assertFails { decode(frames, packets.dropLast(1)) }
+        assertFails { decode(frames.dropLast(1), packets) }
+        assertFails { decode(frames, packets.map { it + ("flags" to "___") }) }
+        assertFails { decode(frames, packets.map { it + ("flags" to "K__") }) }
+        assertFails { decode(frames.map { it + ("key_frame" to "2") }, packets) }
+        assertFails { VideoPictureMap.build(audit, decode(frames.map { it + ("pict_type" to "B") }, packets)) }
+        assertFails { VideoPictureMap.build(audit, decode(frames, packets.map { it + ("pos" to "0") })) }
+        assertFails { VideoPictureMap.build(audit, decode(frames.reversed(), packets.reversed())) }
+    }
 }
