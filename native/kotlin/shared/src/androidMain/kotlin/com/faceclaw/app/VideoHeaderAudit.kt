@@ -1,7 +1,8 @@
 package com.faceclaw.app
 
 /** Validate fields parsed by FFmpeg trace_headers, not a second H.264 parser. */
-class VideoHeaderAudit(private val deblocking: Boolean) {
+class VideoHeaderAudit(private val deblocking: Boolean, private val fps: Int = 15) {
+    init { VideoEncodePlan.checkRate(fps) }
     private val fields = HashMap<String, Long>()
     private val sps = HashSet<Long>()
     private val pps = HashMap<Long, Long>()
@@ -56,7 +57,7 @@ class VideoHeaderAudit(private val deblocking: Boolean) {
                 equals("frame_mbs_only_flag", 1); equals("frame_cropping_flag", 0)
                 equals("vui_parameters_present_flag", 1); equals("video_signal_type_present_flag", 1)
                 equals("video_full_range_flag", 1); equals("timing_info_present_flag", 1)
-                equals("num_units_in_tick", 1); equals("time_scale", 32)
+                equals("num_units_in_tick", 1); equals("time_scale", fps * 2L)
                 equals("max_num_reorder_frames", 0)
                 require(field("max_dec_frame_buffering") in 1..2) { "Unsupported decoder picture buffer" }
                 require(field("seq_parameter_set_id") in 0..31)

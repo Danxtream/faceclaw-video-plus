@@ -1,9 +1,11 @@
+import { isVideoPictureRate, type VideoPictureRate } from "./video-rate";
+
 /** Audited conversion metadata; file offsets and pictures remain distinct. */
 export type VideoNal = { offset: number; bytes: number; type: number; sha256: string };
 export type VideoPicture = { pts: number; nal: number; idr: boolean; sps: number; pps: number };
 export type VideoAudit = { bytes: number; sha256: string; nals: VideoNal[] };
 export type VideoClip = {
-  version: 1; width: 320; height: 192; fps: 16; duration: number;
+  version: 1; width: 320; height: 192; fps: VideoPictureRate; duration: number;
   range: "full"; deblocking: boolean; encoder: string; options: string[];
   source: { name: string; bytes: number; sha256: string };
   h264: VideoAudit; pictures: VideoPicture[];
@@ -17,7 +19,9 @@ function hash(value: unknown): value is string { return typeof value === "string
 /** Refuse unknown or stale sidecars rather than guessing an unaudited timeline. */
 export function parseVideoClip(value: unknown, audit: VideoAudit): VideoClip {
   const clip = value as VideoClip;
-  if (!clip || clip.version !== 1 || clip.width !== 320 || clip.height !== 192 || clip.fps !== 16 ||
+  if (!isVideoPictureRate(clip?.fps))
+    throw new Error("Unsupported video picture rate. Re-convert this clip at 10, 15 or 20 fps.");
+  if (!clip || clip.version !== 1 || clip.width !== 320 || clip.height !== 192 ||
       clip.range !== "full" || typeof clip.deblocking !== "boolean" || !integer(clip.duration, 1) ||
       typeof clip.encoder !== "string" || !clip.encoder || !Array.isArray(clip.options) ||
       !clip.options.every((option) => typeof option === "string") || !clip.source ||
@@ -40,7 +44,7 @@ export function parseVideoClip(value: unknown, audit: VideoAudit): VideoClip {
   let activePps = -1;
   for (let i = 0; i < clip.pictures.length; i++) {
     const frame = clip.pictures[i];
-    if (!frame || frame.pts !== Math.round(i * 1000 / 16) || !integer(frame.nal, 0, audit.nals.length - 1) ||
+    if (!frame || frame.pts !== Math.round(i * 1000 / clip.fps) || !integer(frame.nal, 0, audit.nals.length - 1) ||
         frame.nal <= lastNal || typeof frame.idr !== "boolean" || !integer(frame.sps, 0, frame.nal - 1) ||
         !integer(frame.pps, 0, frame.nal - 1)) throw new Error("Invalid audited picture timeline");
     for (let n = lastNal + 1; n <= frame.nal; n++) {
@@ -57,14 +61,20 @@ export function parseVideoClip(value: unknown, audit: VideoAudit): VideoClip {
     lastNal = frame.nal;
   }
   if (audit.nals.slice(lastNal + 1).some((nal) => [1, 5].includes(nal.type)) ||
-      clip.duration !== Math.round(clip.pictures.length * 1000 / 16)) throw new Error("Incomplete picture map or duration");
+      clip.duration !== Math.round(clip.pictures.length * 1000 / clip.fps)) throw new Error("Incomplete picture map or duration");
   return clip;
 }
 
 /** Nearest preceding IDR plus its active parameter sets, never a P-frame reset. */
 export function videoSeekPoint(clip: VideoClip, milliseconds: number): { frame: number; idr: number; preroll: number } {
   if (!Number.isFinite(milliseconds)) throw new Error("Invalid seek position");
-  const frame = Math.min(clip.pictures.length - 1, Math.max(0, Math.floor(milliseconds * 16 / 1000)));
+  // Rounded millisecond timestamps do not invert exactly via floor(time * fps).
+  let low = 0, high = clip.pictures.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (clip.pictures[middle].pts <= milliseconds) low = middle + 1; else high = middle;
+  }
+  const frame = Math.max(0, low - 1);
   let idr = frame;
   while (idr > 0 && !clip.pictures[idr].idr) idr--;
   if (!clip.pictures[idr].idr || frame - idr > 255) throw new Error("No bounded IDR seek point");

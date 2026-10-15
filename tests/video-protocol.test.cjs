@@ -2,6 +2,23 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { VideoProtocol, VideoReportUnavailable, VIDEO, parseVideoStatus, videoU32 } = require('../.test-build/app/apps/video/video-protocol');
 
+test('Timeline and START carry each supported rate without changing the stream contract',async()=>{
+  for(const fps of [10,15,20]) {
+    let id=1;const sent=[];
+    const p=new VideoProtocol({epoch:()=>1,exchange:async(raw,length)=>{sent.push(raw);return [status().slice(0,length),status().slice(0,length)];}},()=>id++);
+    await p.timeline(1,10000,0,fps);await p.start(1,true,false,false,0,false,3,fps);
+    assert.equal(sent[0][20],fps);assert.equal(sent[0][22],1);
+    assert.equal(videoU32(sent[1],20),Math.ceil(1000/fps));
+  }
+});
+
+test('New phone refuses the legacy fixed-rate firmware before playback',async()=>{
+  let id=1;
+  const p=new VideoProtocol({epoch:()=>1,exchange:async(raw,length)=>raw[1]===VIDEO.playbackCaps?
+    [1,2].map(()=>Uint8Array.from([1,13,0,255,2,16,255,247,0,0,0,0,0,0,0,0])):[status().slice(0,length),status().slice(0,length)]},()=>id++);
+  await assert.rejects(p.capabilities(),/10\/15\/20 fps.*update both lenses/);
+});
+
 test('Read-only queries get exactly one fresh durable ID after unavailable pages', async () => {
   for (const op of [VIDEO.shown, VIDEO.credits, VIDEO.playback]) {
     let id = 40, fail = 1;
@@ -56,7 +73,7 @@ test('Paired capability gates refusal evidence and raw read-only clock logging',
     const protocol = new VideoProtocol({epoch: () => 1, configureEvidence: value => configured = value,
       exchange: async (raw, length) => {
         if (raw[1] === VIDEO.caps) return [status().slice(0, 128), status().slice(0, 128)];
-        if (raw[1] === VIDEO.playbackCaps) return [1, 2].map(() => Uint8Array.from([1,13,0,255,2,16,255,flags,0,0,0,0,0,0,0,0]));
+        if (raw[1] === VIDEO.playbackCaps) return [1, 2].map(() => Uint8Array.from([1,13,0,255,2,7,255,flags,0,0,0,0,0,0,0,0]));
         assert.equal(raw[1], 7); assert.equal(raw[8], 5); assert.equal(raw[9], 1); clocks++;
         return [1, 2].map(side => {
           const row = new Uint8Array(length); row.set([1,7,0,5,1,1,side,7]);
@@ -68,7 +85,7 @@ test('Paired capability gates refusal evidence and raw read-only clock logging',
           return row;
         });
       }}, () => id++);
-    if (flags === 150) { await assert.rejects(protocol.capabilities(), /not supported/); continue; }
+    if (flags === 150) { await assert.rejects(protocol.capabilities(), /10\/15\/20 fps/); continue; }
     try {
       console.error = line => output.push(line);
       await protocol.capabilities(); await protocol.clockEvidence(1);
@@ -122,7 +139,7 @@ test('START keeps fixed cadence, dither generation and bounded preroll', async (
   await protocol.start(4, true, true, false, 9, true);
   assert.equal(sent[18], 1 | 2 | 4 | 8 | 16 | 32);
   assert.equal(sent[19], 9);
-  assert.equal(videoU32(sent, 20), 63);
+  assert.equal(videoU32(sent, 20), 67);
   await assert.rejects(protocol.start(4, false, false, true, 256), /preroll/);
 });
 

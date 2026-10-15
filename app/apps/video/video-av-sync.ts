@@ -1,3 +1,5 @@
+import { VIDEO_DEFAULT_RATE, type VideoPictureRate } from "./video-rate";
+
 /** Phone audio follows the picture the glasses actually show. */
 export type VideoAvAction =
   | { kind: "none" }
@@ -5,7 +7,7 @@ export type VideoAvAction =
   | { kind: "play"; position: number; seek: boolean; speed: number; reason: string; lag: number | null };
 
 export type VideoAvOptions = {
-  /** One picture at the firmware's fixed 16 fps cadence. */
+  /** One picture at the clip's fixed cadence. */
   frameMs: number;
   /** Hold audio when it runs this far ahead of the picture. */
   holdMs: number;
@@ -37,11 +39,15 @@ export type VideoAvOptions = {
 // The sandbox's hold rule (playback-controller.ts updateAudioSyncHold):
 // hold beyond max(80 ms, 1.5 frames), resume at max(50 ms, half a frame) behind.
 export const VIDEO_AV_DEFAULTS: VideoAvOptions = {
-  frameMs: 62.5, holdMs: Math.max(80, 62.5 * 1.5), resumeMs: Math.max(50, 62.5 / 2), behindMs: 200,
+  frameMs: 1000 / VIDEO_DEFAULT_RATE, holdMs: Math.max(80, 1500 / VIDEO_DEFAULT_RATE), resumeMs: Math.max(50, 500 / VIDEO_DEFAULT_RATE), behindMs: 200,
   seekLeadMs: 60, minSpeed: 0.95, speedStep: 0.015, speedIntervalMs: 3000, rateWindowMs: 4000,
   settleMs: 500, settleLimitMs: 2000, resyncIntervalMs: 1500, behindConfirmMs: 300,
   steadyBehindMs: 100, steadyConfirmMs: 2000,
 };
+/** Keep the existing frame-based hold policy at the selected clip cadence. */
+export function videoAvOptions(fps: VideoPictureRate): VideoAvOptions {
+  return {...VIDEO_AV_DEFAULTS, frameMs: 1000 / fps, holdMs: Math.max(80, 1500 / fps), resumeMs: Math.max(50, 500 / fps)};
+}
 
 /**
  * A video clock from exact paired SHOWN anchors, extrapolated at the fixed

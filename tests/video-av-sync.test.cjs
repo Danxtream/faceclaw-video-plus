@@ -1,6 +1,17 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { VideoAvSync, VIDEO_AV_DEFAULTS } = require('../.test-build/app/apps/video/video-av-sync');
+const {videoAvOptions}=require('../.test-build/app/apps/video/video-av-sync');
+
+test('Only frame-derived audio limits follow clip cadence, with the existing policy unchanged',()=>{
+  for(const fps of [10,15,20]){
+    const options=videoAvOptions(fps);
+    assert.equal(options.frameMs,1000/fps);assert.equal(options.holdMs,Math.max(80,1500/fps));
+    assert.equal(options.resumeMs,Math.max(50,500/fps));
+    for(const key of Object.keys(VIDEO_AV_DEFAULTS).filter(k=>!['frameMs','holdMs','resumeMs'].includes(k)))
+      assert.equal(options[key],VIDEO_AV_DEFAULTS[key]);
+  }
+});
 
 test('Audio waits for the first shown picture, then starts at it with a seek lead', () => {
   const av = new VideoAvSync(60_000);

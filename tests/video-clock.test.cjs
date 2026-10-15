@@ -22,7 +22,7 @@ async function readClocks(rows) {
       return [status,status];
     }
     if (raw[1] === VIDEO.playbackCaps)
-      return [1,2].map(()=>Uint8Array.from([1,13,0,255,2,16,255,55,0,0,0,0,0,0,0,0]));
+      return [1,2].map(()=>Uint8Array.from([1,13,0,255,2,7,255,55,0,0,0,0,0,0,0,0]));
     assert.equal(raw[1],7); assert.equal(raw[8],5); assert.equal(raw[9],1);
     assert.equal(raw.length,12); assert.equal(length,128);
     return rows;

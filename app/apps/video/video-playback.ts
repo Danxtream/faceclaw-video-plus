@@ -1,6 +1,6 @@
 import { videoSeekPoint, type VideoSource } from "./video-clip";
 import { type VideoUploadPump, type VideoUploadProgress } from "./video-upload";
-import { VideoAvSync, type VideoAvAction } from "./video-av-sync";
+import { VideoAvSync, videoAvOptions, type VideoAvAction } from "./video-av-sync";
 import { VideoMeasurement } from "./video-measurement";
 import { videoMeasurementLogs } from "./video-measurement-log";
 import { VIDEO, VideoProtocol, VideoReportUnavailable, videoU32, type VideoStatus } from "./video-protocol";
@@ -207,14 +207,14 @@ export class VideoPlayback {
     if (this.stopping) throw new VideoCancelled();
     const selection = this.options();
     await this.protocol.radioSelection(selection.radio);
-    this.validateStatus(await this.protocol.timeline(stream, this.source.clip.duration, this.source.clip.pictures[target].pts), VIDEO.timeline);
+    this.validateStatus(await this.protocol.timeline(stream, this.source.clip.duration, this.source.clip.pictures[target].pts, this.source.clip.fps), VIDEO.timeline);
     if (this.stopping) throw new VideoCancelled();
     // Record the attempted stream before START so a partial admission gets STOP.
     this.generation = { stream, tokens: [], idr, target, prefix, firstNal, index: 0,
       count: prefix.length + this.source.clip.h264.nals.length - firstNal, metadata: 0,
       paused, reached: false, oldPhy, started: this.clock(), anchor: oldPhy, anchorAt: this.clock(),
       anchorUncertainty: 0, detailedReports: !!selection.detailedReports };
-    const start = await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused);
+    const start = await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused, 3, this.source.clip.fps);
     const retryDeadline = this.clock() + 1_000;
     for (let attempt = 0; ; attempt++) {
       if (this.stopping) throw new VideoCancelled();
@@ -234,7 +234,7 @@ export class VideoPlayback {
         this.validateStatus(start, VIDEO.start, stream);
         break;
       }
-      const retry = await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused, mask);
+      const retry = await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused, mask, this.source.clip.fps);
       let index = 0;
       for (let i = 0; i < 2; i++) if (mask & 1 << i) start[i] = retry[index++];
     }
@@ -259,9 +259,9 @@ export class VideoPlayback {
     this.creditBudget = 0;
     this.progressAt = this.clock(); this.progress = -1;
     this.lastSeek = 0;
-    this.av = this.audio.position ? new VideoAvSync(this.source.clip.duration) : null;
+    this.av = this.audio.position ? new VideoAvSync(this.source.clip.duration, videoAvOptions(this.source.clip.fps)) : null;
     this.rate = { at: this.clock(), sent: 0, consumed: Math.max(0, this.consumed), sentPictures: 0, consumedPictures: 0, drops: 0 };
-    this.measurement = new VideoMeasurement(stream, this.generation.tokens);
+    this.measurement = new VideoMeasurement(stream, this.generation.tokens, this.source.clip.fps);
     this.nativeMeasurement = null;
     this.measurementSample = 0;
     this.protocol.beginMeasurement?.(stream);

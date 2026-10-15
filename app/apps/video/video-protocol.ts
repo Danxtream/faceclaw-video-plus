@@ -1,4 +1,5 @@
 import { type VideoUploadPlan, type VideoUploadPump } from "./video-upload";
+import { isVideoPictureRate, VIDEO_DEFAULT_RATE, type VideoPictureRate } from "./video-rate";
 
 declare const console: { error(...args: unknown[]): void };
 
@@ -123,8 +124,8 @@ export class VideoProtocol {
     if ((await this.status(VIDEO.caps)).some((row) => row.result || row.error)) throw new Error("Video capabilities refused");
     const rows = await this.query(await this.header(VIDEO.playbackCaps, 8), 16);
     if (rows.some((row) => row[0] !== 1 || row[1] !== 13 || row[2] || row[3] !== 255 ||
-      row[4] !== 2 || row[5] !== 16 || row[6] !== 255 || (row[7] & 7) !== 7))
-      throw new Error("Paired queued playback controls are not supported");
+      row[4] !== 2 || row[5] !== 7 || row[6] !== 255 || (row[7] & 7) !== 7))
+      throw new Error("Glasses do not support 10/15/20 fps playback; update both lenses.");
     this.evidence = rows.every(row => !!(row[7] & 32));
     this.rateEvidence = rows.every(row => !!(row[7] & 64));
     // Bit 128: timed NAL records and timeline room in flagged credit replies.
@@ -182,18 +183,20 @@ export class VideoProtocol {
     raw[8] = 1;
     return this.query(raw, 128);
   }
-  async start(stream: number, native: boolean, dither: boolean, radio: boolean, preroll = 0, paused = false, targets = 3): Promise<VideoStatus[]> {
+  async start(stream: number, native: boolean, dither: boolean, radio: boolean, preroll = 0, paused = false, targets = 3, fps: VideoPictureRate = VIDEO_DEFAULT_RATE): Promise<VideoStatus[]> {
+    if (!isVideoPictureRate(fps)) throw new Error("Unsupported video picture rate");
     if (![1, 2, 3].includes(targets)) throw new Error("Invalid START lens mask");
     const raw = await this.header(VIDEO.start, 24);
     if (!Number.isInteger(preroll) || preroll < 0 || preroll > 255) throw new Error("Unsupported seek preroll");
     put(raw, 8, stream);
     raw.set([64, 1, 192, 0, 1, 2, 4 | 8 | (native ? 1 : 0) | (dither ? 16 : 0) | (!radio ? 2 : 0) | (paused ? 32 : 0), preroll], 12);
-    put(raw, 20, 63);
+    put(raw, 20, Math.ceil(1000 / fps));
     return (await this.query(raw, 128, targets)).map(parseVideoStatus);
   }
-  async timeline(stream: number, duration: number, pts: number): Promise<VideoStatus[]> {
+  async timeline(stream: number, duration: number, pts: number, fps: VideoPictureRate = VIDEO_DEFAULT_RATE): Promise<VideoStatus[]> {
+    if (!isVideoPictureRate(fps)) throw new Error("Unsupported video picture rate");
     const raw = await this.header(VIDEO.timeline, 24);
-    put(raw, 8, stream); put(raw, 12, duration); put(raw, 16, pts); raw[20] = 16; raw[22] = 1;
+    put(raw, 8, stream); put(raw, 12, duration); put(raw, 16, pts); raw[20] = fps; raw[22] = 1;
     return (await this.query(raw, 128)).map(parseVideoStatus);
   }
   async owned(op: number, stream: number, tokens: readonly number[], length: number, value?: number): Promise<Uint8Array[]> {

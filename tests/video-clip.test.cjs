@@ -7,12 +7,29 @@ function fixture(count = 5) {
   const nals = [7, 8, 6, ...Array.from({length: count}, (_, i) => i % 3 === 0 ? 5 : 1)]
     .map((type, i) => ({offset: 4 + i * 10, bytes: 6, type, sha256: hash}));
   const audit = {bytes: nals.at(-1).offset + 6, sha256: hash, nals};
-  const clip = {version: 1, width: 320, height: 192, fps: 16, range: 'full', deblocking: false,
-    duration: Math.round(count * 1000 / 16), encoder: 'test', options: ['-profile:v', 'baseline'],
+  const clip = {version: 1, width: 320, height: 192, fps: 15, range: 'full', deblocking: false,
+    duration: Math.round(count * 1000 / 15), encoder: 'test', options: ['-profile:v', 'baseline'],
     source: {name: 'test.mp4', bytes: 20, sha256: hash}, h264: structuredClone(audit),
-    pictures: Array.from({length: count}, (_, i) => ({pts: Math.round(i * 1000 / 16), nal: i + 3, idr: i % 3 === 0, sps: 0, pps: 1}))};
+    pictures: Array.from({length: count}, (_, i) => ({pts: Math.round(i * 1000 / 15), nal: i + 3, idr: i % 3 === 0, sps: 0, pps: 1}))};
   return {clip, audit};
 }
+
+test('All supported clip rates have exact rounded timestamps and seek boundaries; old rates require reconversion', () => {
+  for (const fps of [10,15,20]) {
+    const {clip,audit}=fixture(100);
+    clip.fps=fps;clip.duration=Math.round(100000/fps);
+    clip.pictures.forEach((p,i)=>p.pts=Math.round(i*1000/fps));
+    const parsed=parseVideoClip(clip,audit);
+    parsed.pictures.forEach((p,i)=>{
+      assert.equal(videoSeekPoint(parsed,p.pts).frame,i);
+      if(i)assert.equal(videoSeekPoint(parsed,p.pts-1).frame,i-1);
+    });
+  }
+  for(const fps of [undefined,null,0,16,24,30,'15']) {
+    const {clip,audit}=fixture();clip.fps=fps;
+    assert.throws(()=>parseVideoClip(clip,audit),/Re-convert.*10, 15 or 20 fps/);
+  }
+});
 
 test('Clip preserves non-VCL NALs and seeks from an IDR at all boundaries', () => {
   const {clip, audit} = fixture();

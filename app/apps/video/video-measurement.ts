@@ -48,7 +48,7 @@ export class VideoMeasurement {
   private overlaps = {report: 0, control: 0};
   private reportSpans: {from: number; to: number; kind: string}[] = [];
   private spanTotals: Record<string, {count: number; totalMs: number; maxMs: number}> = {};
-  constructor(private readonly stream: number, private readonly tokens: readonly number[]) {}
+  constructor(private readonly stream: number, private readonly tokens: readonly number[], private readonly fps = 15) {}
 
   span(from: number, to: number, kind: string): void {
     if (to < from) { this.missing++; return; }
@@ -113,7 +113,7 @@ export class VideoMeasurement {
         row.controlOverlap = overlaps.some(s => s.kind.startsWith("control:"));
         console.error(`Video shown-window stream=${this.stream} side=${side + 1} ` +
           `row=${JSON.stringify(row)} overlaps=${JSON.stringify(overlaps)} alignment=local-first-copy`);
-        bad ||= serial > 1 && row.shown < 16 && !(row.flags & 16);
+        bad ||= serial > 1 && row.shown < this.fps - 0.5 && !(row.flags & 16);
         if (this.pending[side].size > 8) {
           this.pending[side].delete(this.pending[side].keys().next().value!); this.missing++;
         }
@@ -130,21 +130,21 @@ export class VideoMeasurement {
       if ((left.flags | right.flags) & 16) { this.paused++; this.closeDip(); this.previous = null; continue; }
       const fps = Math.min(left.shown, right.shown);
       add(this.lenses[0], left.shown); add(this.lenses[1], right.shown); add(this.paired, fps);
-      add(this.sliding, fps); if (fps < 15.5) this.slidingBad++;
+      add(this.sliding, fps); if (fps < this.fps - 0.5) this.slidingBad++;
       if (this.previous) for (let phase = 1; phase < 10; phase++) {
         const rates = [left,right].map((row, side) => this.previous![side].phases.slice(phase).reduce((a,b)=>a+b,0) +
           row.phases.slice(0,phase).reduce((a,b)=>a+b,0));
-        const rate = Math.min(...rates); add(this.sliding,rate); if (rate < 15.5) this.slidingBad++;
+        const rate = Math.min(...rates); add(this.sliding,rate); if (rate < this.fps - 0.5) this.slidingBad++;
       }
       this.previous = [left,right];
       this.maxGap = Math.max(this.maxGap, left.gap, right.gap);
-      if (fps < 15.5) {
+      if (fps < this.fps - 0.5) {
         if (left.reportOverlap || right.reportOverlap) this.overlaps.report++;
         if (left.controlOverlap || right.controlOverlap) this.overlaps.control++;
         this.bad++;
         if (!this.runLength) this.runStart = left.start;
         this.runLength++; this.longest = Math.max(this.longest, this.runLength);
-        const causes = [left, right].filter(r => r.shown < 16).map(r => this.cause(r));
+        const causes = [left, right].filter(r => r.shown < this.fps - 0.5).map(r => this.cause(r));
         const cause = causes.every(c => c === causes[0]) ? causes[0] : "mixed_or_unknown";
         this.causes[cause] = (this.causes[cause] ?? 0) + 1;
       } else this.closeDip();
@@ -168,7 +168,7 @@ export class VideoMeasurement {
     if (final) this.closeDip();
     const complete = this.supported && !this.missing && !this.pending.some(p => p.size) &&
       this.cursors.every((cursor, side) => cursor > this.high[side]) && this.ended.every(Boolean);
-    return {stream: this.stream, status: !final || !complete || !this.paired.n ? "inconclusive" :
+    return {stream: this.stream, fps: this.fps, targetShownRate: this.fps - 0.5, status: !final || !complete || !this.paired.n ? "inconclusive" :
       1 - this.bad / this.paired.n >= 0.99 ? "pass" : "fail", coverageMissing: this.missing,
       unavailable: this.unavailable, pending: this.pending.map(p => p.size), left: result(this.lenses[0]),
       right: result(this.lenses[1]), paired: result(this.paired), passingFraction: this.paired.n ? 1 - this.bad / this.paired.n : null,

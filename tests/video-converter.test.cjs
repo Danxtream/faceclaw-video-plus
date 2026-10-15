@@ -10,9 +10,9 @@ test('Converter starts independently of glasses and requires explicit overwrite'
     {'@nativescript/core': {Utils: {android: {getApplicationContext: () => 'context'}}}});
   const bridge = load('app/native/video-converter.ts');
   bridge.convertVideo('source.mp4');
-  assert.deepEqual(calls[0], ['start', 'context', 'source.mp4', false, false]);
+  assert.deepEqual(calls[0], ['start', 'context', 'source.mp4', false, false, 15]);
   bridge.convertVideo('source.mp4', true, true);
-  assert.deepEqual(calls[1], ['start', 'context', 'source.mp4', true, true]);
+  assert.deepEqual(calls[1], ['start', 'context', 'source.mp4', true, true, 15]);
   state.running = true;
   assert.throws(() => bridge.convertVideo('other.mp4'), /running/);
   bridge.cancelVideoConversion(); assert.deepEqual(calls[2], ['cancel', 'context']);

@@ -14,8 +14,8 @@ function latencyTransport(frames = 160, decodeMs = 70, pageMs = 0) {
   let work = null, primed = false, paused = false, closed = false, passiveStep = false;
   const queue = [], metadata = [], copies = [], calls = [], stalls = [], observations = [];
   const types = [7, 8, 6, ...Array.from({length: frames}, (_, i) => i % 32 ? 1 : 5)];
-  const clip = {duration: Math.round(frames * 62.5), h264: {nals: types.map(type => ({type}))},
-    pictures: Array.from({length: frames}, (_, i) => ({pts: Math.round(i * 62.5), nal: i + 3,
+  const clip = {fps: 15, duration: Math.round(frames * 1000 / 15), h264: {nals: types.map(type => ({type}))},
+    pictures: Array.from({length: frames}, (_, i) => ({pts: Math.round(i * 1000 / 15), nal: i + 3,
       idr: i % 32 === 0, sps: 0, pps: 1}))};
   const occupied = () => queue.length + Number(!!work);
   const status = () => [1, 2].map(lens => ({result: 0, error: 0, state: active ? 2 : 0,

@@ -1,18 +1,23 @@
 package com.faceclaw.app
 
-/** Fixed archived high-effort recipe; no repair/downrate or firmware tuning. */
+/** Fixed high-effort recipe apart from the chosen clip cadence. */
 object VideoEncodePlan {
     const val ENCODER = "dev.ffmpegkit-maintained:ffmpeg-kit-min-gpl:8.1.7"
-    const val FILTER = "fps=16,scale=320:192:flags=lanczos:in_range=auto:out_range=full,format=gray,format=yuvj420p"
-    private const val RECIPE = "ref=1:bframes=0:weightp=0:8x8dct=0:cabac=0:keyint=128:min-keyint=65:scenecut=0:crf=12:" +
+    private const val FILTER = "scale=320:192:flags=lanczos:in_range=auto:out_range=full,format=gray,format=yuvj420p"
+    private const val RECIPE = "scenecut=0:crf=12:" +
         "aq-mode=2:aq-strength=1.0:chroma-qp-offset=-2:subme=8:trellis=2:me=hex:merange=16:" +
         "rc-lookahead=50:ipratio=0.50:vbv-maxrate=110:vbv-bufsize=22:threads=1:range=pc"
 
-    @JvmStatic fun arguments(input: String, output: String, deblocking: Boolean): Array<String> {
+    /** Refuse unsupported recipes before starting a foreground job. */
+    fun checkRate(fps: Int) { require(fps in listOf(10, 15, 20)) { "Choose 10, 15 or 20 fps and re-convert this clip" } }
+    @JvmStatic fun arguments(input: String, output: String, deblocking: Boolean, fps: Int = 15): Array<String> {
+        checkRate(fps)
         require(input.isNotBlank() && output.isNotBlank() && input != output && !input.contains('\u0000') && !output.contains('\u0000'))
         return arrayOf("-nostdin", "-v", "error", "-y", "-i", input, "-map", "0:v:0", "-an",
-            "-vf", FILTER, "-c:v", "libx264", "-profile:v", "baseline", "-pix_fmt", "yuvj420p", "-color_range", "pc",
-            "-x264-params", RECIPE + if (deblocking) ":deblock=0,0" else ":no-deblock=1", "-f", "h264", output)
+            "-vf", "fps=$fps,$FILTER", "-c:v", "libx264", "-profile:v", "baseline", "-pix_fmt", "yuvj420p", "-color_range", "pc",
+            // Preserve eight-second GOPs; x264's minimum is half a GOP plus one picture.
+            "-x264-params", "ref=1:bframes=0:weightp=0:8x8dct=0:cabac=0:keyint=${fps * 8}:min-keyint=${fps * 4 + 1}:" +
+                RECIPE + if (deblocking) ":deblock=0,0" else ":no-deblock=1", "-f", "h264", output)
     }
 }
 
@@ -23,7 +28,8 @@ data class VideoPictureTime(val pts: Long, val nal: Int, val idr: Boolean, val s
 
 /** Join decoded access-unit offsets to the bounded native scan, one VCL per picture. */
 object VideoPictureMap {
-    fun build(audit: VideoFileReader.Audit, decoded: List<VideoDecodedPicture>): List<VideoPictureTime> {
+    fun build(audit: VideoFileReader.Audit, decoded: List<VideoDecodedPicture>, fps: Int = 15): List<VideoPictureTime> {
+        VideoEncodePlan.checkRate(fps)
         require(decoded.isNotEmpty()) { "Converter decoded no pictures" }
         val result = ArrayList<VideoPictureTime>()
         var index = 0
@@ -52,7 +58,7 @@ object VideoPictureMap {
             require(frame.key == idr && (!idr || frame.kind == "I")) { "Decoded keyframe does not match IDR" }
             if (idr) lastIdr = ordinal
             require(lastIdr >= 0 && ordinal - lastIdr <= 255) { "Decoded GOP exceeds hidden seek bound" }
-            result.add(VideoPictureTime((ordinal * 1000L + 8) / 16, finishing, idr, sps, pps))
+            result.add(VideoPictureTime((ordinal * 1000L + fps / 2) / fps, finishing, idr, sps, pps))
         }
         require(audit.nals.drop(index).none { it.type == 1 || it.type == 5 }) { "Unmapped encoded picture" }
         return result

@@ -6,6 +6,21 @@ import kotlin.test.assertFails
 import kotlin.test.assertTrue
 
 class VideoConversionAuditTest {
+    @Test fun chosenRatesPreserveRecipeBitrateAndKeyframeSecondsAndRejectLegacyRate() {
+        for (fps in listOf(10,15,20)) {
+            val args=VideoEncodePlan.arguments("in.mp4","out.h264",false,fps)
+            assertTrue(args[args.indexOf("-vf")+1].startsWith("fps=$fps,scale=320:192:"))
+            val recipe=args[args.indexOf("-x264-params")+1]
+            assertTrue(recipe.contains("keyint=${fps*8}:min-keyint=${fps*4+1}:"))
+            assertTrue(recipe.contains("vbv-maxrate=110:vbv-bufsize=22:"))
+            val audit=VideoHeaderAudit(false,fps)
+            audit.accept(section("Sequence Parameter Set",sps+("time_scale" to fps*2L))+
+                section("Picture Parameter Set",pps)+section("Slice Header",slice(false)))
+            audit.finish()
+        }
+        assertFails{VideoEncodePlan.arguments("in.mp4","out.h264",false,16)}
+        assertFails{VideoHeaderAudit(false,16)}
+    }
     @Test fun conversionAuditLeavesDecodingAndSecondProbeWithoutReportPrefix() {
         for (initial in listOf(null, "")) {
             var environment: String? = initial
@@ -39,7 +54,7 @@ class VideoConversionAuditTest {
     private val sps = linkedMapOf("profile_idc" to 66L, "max_num_ref_frames" to 1L, "pic_width_in_mbs_minus1" to 19L,
         "pic_height_in_map_units_minus1" to 11L, "frame_mbs_only_flag" to 1L, "frame_cropping_flag" to 0L,
         "vui_parameters_present_flag" to 1L, "video_signal_type_present_flag" to 1L, "video_full_range_flag" to 1L,
-        "timing_info_present_flag" to 1L, "num_units_in_tick" to 1L, "time_scale" to 32L,
+        "timing_info_present_flag" to 1L, "num_units_in_tick" to 1L, "time_scale" to 30L,
         "max_num_reorder_frames" to 0L, "max_dec_frame_buffering" to 1L, "seq_parameter_set_id" to 0L)
     private val pps = linkedMapOf("entropy_coding_mode_flag" to 0L, "num_slice_groups_minus1" to 0L,
         "weighted_pred_flag" to 0L, "weighted_bipred_idc" to 0L, "num_ref_idx_l0_default_active_minus1" to 0L,
@@ -100,7 +115,7 @@ class VideoConversionAuditTest {
             VideoDecodedPicture(32, 8, false, 320, 192, "yuvj420p", "P", 0, 0))
         val map = VideoPictureMap.build(audit, frames)
         assertEquals(listOf(3, 4), map.map { it.nal })
-        assertEquals(listOf(0L, 63L), map.map { it.pts })
+        assertEquals(listOf(0L, 67L), map.map { it.pts })
         assertTrue(map.all { it.sps == 0 && it.pps == 1 })
         assertFails { VideoPictureMap.build(audit, frames.dropLast(1)) }
         assertFails { VideoPictureMap.build(audit, frames.map { it.copy(kind = "B") }) }

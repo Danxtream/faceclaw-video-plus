@@ -35,13 +35,13 @@ function shown(lens, stream, token, ordinal, pts, tick) {
     0, 1, ordinal, 0, 0, 0, 0xffffffff].forEach((v, i) => put(raw, 4 + i * 4, v));
   return raw;
 }
-function fixture(frames = 20, step = 63) {
+function fixture(frames = 20, step = 67) {
   let now = 100;
   const calls = [], audio = [], view = [];
   const nals = [7, 8, 6, ...Array.from({length: frames}, (_, i) => i % 5 === 0 ? 5 : 1)]
     .map((type, index) => ({type, bytes: 2, offset: index * 6 + 4, sha256: 'a'.repeat(64)}));
-  const clip = {duration: Math.round(frames * 62.5), h264: {nals},
-    pictures: Array.from({length: frames}, (_, i) => ({pts: Math.round(i * 62.5), nal: i + 3, idr: i % 5 === 0, sps: 0, pps: 1}))};
+  const clip = {fps: 15, duration: Math.round(frames * 1000 / 15), h264: {nals},
+    pictures: Array.from({length: frames}, (_, i) => ({pts: Math.round(i * 1000 / 15), nal: i + 3, idr: i % 5 === 0, sps: 0, pps: 1}))};
   const state = {active: false, stream: 0, high: 0, expected: 0, metadata: [], decoded: [],
     paused: false, preview: false, shown: [], native: false, selection: 0, menu: false, serial: 0, target: 0,
     busyMetadata: 0, refusal: false, wrongRestore: false, failedSample: false, concurrent: 0};
@@ -327,7 +327,7 @@ test('Native upload progress fences every JS report/control and recreates only a
   };
   f.onView = view => {
     if (view.position > 0 && !flow) flow = (async () => {
-      await f.player.pause(true); await f.player.seek(700); await f.player.pause(false);
+      await f.player.pause(true); await f.player.seek(750); await f.player.pause(false);
     })();
   };
   await f.player.run(); await flow;
@@ -439,9 +439,9 @@ test('Pause waits actual state; paused seek resets, restores and displays a fres
     if (v.position > 0 && !flow) flow = (async () => {
       await f.player.pause(true);
       assert.equal(f.player.view.paused, true);
-      await f.player.seek(700);
+      await f.player.seek(750);
       assert.equal(f.player.view.paused, true);
-      assert.equal(f.player.view.position, 688);
+      assert.equal(f.player.view.position, 733);
       await f.player.pause(false);
     })();
   };
@@ -463,7 +463,7 @@ test('Firmware menu apply hands seek to the same writer and scale uses values 1/
     if (v.position > 0 && !flow) flow = (async () => {
       await f.player.menu('open'); await f.player.menu('next'); await f.player.menu('next');
       await f.player.menu('apply');
-      assert.equal(f.player.view.position, 1188);
+      assert.equal(f.player.view.position, 1267);
       await f.player.scale(true); await f.player.scale(false);
       await f.player.pause(false);
     })();
@@ -558,7 +558,7 @@ test('Paused seek previews report even when input credits remain available', asy
   const f = fixture(20), shown = f.protocol.shown;
   let intent = false;
   f.onView = view => {
-    if (view.position === 688 && view.active) f.player.stop();
+    if (view.position === 667 && view.active) f.player.stop();
     else if (view.active && !intent) { intent = true; f.player.pause(true).catch(() => {}); }
   };
   f.protocol.shown = async (...args) => {
@@ -570,7 +570,7 @@ test('Paused seek previews report even when input credits remain available', asy
   await f.player.run(700, true).catch(error => {
     f.player.stop(); throw error;
   });
-  assert.equal(f.player.view.position, 688);
+  assert.equal(f.player.view.position, 667);
   assert.equal(f.closed(), true);
 });
 

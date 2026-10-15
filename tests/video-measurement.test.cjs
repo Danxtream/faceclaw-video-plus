@@ -21,6 +21,20 @@ function packet(side, start, counts, high = start + counts.length - 1, flags = 3
   });
   return raw;
 }
+
+test('Each clip rate is scored against fps minus one half in at least 99 percent of seconds',()=>{
+  for(const fps of [10,15,20]){
+    const m=new VideoMeasurement(50,[101,102],fps);
+    for(let serial=1;serial<=102;serial+=2){
+      const counts=serial===3?[fps-1,fps+1]:[fps,fps];
+      m.accept([packet(1,serial,counts),packet(2,serial,counts)]);
+    }
+    const summary=m.summary(true);
+    assert.equal(summary.fps,fps);assert.equal(summary.targetShownRate,fps-0.5);
+    assert.equal(summary.badWindows,1);assert.equal(summary.paired.low1,fps);
+    assert.equal(summary.status,'pass');
+  }
+});
 test('Paired actual windows expose bursty-average dips, nearest-rank tail and merged lengths', () => {
   const m = new VideoMeasurement(50,[101,102]);
   for (let serial=1;serial<=102;serial+=2) {
@@ -58,7 +72,7 @@ test('Cadence snapshots are capability-gated read-only paired queries with exact
   const p=new VideoProtocol({epoch:()=>1,exchange:async(raw,bytes)=>{
     sends++;last=raw;
     if(raw[1]===0){const r=new Uint8Array(128);r[0]=1;r[1]=7;r[32]=0;r[33]=16;r[36]=246;r[37]=15;r[40]=64;r[41]=1;r[42]=192;r[44]=1;r[45]=2;r[46]=r[47]=1;r[48]=4;r[49]=6;return [r,r];}
-    if(raw[1]===13)return [1,2].map(()=>Uint8Array.from([1,13,0,255,2,16,255,119,0,0,0,0,0,0,0,0]));
+    if(raw[1]===13)return [1,2].map(()=>Uint8Array.from([1,13,0,255,2,7,255,119,0,0,0,0,0,0,0,0]));
     return [packet(1,1,[16]),packet(2,1,[16])];
   }},()=>id++);
   assert.equal(await p.rateEvidenceRows(50,[1,1]),null);assert.equal(sends,0);

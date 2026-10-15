@@ -45,7 +45,9 @@ internal fun <T> videoDecodedPictures(frames: List<T>, packets: List<T>, number:
 
 /** A single native conversion job; no BLE, firmware, repair pass or auto-downrate. */
 class VideoConversion(private val input: File, private val deblocking: Boolean, private val overwrite: Boolean,
+    private val fps: Int = 15,
     private val progress: (String, Double) -> Unit) {
+    init { VideoEncodePlan.checkRate(fps) }
     private val cancelled = AtomicBoolean(false)
     private val sessionId = AtomicLong(0)
     @Volatile private var thread: Thread? = null
@@ -112,7 +114,7 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
             val sourceInfo = probe(arrayOf("-v", "error", "-show_entries", "format=duration", "-of", "json", input.path))
             val duration = sourceInfo.getJSONObject("format").getDouble("duration") * 1000
             require(duration.isFinite() && duration > 0) { "Invalid MP4 duration" }
-            val args = VideoEncodePlan.arguments(input.path, publication.candidate.path, deblocking)
+            val args = VideoEncodePlan.arguments(input.path, publication.candidate.path, deblocking, fps)
             progress("encoding", 0.0)
             execute(args, duration)
             progress("auditing headers", 0.99)
@@ -122,26 +124,26 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
                 execute(arrayOf("-nostdin", "-report", "-v", "error", "-f", "h264", "-i", publication.candidate.path,
                     "-map", "0:v:0", "-c:v", "copy", "-bsf:v", "trace_headers", "-f", "null", "-"))
             }
-            val headerAudit = VideoHeaderAudit(deblocking)
+            val headerAudit = VideoHeaderAudit(deblocking, fps)
             publication.report.bufferedReader().useLines { lines -> lines.forEach { checkActive(); headerAudit.accept(it + "\n") } }
             headerAudit.finish()
             val audit = VideoFileReader.audit(publication.candidate)
             progress("decoding audit", 0.99)
             // Keep arrays separate: combined packet/frame probes interleave JSON records.
-            val packets = probe(arrayOf("-v", "error", "-framerate", "16", "-f", "h264", "-show_packets",
+            val packets = probe(arrayOf("-v", "error", "-framerate", fps.toString(), "-f", "h264", "-show_packets",
                 "-show_entries", "packet=pos,size,flags", "-of", "json", publication.candidate.path)).getJSONArray("packets")
-            val decoded = probe(arrayOf("-v", "error", "-err_detect", "explode", "-framerate", "16", "-f", "h264",
+            val decoded = probe(arrayOf("-v", "error", "-err_detect", "explode", "-framerate", fps.toString(), "-f", "h264",
                 "-show_frames", "-show_entries", "frame=key_frame,width,height,pix_fmt,pict_type,repeat_pict,interlaced_frame",
                 "-of", "json", publication.candidate.path)).getJSONArray("frames")
             val frames = videoDecodedPictures((0 until decoded.length()).map(decoded::getJSONObject),
                 (0 until packets.length()).map(packets::getJSONObject),
                 JSONObject::getLong, JSONObject::getString, ::checkActive)
-            val pictures = VideoPictureMap.build(audit, frames)
+            val pictures = VideoPictureMap.build(audit, frames, fps)
             require(headerAudit.slices == pictures.size) { "Header and decoded picture counts disagree" }
             require(input.length() == bytes && input.lastModified() == modified && hash(input) == sourceHash) { "MP4 changed during conversion" }
             checkActive()
-            val sidecar = JSONObject().put("version", 1).put("width", 320).put("height", 192).put("fps", 16)
-                .put("duration", (pictures.size * 1000L + 8) / 16).put("range", "full").put("deblocking", deblocking)
+            val sidecar = JSONObject().put("version", 1).put("width", 320).put("height", 192).put("fps", fps)
+                .put("duration", (pictures.size * 1000L + fps / 2) / fps).put("range", "full").put("deblocking", deblocking)
                 .put("encoder", "${VideoEncodePlan.ENCODER}; FFmpeg ${FFmpegKitConfig.getFFmpegVersion()}")
                 .put("options", JSONArray(args.toList())).put("source", JSONObject().put("name", input.name).put("bytes", bytes).put("sha256", sourceHash))
                 .put("h264", JSONObject().put("bytes", audit.bytes).put("sha256", audit.sha256)

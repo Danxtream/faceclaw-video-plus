@@ -43,11 +43,12 @@
         </StackLayout></ScrollView>
       </TabViewItem>
       <TabViewItem title="Convert">
-        <GridLayout rows="auto,auto,auto,*" class="p-8">
+        <GridLayout rows="auto,auto,auto,auto,*" class="p-8">
           <GridLayout row="0" columns="*,auto" rows="auto"><Label col="0" text="Deblocking filter" verticalAlignment="center" /><Switch col="1" checked="{{ deblocking }}" checkedChange="{{ onDeblockingChange }}" /></GridLayout>
-          <Label row="1" text="{{ conversionStatus }}" textWrap="true" />
-          <GridLayout row="2" columns="*,auto" rows="auto"><Progress col="0" maxValue="100" value="{{ progress }}" verticalAlignment="center" /><Button col="1" text="Cancel" tap="{{ onCancelTap }}" visibility="{{ cancelVisibility }}" /></GridLayout>
-          <ListView row="3" items="{{ sources }}">
+          <GridLayout row="1" columns="auto,*"><Label text="Picture rate" verticalAlignment="center" /><SegmentedBar col="1" selectedIndex="{{ conversionRateIndex }}" selectedIndexChanged="{{ onConversionRateChange }}"><SegmentedBarItem title="10 fps" /><SegmentedBarItem title="15 fps" /><SegmentedBarItem title="20 fps" /></SegmentedBar></GridLayout>
+          <Label row="2" text="{{ conversionStatus }}" textWrap="true" />
+          <GridLayout row="3" columns="*,auto" rows="auto"><Progress col="0" maxValue="100" value="{{ progress }}" verticalAlignment="center" /><Button col="1" text="Cancel" tap="{{ onCancelTap }}" visibility="{{ cancelVisibility }}" /></GridLayout>
+          <ListView row="4" items="{{ sources }}">
             <ListView.itemTemplate><GridLayout rows="auto" columns="*,auto" class="p-8"><Label col="0" text="{{ name }}" textWrap="true" verticalAlignment="center" /><Button col="1" text="Convert" tap="{{ convert }}" /></GridLayout></ListView.itemTemplate>
           </ListView>
         </GridLayout>

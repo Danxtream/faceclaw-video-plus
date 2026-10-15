@@ -7,7 +7,7 @@ import { openPhoneVideo } from "../apps/video";
 import { activeVideoSession, observeVideoSession, type VideoSession } from "../apps/video/video-session";
 import { VideoSeekControls } from "./video-seek-controls";
 export { formatVideoTime } from "./video-seek-controls";
-import { videoRadioSetting, videoScaleSetting, videoDitherSetting, videoDeblockingSetting } from "../apps/video/video-settings";
+import { videoRadioSetting, videoScaleSetting, videoDitherSetting, videoDeblockingSetting, videoConversionRateSetting } from "../apps/video/video-settings";
 
 /** Strict remote time input, with no changes to the source's fixed frame cadence. */
 export function parseVideoTime(text: string): number {
@@ -67,6 +67,7 @@ export class VideoViewModel extends Observable {
       this.set("radioIndex", videoRadioSetting.get() === "video" ? 1 : 0);
       this.set("scaleIndex", videoScaleSetting.get() === "native" ? 0 : 1);
       this.set("dither", videoDitherSetting.get()); this.set("deblocking", videoDeblockingSetting.get());
+      this.set("conversionRateIndex", ["10", "15", "20"].indexOf(videoConversionRateSetting.get()));
       this.set("radioLabel", `Selected: ${videoRadioSetting.displayValue()} / Confirmed: ${view?.hostPhy ?? "Unknown"}`);
       const conversion = videoConversionState();
       this.set("conversionRunning", conversion.running); this.set("progress", conversion.progress * 100);
@@ -92,12 +93,17 @@ export class VideoViewModel extends Observable {
   private async convert(entry: DirectoryEntry): Promise<void> {
     const existing = resolveG2H264Path(entry.path) !== null || statPath(g2VideoMetadataPath(entry.path)) !== null;
     if (existing && !await Dialogs.confirm({title: "Replace converted video?", message: entry.name, okButtonText: "Replace", cancelButtonText: "Cancel"})) return;
-    try { convertVideo(entry.path, videoDeblockingSetting.get(), existing); this.refresh(); }
+    try { convertVideo(entry.path, videoDeblockingSetting.get(), existing, Number(videoConversionRateSetting.get()) as 10 | 15 | 20); this.refresh(); }
     catch (error) { this.set("status", String(error)); }
   }
   onAccessTap(): void { requestAllFilesAccess(); }
   onBackTap(): void { Frame.topmost()?.goBack(); }
   onCancelTap(): void { cancelVideoConversion(); }
+  onConversionRateChange(args: {object?: {selectedIndex?: number}}): void {
+    if (this.refreshing) return;
+    const rate = (["10", "15", "20"] as const)[args.object?.selectedIndex ?? -1];
+    if (rate) videoConversionRateSetting.set(rate);
+  }
   onToggleTap(): void { void this.action(async () => { const player = activeVideoSession()?.engine; if (player) await player.pause(!player.view.paused); }); }
   onStopTap(): void { activeVideoSession()?.stop(); }
   private jump(delta: number): void { void this.action(async () => { const player = activeVideoSession()?.engine; if (player) await player.seek(player.view.position + delta); }); }

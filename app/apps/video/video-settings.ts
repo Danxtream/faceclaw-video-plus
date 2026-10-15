@@ -16,6 +16,10 @@ export const videoDitherSetting = new ConfigSettingBoolean({
 export const videoDeblockingSetting = new ConfigSettingBoolean({
   id: "video-deblocking", label: "Deblocking filter", storageKey: "video.deblocking", defaultValue: false,
 });
+export const videoConversionRateSetting = new ConfigSettingEnum<"10" | "15" | "20">({
+  id: "video-conversion-rate", label: "Picture rate", storageKey: "video.conversionRate", defaultValue: "15",
+  values: ["10", "15", "20"], formatValue: value => value + " fps",
+});
 export const videoDetailedReportsSetting = new ConfigSettingBoolean({
   id: "video-detailed-reports", label: "Video detailed reports", storageKey: "video.detailedReports", defaultValue: false,
 });
