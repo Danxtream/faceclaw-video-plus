@@ -567,8 +567,9 @@ export class VideoPlayback {
     this.copyPrevious = captures;
     if (this.av) {
       const age = Math.min(...ages);
-      // An old capture says little about when its picture appeared.
-      if (age <= 2000) this.av.anchor(left.pts, this.clock() - age);
+      // Ages come from firmware copy ticks, so an older retained row is still an
+      // exact anchor; the ring holds about two seconds and cursor 0 reads its oldest.
+      if (age <= 5000) this.av.anchor(left.pts, this.clock() - age);
       this.positionShownAt = this.clock();
       await this.syncAudio();
       this.notify();
