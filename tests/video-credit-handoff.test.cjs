@@ -32,3 +32,19 @@ test('Six-slot progress does not expand fallback batches beyond four or change m
   f.protocol.owned=async()=>[Uint8Array.from([4,0,0,0,46,0]),Uint8Array.from([4,0,0,0,36,0])];
   await p.credits();assert.equal(p.creditBudget,4);
 });
+test('Timed uploads ask for timeline room and accept only a zero result code beside it',async()=>{
+  let value, offered;
+  const f=latencyTransport(),p=new VideoPlayback(f.protocol,f.source,silentVideoAudio,
+    ()=>({native:true,dither:false,radio:true}),()=>{},()=>{},()=>100,async()=>{});
+  const row={index:4,metadata:1,consumed:0,budget:0,blocked:false,running:false,error:''};
+  const pump={pause(){},resume(){},close(){},snapshot:()=>row,offerCredits(...args){offered=args;return true;}};
+  p.generation={stream:50,tokens:[101,102],index:4,metadata:1,count:100,idr:0,pump};
+  f.protocol.timedNal=true;
+  f.protocol.owned=async(_op,_stream,_tokens,_length,flag)=>{value=flag;return [1,2].map(()=>Uint8Array.from([4,0,0,0,46,3<<5]));};
+  await p.credits();
+  assert.equal(value,1);assert.equal(p.creditBudget,6);assert.equal(offered[3][0][5],3<<5);
+  f.protocol.owned=async()=>[Uint8Array.from([4,0,0,0,46,3<<5]),Uint8Array.from([4,0,0,0,46,(3<<5)|2])];
+  await assert.rejects(p.credits(),/owner credit/);
+  delete p.generation.pump;f.protocol.owned=async(_op,_stream,_tokens,_length,flag)=>{value=flag;return [1,2].map(()=>Uint8Array.from([4,0,0,0,46,0]));};
+  await p.credits();assert.equal(value,undefined);
+});

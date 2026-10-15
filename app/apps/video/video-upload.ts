@@ -2,6 +2,8 @@
 export type VideoUploadPlan = {
   stream: number; tokens: number[]; prefix: number[]; firstNal: number; count: number;
   pictures: {nal: number; pts: number}[];
+  /** Send each picture's VCL NAL with its frame time (firmware capability). */
+  timed?: boolean;
 };
 export type VideoUploadProgress = {
   index: number; metadata: number; consumed: number; budget: number;

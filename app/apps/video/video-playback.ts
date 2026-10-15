@@ -26,7 +26,7 @@ export type VideoPlaybackView = {
   cleanupFailed: boolean;
   hostPhy: string;
 };
-type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement">>;
+type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement" | "timedNal">>;
 type Intent = { kind: "pause" | "seek" | "scale" | "menu"; value: number | boolean; resolve: () => void; reject: (error: unknown) => void };
 type Generation = { stream: number; tokens: number[]; idr: number; target: number; prefix: number[]; firstNal: number; index: number; count: number; metadata: number; paused: boolean; reached: boolean; oldPhy: VideoPhy[]; started: number; anchor: VideoPhy[]; anchorAt: number; anchorUncertainty: number; detailedReports: boolean; pump?: VideoUploadPump };
 
@@ -398,13 +398,16 @@ export class VideoPlayback {
     await this.suspendUpload();
     const g = this.generation!;
     const began = this.clock();
-    const credit = await this.protocol.owned(VIDEO.credits, g.stream, g.tokens, 6);
+    // Timed uploads ask for timeline room too; the pump spends it on timed NALs.
+    const timed = this.protocol.timedNal === true && !!g.pump;
+    const credit = timed ? await this.protocol.owned(VIDEO.credits, g.stream, g.tokens, 6, 1) :
+      await this.protocol.owned(VIDEO.credits, g.stream, g.tokens, 6);
     if (credit.length !== 2 || credit.some(row => row.length !== 6)) throw new Error("Missing lens video reply");
     const expected = credit.map((raw) => videoU32(raw, 0));
     let budget = 6;
     for (let side = 0; side < 2; side++) {
       const packed = credit[side][4], state = packed >>> 4 & 7, capacity = packed & 8 ? 6 : 4, free = packed & 7;
-      if (credit[side][5] || packed & 128 || state !== 2 || free > capacity || expected[side] > g.index || g.index - expected[side] > capacity)
+      if (credit[side][5] & (timed ? 31 : 255) || packed & 128 || state !== 2 || free > capacity || expected[side] > g.index || g.index - expected[side] > capacity)
         throw new Error("Video owner credit window failed");
       budget = Math.min(budget, free, capacity + expected[side] - g.index);
     }

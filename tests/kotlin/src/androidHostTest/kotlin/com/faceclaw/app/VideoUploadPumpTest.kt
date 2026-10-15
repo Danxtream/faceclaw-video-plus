@@ -182,6 +182,59 @@ class VideoUploadPumpTest {
     }
     private fun plan(count: Int = 8) = VideoUploadPlan(50, longArrayOf(101, 102), intArrayOf(), 0, count,
         (0 until count).map { VideoUploadPicture(it, it * 63L) })
+    private fun timedPlan(count: Int = 8) = plan(count).copy(timed = true)
+
+    @Test fun timedPlanCarriesFrameTimesInVclNalsWithinTimelineRoomAndNoMetadataExchange() {
+        var id = 1L; var sent = 0
+        val queries = mutableListOf<ByteArray>(); val batches = mutableListOf<List<ByteArray>>()
+        val engine = VideoUploadEngine(timedPlan(8), 8, { byteArrayOf(0x65, 1) }, { id++ }, {},
+            { command -> queries.add(command); val row = reply(sent.toLong(), 46, 3 shl 5); arrayOf(row, row) },
+            { records, following ->
+                assertTrue(following.all { it == null }); batches.add(records.toList()); sent += records.size
+                intArrayOf(records.size, 0)
+            })
+        assertTrue(engine.step())
+        assertEquals(1, queries.size); assertEquals(10, queries[0][1].toInt())
+        assertEquals(24, queries[0].size); assertEquals(1L, word(queries[0], 20))
+        // Six NAL credits but room for three frame times: the fourth picture waits.
+        assertEquals(3, batches[0].size); assertEquals(3, engine.metadata); assertEquals(0, engine.pictureBudget)
+        batches[0].forEachIndexed { i, record ->
+            assertEquals(24, record[1].toInt()); assertEquals(20, record.size)
+            assertEquals(i.toLong(), word(record, 6)); assertEquals(i + 1L, word(record, 10)); assertEquals(i * 63L, word(record, 14))
+        }
+        assertTrue(engine.step())
+        assertEquals(2, queries.size); assertEquals(listOf(3L, 4L, 5L), batches[1].map { word(it, 6) })
+        assertTrue(queries.none { it[1].toInt() == 14 })
+    }
+
+    @Test fun oversizedVclNalAdmitsItsFrameTimeSeparatelyThenTimedRecordsResume() {
+        var id = 1L; var sent = 0
+        val ops = mutableListOf<Int>(); val records = mutableListOf<ByteArray>()
+        val engine = VideoUploadEngine(timedPlan(3), 3, { i -> if (i == 0) ByteArray(4079) { 0x65 } else byteArrayOf(0x41) },
+            { id++ }, {},
+            { command ->
+                ops.add(command[1].toInt())
+                val row = if (command[1].toInt() == 10) reply(sent.toLong(), 46, 4 shl 5) else reply(word(command, 12), 1)
+                arrayOf(row, row)
+            }, { batch, _ -> records.addAll(batch); sent += batch.size; intArrayOf(batch.size, 0) })
+        assertTrue(engine.step()); assertTrue(engine.step())
+        assertEquals(listOf(10, 14), ops)
+        assertEquals(6, records[0][1].toInt()); assertEquals(4089, records[0].size)
+        assertEquals(listOf(24, 24), records.drop(1).map { it[1].toInt() })
+        assertEquals(2L, word(records[1], 10)); assertEquals(3, engine.index); assertEquals(3, engine.metadata)
+    }
+
+    @Test fun timedNalWaitsWhileEitherLensReportsNoTimelineRoomAndRejectsCodeBits() {
+        var room = 0; var queries = 0; var batches = 0
+        val engine = VideoUploadEngine(timedPlan(4), 4, { byteArrayOf(0x65) }, { 1 }, {},
+            { _ -> queries++; arrayOf(reply(0, 46, 2 shl 5), reply(0, 46, room shl 5)) },
+            { batch, _ -> batches++; intArrayOf(batch.size, 0) })
+        assertFalse(engine.step()); assertTrue(engine.blocked); assertEquals(0, batches); assertEquals(1, queries)
+        room = 2; assertTrue(engine.step()); assertEquals(2, queries); assertEquals(1, batches); assertEquals(2, engine.index)
+        val refused = VideoUploadEngine(timedPlan(4), 4, { byteArrayOf(0x65) }, { 1 }, {},
+            { _ -> arrayOf(reply(0, 46, (3 shl 5) or 2), reply(0, 46, 3 shl 5)) }, { _, _ -> error("No upload") })
+        assertFails { refused.step() }
+    }
 
     @Test fun missingCreditsRetryFreshIdsThenWaitWithoutInventingCreditOrFailingPump() {
         var id = 1L; var failures = 2; var pipelines = 0

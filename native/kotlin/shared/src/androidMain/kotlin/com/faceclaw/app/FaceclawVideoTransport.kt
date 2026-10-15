@@ -240,7 +240,11 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         require(records.all { it.size in 11..4096 })
         val stream = u32(records[0], 2)
         records.forEachIndexed { i, nal ->
-            require(nal.size in 11..4096 && unsigned(nal[0]) == MESSAGE && unsigned(nal[1]) == 6)
+            // A timed NAL (op 24) carries its picture's frame time in an 18-byte header.
+            val timed = nal.size > 1 && unsigned(nal[1]) == VideoUploadEngine.TIMED_NAL
+            require(nal.size in (if (timed) VideoUploadEngine.TIMED_HEADER + 1 else 11)..4096 &&
+                unsigned(nal[0]) == MESSAGE && (timed || unsigned(nal[1]) == 6))
+            require(!timed || following[i] == null)
             require(u32(nal, 2) == stream && u32(nal, 6) == u32(records[0], 6) + i)
             following[i]?.let { meta ->
                 require(meta.size == 24 && unsigned(meta[0]) == MESSAGE && unsigned(meta[1]) == 14)

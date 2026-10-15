@@ -69,6 +69,9 @@ export class VideoProtocol {
   readonly epoch: number;
   private evidence = false;
   private rateEvidence = false;
+  private timed = false;
+  /** Both lenses accept a picture's frame time inside its VCL NAL record. */
+  get timedNal(): boolean { return this.timed; }
   constructor(private readonly backend: VideoBackend, private readonly reserve: () => number | Promise<number>) {
     this.epoch = backend.epoch();
   }
@@ -77,7 +80,7 @@ export class VideoProtocol {
   }
   createUploadPump(reader: unknown, plan: VideoUploadPlan): VideoUploadPump | undefined {
     this.check();
-    return reader === undefined ? undefined : this.backend.createUploadPump?.(reader, plan);
+    return reader === undefined ? undefined : this.backend.createUploadPump?.(reader, {...plan, timed: this.timed});
   }
   private async header(op: number, bytes: number): Promise<Uint8Array> {
     this.check();
@@ -120,10 +123,12 @@ export class VideoProtocol {
     if ((await this.status(VIDEO.caps)).some((row) => row.result || row.error)) throw new Error("Video capabilities refused");
     const rows = await this.query(await this.header(VIDEO.playbackCaps, 8), 16);
     if (rows.some((row) => row[0] !== 1 || row[1] !== 13 || row[2] || row[3] !== 255 ||
-      row[4] !== 2 || row[5] !== 16 || row[6] !== 255 || (row[7] & 7) !== 7 || (row[7] & ~127)))
+      row[4] !== 2 || row[5] !== 16 || row[6] !== 255 || (row[7] & 7) !== 7))
       throw new Error("Paired queued playback controls are not supported");
     this.evidence = rows.every(row => !!(row[7] & 32));
     this.rateEvidence = rows.every(row => !!(row[7] & 64));
+    // Bit 128: timed NAL records and timeline room in flagged credit replies.
+    this.timed = rows.every(row => !!(row[7] & 128));
     this.backend.configureEvidence?.(this.evidence);
   }
   measurementSnapshot(): unknown { return this.backend.measurementSnapshot?.() ?? null; }

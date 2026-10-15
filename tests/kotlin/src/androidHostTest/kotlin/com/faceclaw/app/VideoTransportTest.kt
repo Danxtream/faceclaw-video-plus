@@ -415,6 +415,16 @@ class VideoTransportTest {
             assertFailsWith<IllegalArgumentException> { f.transport.beginPipeline(java.nio.ByteBuffer.wrap(invalid), 3, true) }
     }
 
+    @Test fun timedNalRecordsUseTheirOwnHeaderAndCannotCarryFollowingMetadata() {
+        val f = Fixture()
+        f.respond = { record -> f.ack(record, 1); f.ack(record, 2) }
+        val timed = byteArrayOf(31, 24, 50, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 63, 0, 0, 0, 0x65)
+        assertContentEquals(intArrayOf(1, 0), f.transport.pipeline(arrayOf(timed), arrayOf(null), 3, true))
+        assertEquals(24, f.records.poll()!!.payload[1].toInt())
+        assertFailsWith<IllegalArgumentException> { f.transport.pipeline(arrayOf(timed.copyOf(18)), arrayOf(null), 3, true) }
+        assertFailsWith<IllegalArgumentException> { f.transport.pipeline(arrayOf(timed), arrayOf(metadata(2)), 3, true) }
+    }
+
     @Test fun pipelineStopsBeforeNalsWhoseMetadataEitherLensRefused() {
         for (left in listOf(true, false)) {
             val f = Fixture()
