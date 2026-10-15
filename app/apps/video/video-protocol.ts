@@ -210,7 +210,7 @@ export class VideoProtocol {
     const raw = await this.header(VIDEO.metadata, 24);
     put(raw, 8, stream); put(raw, 12, ordinal); put(raw, 16, nal); put(raw, 20, pts);
     const rows = await this.query(raw, 6, 3, 5);
-    if (rows.some((row) => ![0, 3].includes(row[5]) || row[4] > 4 || (!row[5] && videoU32(row, 0) !== ordinal)))
+    if (rows.some((row) => ![0, 3].includes(row[5]) || row[4] > 6 || (!row[5] && videoU32(row, 0) !== ordinal)))
       throw new Error("Picture metadata refused");
     return rows.every((row) => !row[5]);
   }
@@ -273,7 +273,7 @@ export class VideoProtocol {
     const rows = await this.backend.sendPicture(record, raw);
     this.check();
     if (rows.length !== 2 || rows.some(row => row.length !== 6 || ![0, 3].includes(row[5]) ||
-        row[4] > 4 || (!row[5] && videoU32(row, 0) !== next.ordinal))) throw new Error("Picture metadata refused");
+        row[4] > 6 || (!row[5] && videoU32(row, 0) !== next.ordinal))) throw new Error("Picture metadata refused");
     return rows.every(row => !row[5]);
   }
 }

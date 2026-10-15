@@ -407,7 +407,8 @@ export class VideoPlayback {
     let budget = 6;
     for (let side = 0; side < 2; side++) {
       const packed = credit[side][4], state = packed >>> 4 & 7, capacity = packed & 8 ? 6 : 4, free = packed & 7;
-      if (credit[side][5] & (timed ? 31 : 255) || packed & 128 || state !== 2 || free > capacity || expected[side] > g.index || g.index - expected[side] > capacity)
+      if (credit[side][5] & (timed ? 31 : 255) || (timed && (credit[side][5] >>> 5) > 6) ||
+          packed & 128 || state !== 2 || free > capacity || expected[side] > g.index || g.index - expected[side] > capacity)
         throw new Error("Video owner credit window failed");
       budget = Math.min(budget, free, capacity + expected[side] - g.index);
     }

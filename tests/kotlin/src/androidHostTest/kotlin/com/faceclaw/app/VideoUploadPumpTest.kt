@@ -12,6 +12,40 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class VideoUploadPumpTest {
+    @Test fun sixTimedRoomsUseFourThenTwoAndRespectTheSmallerPeer() {
+        for ((peer, wanted) in listOf(6 to 6, 4 to 4, 2 to 2)) {
+            var sent = 0; var queries = 0
+            val batches = mutableListOf<Int>()
+            val engine = VideoUploadEngine(timedPlan(), 8, { byteArrayOf(0x65) }, { 1 }, {},
+                { _ -> queries++; arrayOf(reply(sent.toLong(), 46, 6 shl 5), reply(sent.toLong(), 46, peer shl 5)) },
+                { records, following ->
+                    assertTrue(following.all { it == null }); batches.add(records.size); sent += records.size
+                    intArrayOf(records.size, 0)
+                })
+            while (engine.index < wanted) assertTrue(engine.step())
+            assertEquals(wanted, engine.index); assertEquals(1, queries)
+            assertEquals(if (peer == 6) listOf(4, 2) else listOf(peer), batches)
+            assertEquals(0, engine.pictureBudget)
+        }
+        val bad = arrayOf(reply(0, 46, 7 shl 5), reply(0, 46, 6 shl 5))
+        val engine = VideoUploadEngine(timedPlan(), 8, { error("Uncredited read") }, { 1 }, {}, { bad },
+            { _, _ -> error("Uncredited upload") })
+        assertFalse(engine.offerCredits(50, longArrayOf(101, 102), 0, bad, 0))
+        assertFails { engine.step() }
+    }
+
+    @Test fun oversizedTimedNalAcceptsSixMetadataRoomsButRejectsSeven() {
+        for (room in listOf(6, 7)) {
+            var sent = 0
+            val engine = VideoUploadEngine(timedPlan(), 8, { ByteArray(4079) { 0x65 } }, { 1 }, {},
+                { command -> if (command[1].toInt() == 10) arrayOf(reply(0, 46, 6 shl 5), reply(0, 46, 6 shl 5))
+                    else arrayOf(reply(word(command, 12), room), reply(word(command, 12), room)) },
+                { records, _ -> sent += records.size; intArrayOf(records.size, 0) })
+            if (room == 6) { assertTrue(engine.step()); assertEquals(1, sent) }
+            else { assertFails { engine.step() }; assertEquals(0, sent) }
+        }
+    }
+
     @Test fun conservativeCreditReuseLatencyModelReportsRateStarvationAndFenceCost() {
         data class Result(val rate: Double, val queries: Int, val inputDryMs: Double, val fenceMs: Double)
         fun measure(legacy: Boolean): Result {

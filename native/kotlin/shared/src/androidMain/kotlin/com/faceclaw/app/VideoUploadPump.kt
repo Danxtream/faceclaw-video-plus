@@ -64,7 +64,8 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
         for ((side, raw) in credit.withIndex()) {
             val expected = word(raw, 0)
             val packed = u(raw[4]); val capacity = if (packed and 8 != 0) 6 else 4; val free = packed and 7
-            check(u(raw[5]) and resultMask == 0 && packed and 128 == 0 && (packed shr 4 and 7) == 2 && free <= capacity &&
+            check(u(raw[5]) and resultMask == 0 && (!plan.timed || (u(raw[5]) shr TIMELINE_ROOM_SHIFT) <= 6) &&
+                packed and 128 == 0 && (packed shr 4 and 7) == 2 && free <= capacity &&
                 expected <= index && index - expected <= capacity &&
                 expected >= if (side == 0) leftConsumed else rightConsumed) { "Video owner credit window failed" }
             available = minOf(available, free, (capacity + expected - index).toInt())
@@ -93,7 +94,7 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
     }
     private fun metadataAccepted(command: ByteArray): Boolean {
         val rows = measurement.time(VideoMeasurement.METADATA) { exchange(command) }; checkEpoch()
-        require(rows.size == 2 && rows.all { it.size == 6 && u(it[5]) in listOf(0, 3) && u(it[4]) <= 4 &&
+        require(rows.size == 2 && rows.all { it.size == 6 && u(it[5]) in listOf(0, 3) && u(it[4]) <= 6 &&
             (u(it[5]) != 0 || word(it, 0) == word(command, 12)) }) { "Picture metadata refused" }
         val accepted = rows.all { u(it[5]) == 0 }
         if (!accepted) { waitKind = VideoMeasurement.BUSY; measurement.add(VideoMeasurement.REFUSAL) }

@@ -278,7 +278,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                 room()
                 val rows = exchange(meta, 6, targets, ingressLeft, 5, generation,
                     overlap = true, deadline = deadline)
-                check(rows.all { unsigned(it[5]) in listOf(0, 3) && unsigned(it[4]) <= 4 &&
+                check(rows.all { unsigned(it[5]) in listOf(0, 3) && unsigned(it[4]) <= 6 &&
                     (unsigned(it[5]) != 0 || u32(it, 0) == u32(meta, 12)) }) { "Picture metadata refused" }
                 if (rows.any { unsigned(it[5]) != 0 }) break
                 admitted++

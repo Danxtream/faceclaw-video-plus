@@ -2,6 +2,19 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { VideoProtocol, VideoReportUnavailable, VIDEO, parseVideoStatus, videoU32 } = require('../.test-build/app/apps/video/video-protocol');
 
+test('Independent metadata room accepts six but never seven on either send path', async () => {
+  let room = 6;
+  const rows = () => [1, 2].map(() => Uint8Array.from([2, 0, 0, 0, room, 0]));
+  const protocol = new VideoProtocol({epoch: () => 1, exchange: async () => rows(), sendPicture: async () => rows()}, () => 10);
+  for (room of [0, 4, 5, 6]) {
+    assert.equal(await protocol.metadata(1, 2, 3, 67), true);
+    assert.equal(await protocol.sendNalsWithMetadata(1, 2, Uint8Array.of(0x65), {ordinal: 2, nal: 3, pts: 67}), true);
+  }
+  room = 7;
+  await assert.rejects(protocol.metadata(1, 2, 3, 67), /metadata refused/);
+  await assert.rejects(protocol.sendNalsWithMetadata(1, 2, Uint8Array.of(0x65), {ordinal: 2, nal: 3, pts: 67}), /metadata refused/);
+});
+
 test('Timeline and START carry each supported rate without changing the stream contract',async()=>{
   for(const fps of [10,15,20]) {
     let id=1;const sent=[];

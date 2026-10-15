@@ -12,6 +12,19 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class VideoTransportTest {
+    @Test fun metadataPipelineAcceptsSixRoomsButNotSevenOnBothIngresses() {
+        for (left in listOf(true, false)) for (room in listOf(6, 7)) {
+            val f = Fixture()
+            f.respond = { record -> for (side in 1..2) {
+                if (record.payload[1].toInt() == 14)
+                    f.page(102, side, 0, 1, byteArrayOf(2, 0, 0, 0, room.toByte(), 0), left)
+                f.ack(record, side)
+            } }
+            if (room == 6) assertContentEquals(intArrayOf(1, 1), f.transport.pipeline(arrayOf(nal(1)), arrayOf(metadata(2)), 3, left))
+            else assertFails { f.transport.pipeline(arrayOf(nal(1)), arrayOf(metadata(2)), 3, left) }
+        }
+    }
+
     @Test fun diagnosticIdsCannotOvertakePreallocatedMetadataInsideTheUploadPipeline() {
         val f = Fixture(); var identity = 1000L; var high = 0L; var once = true
         val events = mutableListOf<String>()

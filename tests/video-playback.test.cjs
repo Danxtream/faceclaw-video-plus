@@ -5,6 +5,19 @@ const { VIDEO } = require('../.test-build/app/apps/video/video-protocol');
 const { parseVideoPhy, videoRestored, videoLive, parsePlayback, parseShown, videoTickSpan, videoCopyRate } = require('../.test-build/app/apps/video/video-observations');
 
 function put(raw, offset, value) { new DataView(raw.buffer).setUint32(offset, value, true); }
+
+test('Flagged report credits retain six-picture room and reject impossible seven', async () => {
+  const f = fixture(); let room = 6; let offered = 0;
+  f.player.generation = {stream: 1, tokens: [101, 102], index: 0,
+    pump: {offerCredits: () => offered++}};
+  f.player.suspendUpload = async () => {};
+  f.protocol.timedNal = true;
+  f.protocol.owned = async () => [1, 2].map(() => Uint8Array.from([0, 0, 0, 0, 46, room << 5]));
+  await f.player.credits(); assert.equal(f.player.creditBudget, 6); assert.equal(offered, 1);
+  room = 7;
+  await assert.rejects(f.player.credits(), /owner credit window failed/);
+  assert.equal(offered, 1);
+});
 function phy(lens, owned = false, tick = 100) {
   const raw = new Uint8Array(128);
   raw.set([1, 7, 0, 1]); put(raw, 4, tick); raw.set([1, 32, 3, lens], 8);
