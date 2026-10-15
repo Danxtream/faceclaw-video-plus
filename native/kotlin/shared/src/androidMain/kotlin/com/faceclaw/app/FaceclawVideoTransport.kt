@@ -29,8 +29,11 @@ class VideoSubmission internal constructor(
     internal var listed = false
     internal var delivered = false
     internal var failure: String? = null
+    internal val queuedAt = System.nanoTime()
+    internal var writtenAt = 0L
 
     fun delivered() = transport.delivered(this)
+    fun written() = transport.written(this)
     fun failed(reason: String) = transport.failed(this, reason)
 }
 
@@ -47,6 +50,8 @@ class VideoCompletion(
  * for a writer or call the native queue while holding the notification monitor.
  */
 class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
+    internal val measurement = VideoMeasurement()
+    fun measurementSnapshot(): String = measurement.snapshot()
     private val writer = ReentrantLock()
     private val pagePadding = SecureRandom()
     private val monitor = java.lang.Object()
@@ -107,8 +112,15 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
 
     internal fun delivered(record: VideoSubmission) = synchronized(monitor) {
         if (record.epoch == epoch && record in pending) {
+            if (record.writtenAt != 0L && !record.delivered) measurement.add(VideoMeasurement.ACK, System.nanoTime() - record.writtenAt)
             record.delivered = true
             monitor.notifyAll()
+        }
+    }
+    internal fun written(record: VideoSubmission) = synchronized(monitor) {
+        if (record.epoch == epoch && record in pending && record.writtenAt == 0L) {
+            record.writtenAt = System.nanoTime()
+            measurement.add(VideoMeasurement.QUEUE, record.writtenAt - record.queuedAt)
         }
     }
 
@@ -141,7 +153,8 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         val payload = snapshot(buffer)
         require(payload.size in 8..4096)
         return begin { generation ->
-            val evidence = payload.size == 12 && unsigned(payload[1]) == 7 && unsigned(payload[8]) in 4..5
+            val evidence = unsigned(payload[1]) == 7 && ((payload.size == 12 && unsigned(payload[8]) in 4..5) ||
+                (payload.size == 24 && unsigned(payload[8]) == 6))
             exchange(payload, length, targets, ingressLeft, resultOffset, generation,
                 deadline = System.nanoTime() + if (evidence) 2_000_000_000L else 15_000_000_000L)
                 .joinToString(prefix = "[", postfix = "]") { data ->
@@ -408,6 +421,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             pages.clear()
         }
         val began = System.nanoTime()
+        var complete = false
         var refusalTargets = 0
         var waiting = "transport ACK"
         try {
@@ -425,6 +439,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             val result = mutableListOf<ByteArray>()
             for (side in sides) {
                 val first = synchronized(monitor) { pages[Pair(side, 0)]!! }
+                measurement.add(VideoMeasurement.PLANNED_PAGES, count = first.first.toLong())
                 require(first.second.isNotEmpty() && first.first == (length + first.second.size - 1) / first.second.size)
                 val data = ByteArray(length)
                 first.second.copyInto(data)
@@ -441,7 +456,9 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                         }
                         val attemptAt = System.nanoTime()
                         val acceptedPage = send(arrayOf(command), side, ingressLeft, generation, deadline)[0] == side
+                        measurement.add(VideoMeasurement.PAGE, System.nanoTime() - attemptAt)
                         if (acceptedPage) break
+                        measurement.add(VideoMeasurement.REFUSAL)
                         refusalTargets = refusalTargets or side
                         val evidence = "Frozen page refused op=${unsigned(payload[1])} request=$id side=$side " +
                             "page=$page pages=${first.first} attempt=$attempt attempts=$attempt " +
@@ -456,7 +473,9 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                         Thread.sleep(backoff)
                     }
                     waiting = "page=$page lens=$side reply"
+                    val replyAt = System.nanoTime()
                     await(generation, deadline) { Pair(side, page) in pages }
+                    measurement.add(VideoMeasurement.REPLY_WAIT, System.nanoTime() - replyAt)
                     val part = synchronized(monitor) { pages[Pair(side, page)]!! }
                     require(part.first == first.first && part.second.size == minOf(first.second.size, length - offset))
                     part.second.copyInto(data, offset)
@@ -464,7 +483,9 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                 }
                 require(offset == length && (accepted and side != 0) == (unsigned(data[resultOffset]) == 0))
                 result.add(data)
+                measurement.add(VideoMeasurement.REPLY_BYTES, count = data.size.toLong())
             }
+            complete = true
             result.toTypedArray()
         } catch (error: IllegalStateException) {
             if (error.message !in listOf("Video exact ACK or frozen page timed out", "Video native ACK timeout")) throw error
@@ -477,6 +498,8 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                 "ingress=$ingress waiting=$waiting missing=$missing " +
                 "elapsedMs=${(System.nanoTime() - began) / 1_000_000}: ${error.message}")
         } finally {
+            measurement.add(VideoMeasurement.QUERY, System.nanoTime() - began)
+            if (!complete) measurement.add(VideoMeasurement.FAILURE)
             synchronized(monitor) { request = 0; pages.clear() }
             if (!collectingEvidence && epoch == generation) {
                 refusalEvidenceTargets = refusalEvidenceTargets or refusalTargets

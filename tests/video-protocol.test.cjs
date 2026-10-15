@@ -50,7 +50,7 @@ function status() {
 }
 
 test('Paired capability gates refusal evidence and raw read-only clock logging', async () => {
-  for (const flags of [23, 55, 87]) {
+  for (const flags of [23, 55, 119, 151]) {
     let id = 100, configured = null, clocks = 0;
     const output = [], original = console.error;
     const protocol = new VideoProtocol({epoch: () => 1, configureEvidence: value => configured = value,
@@ -66,13 +66,13 @@ test('Paired capability gates refusal evidence and raw read-only clock logging',
           return row;
         });
       }}, () => id++);
-    if (flags === 87) { await assert.rejects(protocol.capabilities(), /not supported/); continue; }
+    if (flags === 151) { await assert.rejects(protocol.capabilities(), /not supported/); continue; }
     try {
       console.error = line => output.push(line);
       await protocol.capabilities(); await protocol.clockEvidence(1);
     } finally { console.error = original; }
-    assert.equal(configured, flags === 55); assert.equal(clocks, flags === 55 ? 1 : 0);
-    if (flags === 55) assert.ok(output.length === 2 && output.every(line => line.includes('cyclesPerMs=250000')));
+    assert.equal(configured, !!(flags & 32)); assert.equal(clocks, flags & 32 ? 1 : 0);
+    if (flags & 32) assert.ok(output.length === 2 && output.every(line => line.includes('cyclesPerMs=250000')));
   }
 });
 

@@ -13,13 +13,17 @@ internal interface VideoIdentityStore {
 internal class VideoIdentityRange(private val store: VideoIdentityStore) {
     private var next = 0L
     private var end = 0L
+    var refillCount = 0L; private set
+    var refillNanos = 0L; private set
     @Synchronized fun reserve(): Long {
         if (next == end) {
+            val from = System.nanoTime()
             val first = store.read()
             require(first in 1..0xfffffffdL) { "Video request identity exhausted or invalid" }
             val limit = minOf(first + 1024, 0xfffffffeL)
             check(store.save(limit)) { "Could not durably reserve video request identities" }
             next = first; end = limit
+            refillCount++; refillNanos += System.nanoTime() - from
         }
         return next++
     }
@@ -46,6 +50,10 @@ class VideoIdentityAllocator(private val context: Context, private val legacyNex
         range!!.reserve()
     }
     @Synchronized fun poll(): Int = if (checkNotNull(pending).isDone) 1 else 0
+    /** Successful durable refills, cumulative for the process-owned ID range. */
+    fun identityMeasurement(): String = synchronized(lock) {
+        "{\"refills\":${range?.refillCount ?: 0},\"refillMs\":${(range?.refillNanos ?: 0) / 1_000_000.0}}"
+    }
     @Synchronized fun takeResult(): Long {
         val result = checkNotNull(pending)
         check(result.isDone)

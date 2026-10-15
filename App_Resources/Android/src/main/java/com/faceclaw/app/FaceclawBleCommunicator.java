@@ -1069,6 +1069,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
             OutboundMessage message = messageBuilder.customMessage(
                 "video", record.payload, "video record", -1, record.ingressLeft);
             record.message = message;
+            message.onSent = record::written;
             message.onAck = record::delivered;
             message.onTimeout = () -> record.failed("Video native ACK timeout");
             if (record.payload.length >= 12 && record.payload[1] == 1) {

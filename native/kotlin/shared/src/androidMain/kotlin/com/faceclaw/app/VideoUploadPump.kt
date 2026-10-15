@@ -10,12 +10,17 @@ internal data class VideoUploadPlan(val stream: Long, val tokens: LongArray, val
 internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: Int,
     private val read: (Int) -> ByteArray, private val reserve: () -> Long,
     private val checkEpoch: () -> Unit, private val exchange: (ByteArray) -> Array<ByteArray>,
-    private val pipeline: (Array<ByteArray>, Array<ByteArray?>) -> IntArray) {
+    private val pipeline: (Array<ByteArray>, Array<ByteArray?>) -> IntArray,
+    val measurement: VideoMeasurement = VideoMeasurement()) {
     var index = 0; private set
     var metadata = 0; private set
     var consumed = -1L; private set
     var budget = 0; private set
     var blocked = false; private set
+    var waitKind = VideoMeasurement.ZERO_CREDIT; private set
+    var leftConsumed = -1L; private set
+    var rightConsumed = -1L; private set
+    var creditAt = 0L; private set
     val done get() = index == plan.count
     init {
         require(plan.stream in 1..0xfffffffeL && plan.tokens.size == 2 && plan.tokens.all { it in 1..0xffffffffL })
@@ -31,7 +36,7 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
         else plan.firstNal + sequence - plan.prefix.size
     private fun query(op: Int, size: Int): ByteArray {
         checkEpoch()
-        val id = reserve()
+        val id = measurement.time(VideoMeasurement.IDENTITY) { reserve() }
         require(id in 1..0xfffffffeL) { "Video request ID exhausted" }
         return ByteArray(size).also { it[0] = 31; it[1] = op.toByte(); it[2] = 1; put(it, 4, id); put(it, 8, plan.stream) }
     }
@@ -39,24 +44,26 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
         put(it, 12, ordinal.toLong()); put(it, 16, sequence.toLong()); put(it, 20, plan.pictures[ordinal - 1].pts)
     }
     private fun metadataAccepted(command: ByteArray): Boolean {
-        val rows = exchange(command); checkEpoch()
+        val rows = measurement.time(VideoMeasurement.METADATA) { exchange(command) }; checkEpoch()
         require(rows.size == 2 && rows.all { it.size == 6 && u(it[5]) in listOf(0, 3) && u(it[4]) <= 4 &&
             (u(it[5]) != 0 || word(it, 0) == word(command, 12)) }) { "Picture metadata refused" }
-        return rows.all { u(it[5]) == 0 }
+        val accepted = rows.all { u(it[5]) == 0 }
+        if (!accepted) { waitKind = VideoMeasurement.BUSY; measurement.add(VideoMeasurement.REFUSAL) }
+        return accepted
     }
     private fun credits(shouldContinue: () -> Boolean): Boolean {
         var rows: Array<ByteArray>? = null
         for (attempt in 1..2) {
             val command = query(10, 20)
             put(command, 12, plan.tokens[0]); put(command, 16, plan.tokens[1])
-            try { rows = exchange(command); break }
+            try { rows = measurement.time(VideoMeasurement.CREDITS) { exchange(command) }; break }
             catch (error: VideoQueryUnavailable) {
                 checkEpoch()
                 System.err.println("Video upload credits request=${word(command, 4)} attempt=$attempt: ${error.message}")
                 budget = 0; blocked = true
                 // Yield to a waiting control before starting another bounded query.
                 if (!shouldContinue()) return false
-                Thread.sleep(if (attempt == 1) 50 else 400)
+                measurement.time(VideoMeasurement.ZERO_CREDIT) { Thread.sleep(if (attempt == 1) 50 else 400) }
             }
         }
         checkEpoch()
@@ -71,12 +78,14 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
             budget = minOf(budget, free, (capacity + expected - index).toInt())
         }
         consumed = credit.minOf { word(it, 0) }
+        leftConsumed = word(credit[0], 0); rightConsumed = word(credit[1], 0)
+        creditAt = measurement.now()
         blocked = false
         return true
     }
     /** Finish exactly one existing native pipeline batch before any writer handoff. */
     fun step(shouldContinue: () -> Boolean = { true }): Boolean {
-        checkEpoch(); blocked = false
+        checkEpoch(); blocked = false; waitKind = VideoMeasurement.ZERO_CREDIT
         if (done) return false
         if (budget == 0 && !credits(shouldContinue)) return false
         val first = plan.pictures.getOrNull(metadata)
@@ -88,10 +97,10 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
         if (count == 0) { blocked = true; return false }
         val following = arrayOfNulls<ByteArray>(count)
         var next = metadata
-        val records = Array(count) { i ->
+        val records = measurement.time(VideoMeasurement.BUILD) { Array(count) { i ->
             checkEpoch()
             val sequence = index + i
-            val bytes = read(source(sequence)); checkEpoch()
+            val bytes = measurement.time(VideoMeasurement.READ) { read(source(sequence)) }; checkEpoch()
             require(bytes.size in 1..4086) { "Complete NAL exceeds advertised limit" }
             val record = ByteArray(10 + bytes.size)
             record[0] = 31; record[1] = 6; put(record, 2, plan.stream); put(record, 6, sequence.toLong())
@@ -100,8 +109,8 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
                 following[i] = metadataCommand(next + 1, sequence + 1); next++
             }
             record
-        }
-        val result = pipeline(records, following); checkEpoch()
+        } }
+        val result = measurement.time(VideoMeasurement.PIPELINE) { pipeline(records, following) }; checkEpoch()
         require(result.size == 2) { "Invalid video pipeline completion" }
         val sent = result[0]; val admitted = result[1]
         require(sent in 1..count) { "Invalid video pipeline completion" }
@@ -109,6 +118,8 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
         require(admitted in 0..expected && (admitted == expected || admitted == expected - 1 && following[sent - 1] != null) &&
             (sent == count || admitted != expected)) { "Invalid video pipeline completion" }
         index += sent; metadata += admitted; budget -= sent
+        measurement.add(VideoMeasurement.NALS, count = sent.toLong())
+        measurement.add(VideoMeasurement.BYTES, count = records.take(sent).sumOf { it.size - 10 }.toLong())
         return true
     }
     companion object {
@@ -130,6 +141,9 @@ class VideoUploadPump internal constructor(create: () -> VideoUploadEngine) {
     private var running = true
     private var progress = "\"index\":0,\"metadata\":0,\"consumed\":-1,\"budget\":0,\"blocked\":false"
     private var failure = ""
+    private var engine: VideoUploadEngine? = null
+    private var sampleAt = Long.MIN_VALUE
+    private var sample = "{}"
 
     constructor(transport: FaceclawVideoTransport, reader: VideoFileReader, identities: VideoIdentityAllocator,
         plan: String, ingressLeft: Boolean, epoch: Long) : this({
@@ -149,6 +163,7 @@ class VideoUploadPump internal constructor(create: () -> VideoUploadEngine) {
         Thread({
             try {
                 val engine = create()
+                synchronized(monitor) { this.engine = engine }
                 while (true) {
                     synchronized(monitor) {
                         running = false; monitor.notifyAll()
@@ -161,9 +176,15 @@ class VideoUploadPump internal constructor(create: () -> VideoUploadEngine) {
                         engine.step { synchronized(monitor) { requested && !closed } }
                         synchronized(monitor) {
                             progress = "\"index\":${engine.index},\"metadata\":${engine.metadata},\"consumed\":${engine.consumed}," +
-                                "\"budget\":${engine.budget},\"blocked\":${engine.blocked}"
+                                "\"budget\":${engine.budget},\"blocked\":${engine.blocked}," +
+                                "\"consumedL\":${engine.leftConsumed},\"consumedR\":${engine.rightConsumed}," +
+                                "\"creditAgeMs\":${if (engine.creditAt == 0L) -1 else (engine.measurement.now() - engine.creditAt) / 1_000_000}"
                             if (engine.done) requested = false
-                            else if (engine.blocked && requested && !closed) monitor.wait(20)
+                            else if (engine.blocked && requested && !closed) {
+                                val from = engine.measurement.now()
+                                monitor.wait(20)
+                                engine.measurement.add(engine.waitKind, engine.measurement.now() - from)
+                            }
                         }
                     }
                 }
@@ -182,7 +203,11 @@ class VideoUploadPump internal constructor(create: () -> VideoUploadEngine) {
         closed = true; requested = false; monitor.notifyAll()
     }
     fun uploadSnapshot(): String = synchronized(monitor) {
-        "{$progress,\"running\":${running || requested && !closed},\"error\":${failure.isNotEmpty()}}"
+        val now = System.nanoTime()
+        if (engine != null && (sampleAt == Long.MIN_VALUE || now - sampleAt >= 1_000_000_000L || !running)) {
+            sample = engine!!.measurement.snapshot(); sampleAt = now
+        }
+        "{$progress,\"running\":${running || requested && !closed},\"error\":${failure.isNotEmpty()},\"measurement\":$sample}"
     }
     fun uploadFailure(): String = synchronized(monitor) { failure }
 }

@@ -4,6 +4,41 @@ const {VideoPlayback, silentVideoAudio} = require('../.test-build/app/apps/video
 const {latencyTransport, replyLatency} = require('./helpers/video-latency-transport.cjs');
 const {VideoReportUnavailable, VIDEO} = require('../.test-build/app/apps/video/video-protocol');
 
+test('One-page measurement requests expose their cost without extra per-picture calls or changed admission', async () => {
+  const f=latencyTransport(160,2,35), queries=[];let turn=0;
+  f.protocol.rateEvidenceRows=async (_stream,_cursor,mode=0)=>{
+    queries.push({at:f.clock(),copies:f.copies.length,mode,turn});await f.sleep(35);return null;
+  };
+  const p=new VideoPlayback(f.protocol,f.source,silentVideoAudio,
+    ()=>({native:true,dither:false,radio:true}),()=>{},()=>{},f.clock,f.sleep);
+  const report=p.report.bind(p);p.report=async(...args)=>{turn++;return report(...args);};
+  await p.run();
+  const live=queries.filter(q=>q.copies<160);
+  assert.ok(live.length>1);assert.equal(new Set(live.map(q=>q.turn)).size,live.length);
+  assert.equal(f.copies.length,160);assert.equal(p.view.error,null);
+  console.log(`Cadence observer fake: one-page request35ms; live queries=${live.length}; explicit cost=${live.length*35}ms; not hardware performance`);
+});
+test('User cancellation never waits for observational tail queries after STOP', async () => {
+  const f=latencyTransport(160,2,35);let stopped=false,late=0;
+  const status=f.protocol.status;
+  f.protocol.status=async(op,...args)=>{const result=await status(op,...args);if(op===VIDEO.stop||op===VIDEO.reset)stopped=true;return result;};
+  f.protocol.rateEvidenceRows=async()=>{if(stopped)late++;return null;};
+  let p;const send=f.protocol.sendNals;
+  f.protocol.sendNals=async(...args)=>{const r=await send(...args);if(f.copies.length>=20)p.stop();return r;};
+  p=new VideoPlayback(f.protocol,f.source,silentVideoAudio,
+    ()=>({native:true,dither:false,radio:true}),()=>{},()=>{},f.clock,f.sleep);
+  await p.run();assert.ok(stopped);assert.equal(late,0);assert.equal(p.view.cleanupFailed,false);
+});
+test('NAL consumption maps through picture ends including headers and multi-NAL pictures, never directly to shown fps',()=>{
+  const f=latencyTransport();const clip={...f.source.clip,h264:{nals:Array(13).fill({type:1})},
+    pictures:[{nal:4,pts:0},{nal:7,pts:63},{nal:10,pts:125}]};
+  const p=new VideoPlayback(f.protocol,{...f.source,clip},silentVideoAudio,
+    ()=>({native:true,dither:false,radio:true}));
+  p.generation={idr:0,prefix:[0,1],firstNal:4};
+  assert.equal(p.pictureBound(0),0);assert.equal(p.pictureBound(2),0);
+  assert.equal(p.pictureBound(4),0);assert.equal(p.pictureBound(5),1);assert.equal(p.pictureBound(11),3);
+});
+
 test('Passive SHOWN, credits and playback transport failures back off without ending video', async () => {
   for (const kind of ['shown', 'credits', 'playback']) {
     const f = latencyTransport(160, 2, 35);

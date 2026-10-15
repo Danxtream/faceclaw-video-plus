@@ -1,6 +1,7 @@
 import { videoSeekPoint, type VideoSource } from "./video-clip";
 import { type VideoUploadPump, type VideoUploadProgress } from "./video-upload";
 import { VideoAvSync, type VideoAvAction } from "./video-av-sync";
+import { VideoMeasurement } from "./video-measurement";
 import { VIDEO, VideoProtocol, VideoReportUnavailable, videoU32, type VideoStatus } from "./video-protocol";
 import { parsePlayback, parseShown, parseVideoPhy, videoRestored, videoLive, videoOwnedSnapshot, videoTickSpan, videoCopyRate, videoPhyDetails,
   type VideoPhy, type VideoShown, type VideoPlaybackState } from "./video-observations";
@@ -24,7 +25,7 @@ export type VideoPlaybackView = {
   cleanupFailed: boolean;
   hostPhy: string;
 };
-type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence">>;
+type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot">>;
 type Intent = { kind: "pause" | "seek" | "scale" | "menu"; value: number | boolean; resolve: () => void; reject: (error: unknown) => void };
 type Generation = { stream: number; tokens: number[]; idr: number; target: number; prefix: number[]; firstNal: number; index: number; count: number; metadata: number; paused: boolean; reached: boolean; oldPhy: VideoPhy[]; started: number; anchor: VideoPhy[]; anchorAt: number; anchorUncertainty: number; detailedReports: boolean; pump?: VideoUploadPump };
 
@@ -54,7 +55,9 @@ export class VideoPlayback {
   private av: VideoAvSync | null = null;
   private audioPlaying = false;
   private positionShownAt = 0;
-  private rate = { at: 0, sent: 0, consumed: 0, samples: 0, blocked: 0, drops: 0 };
+  private rate = { at: 0, sent: 0, consumed: 0, sentPictures: 0, consumedPictures: 0, drops: 0 };
+  private measurement: VideoMeasurement | null = null;
+  private nativeMeasurement: unknown = null;
   constructor(private readonly protocol: Protocol, private readonly source: VideoSource,
     private readonly audio: VideoAudio, private readonly options: () => VideoOptions,
     private readonly changed: (view: VideoPlaybackView) => void = () => {},
@@ -93,9 +96,12 @@ export class VideoPlayback {
     g.index = row.index; g.metadata = row.metadata; this.creditBudget = row.budget;
     if (row.consumed > this.consumed) { this.consumed = row.consumed; this.progressAt = this.clock(); }
     if (row.error) throw new Error(row.error);
+    this.nativeMeasurement = {timing: row.measurement ?? null, consumedL: row.consumedL,
+      consumedR: row.consumedR, creditAgeMs: row.creditAgeMs, budget: row.budget};
     return row;
   }
   private async suspendUpload(): Promise<void> {
+    const from = this.clock();
     const pump = this.generation?.pump;
     if (!pump) return;
     pump.pause();
@@ -105,6 +111,7 @@ export class VideoPlayback {
       await this.sleep(10);
     }
     this.uploadProgress();
+    this.measurement?.span(from, this.clock(), "writer-fence");
   }
   private startPhyError(detail: string): Error {
     const message = `Video START host links are not clean: ${detail}`;
@@ -184,6 +191,7 @@ export class VideoPlayback {
     throw new Error("Video START did not reach both READY owners");
   }
   private async begin(targetMs: number, paused: boolean): Promise<void> {
+    this.measurement = null;
     const rows = await this.protocol.status();
     this.validateStatus(rows);
     if (rows.some((row) => row.state !== 0)) throw new Error("Video START requires idle owners");
@@ -250,7 +258,9 @@ export class VideoPlayback {
     this.progressAt = this.clock(); this.progress = -1;
     this.lastSeek = 0;
     this.av = this.audio.position ? new VideoAvSync(this.source.clip.duration) : null;
-    this.rate = { at: this.clock(), sent: 0, consumed: Math.max(0, this.consumed), samples: 0, blocked: 0, drops: 0 };
+    this.rate = { at: this.clock(), sent: 0, consumed: Math.max(0, this.consumed), sentPictures: 0, consumedPictures: 0, drops: 0 };
+    this.measurement = new VideoMeasurement(stream, this.generation.tokens);
+    console.error(`Video measurement start stream=${stream} transportBaseline=${JSON.stringify(this.readMeasurement())}`);
     const g = this.generation;
     g.pump = this.protocol.createUploadPump?.(this.source.uploadHandle, {
       stream, tokens: g.tokens, prefix: g.prefix, firstNal: g.firstNal, count: g.count,
@@ -284,6 +294,18 @@ export class VideoPlayback {
       if (this.clock() > deadline) throw new Error("Video cleanup or original PHY restoration timed out");
       await this.sleep(20);
     }
+    // Never hold a user cancel/seek for observational tail reads. Normal EOF
+    // gets a bounded drain; one already-running native request owns its deadline.
+    const tailUntil = this.clock() + 3000, tail = !this.stopping && !reset;
+    for (let i = 0; tail && i < 4 && this.clock() < tailUntil; i++) await this.collectMeasurement();
+    for (let i = 0; tail && i < 3 && this.clock() < tailUntil; i++) await this.collectMeasurement(true);
+    try {
+      const histogram = tail && this.measurement && this.clock() < tailUntil ?
+        await this.protocol.rateEvidenceRows?.(generation.stream, [0, 0], 2) : null;
+      if (histogram) this.measurement?.accept(histogram, 2);
+    } catch (error) { this.measurement?.unavailableSample(error); }
+    console.error(`Video measurement final=${JSON.stringify({shown: this.measurement?.summary(true) ?? null,
+      native: this.nativeMeasurement, transport: this.readMeasurement()})}`);
     this.generation = null;
     await this.clockEvidence(2);
     if (sampleFailure) throw sampleFailure;
@@ -390,7 +412,6 @@ export class VideoPlayback {
       g.pump.resume();
       await this.sleep(50);
       const row = this.uploadProgress();
-      this.rate.samples++; if (row.blocked) this.rate.blocked++;
       this.reportSafe = row.blocked || g.index === g.count;
       this.metadataStaged = false;
       return g.index > previous;
@@ -458,23 +479,55 @@ export class VideoPlayback {
     this.creditBudget -= records.length;
     return true;
   }
-  /**
-   * Once per second: pictures sent, decoder consumption and credit-blocked
-   * share separate delivery limits (free credits, few sent) from decode
-   * limits (blocked, slow consumption). Console only; no extra wire traffic.
-   */
+  /** Map completed NAL ranges through the audited picture map, never to shown fps. */
+  private pictureBound(sequence: number): number {
+    const g = this.generation;
+    if (!g || sequence < g.prefix.length) return 0;
+    const next = g.firstNal + sequence - g.prefix.length, pictures = this.source.clip.pictures;
+    let low = g.idr, high = pictures.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      const end = pictures[middle + 1]?.nal ?? this.source.clip.h264.nals.length;
+      if (end <= next) low = middle + 1; else high = middle;
+    }
+    return low - g.idr;
+  }
+  /** Native elapsed counters replace sampled blocked share; NALs are not pictures. */
   private logRate(): void {
     const g = this.generation, now = this.clock();
     if (!g || now - this.rate.at < 1000) return;
     const seconds = (now - this.rate.at) / 1000, consumed = Math.max(0, this.consumed);
+    const sentPictures = this.pictureBound(g.index), consumedPictures = this.pictureBound(consumed);
     const video = this.av?.video(now) ?? null, audio = this.audio.position?.() ?? null;
     const lag = video === null || audio === null || !this.audioPlaying ? "--" : `${Math.round(audio - video)}ms`;
-    console.error(`Video rate: sent=${((g.index - this.rate.sent) / seconds).toFixed(1)}/s ` +
-      `consumed=${((consumed - this.rate.consumed) / seconds).toFixed(1)}/s ` +
-      `blocked=${this.rate.samples ? Math.round(100 * this.rate.blocked / this.rate.samples) : 0}% ` +
-      `fps=${this.view.fps === null ? "--" : this.view.fps.toFixed(1)} lag=${lag} ` +
-      `paused=${this.view.paused} drops=${this.rate.drops}`);
-    this.rate = { at: now, sent: g.index, consumed, samples: 0, blocked: 0, drops: 0 };
+    console.error(`Video rate: nalsSent=${((g.index - this.rate.sent) / seconds).toFixed(1)}/s ` +
+      `consumedNals=${((consumed - this.rate.consumed) / seconds).toFixed(1)}/s lag=${lag} ` +
+      `sentPictureBound=${((sentPictures - this.rate.sentPictures) / seconds).toFixed(1)}/s ` +
+      `consumedPictureBound=${((consumedPictures - this.rate.consumedPictures) / seconds).toFixed(1)}/s admitted=${g.metadata} ` +
+      `paused=${this.view.paused} drops=${this.rate.drops} native=${JSON.stringify(this.nativeMeasurement)} ` +
+      `transport=${JSON.stringify(this.readMeasurement())} ` +
+      `shown=${JSON.stringify(this.measurement?.summary() ?? null)}`);
+    this.rate = { at: now, sent: g.index, consumed, sentPictures, consumedPictures, drops: 0 };
+  }
+  private readMeasurement(): unknown {
+    try { return this.protocol.measurementSnapshot?.() ?? null; }
+    catch (error) { this.measurement?.unavailableSample(error); return null; }
+  }
+  private async collectMeasurement(dips = false): Promise<void> {
+    const g = this.generation, measurement = this.measurement;
+    if (!g || !measurement || !this.protocol.rateEvidenceRows) return;
+    const began = this.clock();
+    try {
+      const rows = await this.protocol.rateEvidenceRows(g.stream, dips ? measurement.dipCursors : measurement.cursors, Number(dips));
+      if (!rows) return;
+      const anchors = rows.map((raw, side) => raw[7] & 1 ? g.anchorAt + videoTickSpan(videoU32(raw, 20), g.anchor[side].tick) : undefined);
+      const bad = measurement.accept(rows, Number(dips), anchors.every(a => a !== undefined) ? anchors as number[] : undefined);
+      if (bad && !dips) {
+        const events = await this.protocol.rateEvidenceRows(g.stream, measurement.dipCursors, 1);
+        if (events) measurement.accept(events, 1);
+      }
+    } catch (error) { measurement.unavailableSample(error); }
+    finally { measurement.span(began, this.clock(), "cadence-diagnostic"); }
   }
   private async pauseAudio(): Promise<void> {
     await this.audio.pause();
@@ -605,6 +658,7 @@ export class VideoPlayback {
     const began = this.clock();
     try { await this.reportStep(); }
     catch (error) { if (required || !this.deferReport(error, began)) throw error; }
+    finally { this.measurement?.span(began, this.clock(), "report"); }
   }
   /** One passive step per blocked or stale turn; recheck input before the next. */
   private async reportStep(): Promise<void> {
@@ -638,6 +692,7 @@ export class VideoPlayback {
       }
     } else if (g.index === g.count) this.updatePlayback(await this.playback());
     else await this.credits();
+    await this.collectMeasurement();
     if (this.view.paused) await this.pauseAudio();
     this.notify();
   }
@@ -665,7 +720,9 @@ export class VideoPlayback {
       while (!this.stopping) {
         const intent = this.intents.shift();
         if (intent) {
+          const began = this.clock();
           try { await this.intent(intent); intent.resolve(); } catch (error) { intent.reject(error); throw error; }
+          finally { this.measurement?.span(began, this.clock(), `control:${intent.kind}`); }
           continue;
         }
         const g = this.generation!;

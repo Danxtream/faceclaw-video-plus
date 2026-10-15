@@ -6,6 +6,7 @@ export type VideoUploadPlan = {
 export type VideoUploadProgress = {
   index: number; metadata: number; consumed: number; budget: number;
   blocked: boolean; running: boolean; error: string;
+  consumedL?: number; consumedR?: number; creditAgeMs?: number; measurement?: unknown;
 };
 
 /** A pause is a request; only a non-running snapshot proves the batch is fenced. */

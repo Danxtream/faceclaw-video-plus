@@ -16,6 +16,7 @@ export interface VideoBackend {
   sendPipeline?(records: readonly Uint8Array[], following: readonly (Uint8Array | null)[]): Promise<number[]>;
   createUploadPump?(reader: unknown, plan: VideoUploadPlan): VideoUploadPump;
   configureEvidence?(enabled: boolean): void;
+  measurementSnapshot?(): unknown;
 }
 
 export const VIDEO = {
@@ -62,6 +63,7 @@ export function parseVideoStatus(raw: Uint8Array): VideoStatus {
 export class VideoProtocol {
   readonly epoch: number;
   private evidence = false;
+  private rateEvidence = false;
   constructor(private readonly backend: VideoBackend, private readonly reserve: () => number | Promise<number>) {
     this.epoch = backend.epoch();
   }
@@ -113,10 +115,20 @@ export class VideoProtocol {
     if ((await this.status(VIDEO.caps)).some((row) => row.result || row.error)) throw new Error("Video capabilities refused");
     const rows = await this.query(await this.header(VIDEO.playbackCaps, 8), 16);
     if (rows.some((row) => row[0] !== 1 || row[1] !== 13 || row[2] || row[3] !== 255 ||
-      row[4] !== 2 || row[5] !== 16 || row[6] !== 255 || (row[7] & 7) !== 7 || (row[7] & ~63)))
+      row[4] !== 2 || row[5] !== 16 || row[6] !== 255 || (row[7] & 7) !== 7 || (row[7] & ~127)))
       throw new Error("Paired queued playback controls are not supported");
     this.evidence = rows.every(row => !!(row[7] & 32));
+    this.rateEvidence = rows.every(row => !!(row[7] & 64));
     this.backend.configureEvidence?.(this.evidence);
+  }
+  measurementSnapshot(): unknown { return this.backend.measurementSnapshot?.() ?? null; }
+  /** One bounded paired snapshot per normal report turn; no per-frame polling. */
+  async rateEvidenceRows(stream: number, cursors: readonly number[], mode = 0): Promise<Uint8Array[] | null> {
+    if (!this.rateEvidence) return null;
+    if (cursors.length !== 2 || ![0, 1, 2].includes(mode)) throw new Error("Invalid cadence cursor");
+    const raw = await this.header(7, 24); raw[8] = 6; raw[9] = mode;
+    put(raw, 12, stream); put(raw, 16, cursors[0]); put(raw, 20, cursors[1]);
+    return this.query(raw, mode ? 128 : 144);
   }
   /** Read presenter-owned samples only when the paired firmware advertises them. */
   async clockEvidence(phase: number): Promise<void> {
