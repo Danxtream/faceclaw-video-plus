@@ -1,3 +1,5 @@
+import { type VideoUploadPlan, type VideoUploadPump } from "./video-upload";
+
 /** Reviewed ID31 commands on a supplied, already authenticated transport. */
 export interface VideoBackend {
   epoch(): number;
@@ -5,6 +7,7 @@ export interface VideoBackend {
   sendWindow(records: readonly Uint8Array[]): Promise<number[]>;
   sendPicture?(record: Uint8Array, metadata: Uint8Array): Promise<Uint8Array[]>;
   sendPipeline?(records: readonly Uint8Array[], following: readonly (Uint8Array | null)[]): Promise<number[]>;
+  createUploadPump?(reader: unknown, plan: VideoUploadPlan): VideoUploadPump;
 }
 
 export const VIDEO = {
@@ -55,6 +58,10 @@ export class VideoProtocol {
   }
   private check(): void {
     if (this.backend.epoch() !== this.epoch) throw new Error("Video connection generation changed; restart at IDR");
+  }
+  createUploadPump(reader: unknown, plan: VideoUploadPlan): VideoUploadPump | undefined {
+    this.check();
+    return reader === undefined ? undefined : this.backend.createUploadPump?.(reader, plan);
   }
   private async header(op: number, bytes: number): Promise<Uint8Array> {
     this.check();

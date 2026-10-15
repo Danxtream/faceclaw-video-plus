@@ -73,6 +73,7 @@ export function videoSeekPoint(clip: VideoClip, milliseconds: number): { frame: 
 
 export interface VideoSource {
   readonly clip: VideoClip;
+  readonly uploadHandle?: unknown;
   readNal(index: number): Promise<Uint8Array>;
   close(): void;
 }

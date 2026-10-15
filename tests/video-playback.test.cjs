@@ -287,6 +287,62 @@ test('Single writer finishes paired copies, uses metadata identity and cleans al
   await assert.rejects(f.player.run(), /single use/);
 });
 
+test('Native upload progress fences every JS report/control and recreates only after seek retirement', async () => {
+  const f = fixture(12), source = f.player.source, sleep = f.player.sleep;
+  source.uploadHandle = 'audited-reader'; source.readNal = async () => { throw new Error('JS must not read native-pumped NALs'); };
+  const pumps = []; let pump, native = false, flow;
+  for (const [name, method] of Object.entries(f.protocol)) {
+    f.protocol[name] = async (...args) => {
+      assert.ok(native || !pump?.row.running, `JS ${name} overlapped upload`);
+      return method(...args);
+    };
+  }
+  f.protocol.createUploadPump = (reader, plan) => {
+    assert.equal(reader, 'audited-reader'); assert.ok(!pump || pump.closed);
+    const p = {row: {index: 0, metadata: 0, consumed: -1, budget: 0, blocked: false, running: false, error: ''},
+      requested: false, closed: false, plan,
+      resume() {assert.equal(this.closed, false); this.requested = true; this.row.running = this.row.index < plan.count;},
+      pause() {this.requested = false;}, snapshot() {return {...this.row};},
+      close() {assert.equal(this.row.running, false); this.closed = true;}};
+    pumps.push(p); pump = p; return p;
+  };
+  f.player.sleep = async ms => {
+    await sleep(ms);
+    if (!pump?.row.running) return;
+    const {row, plan} = pump;
+    native = true;
+    try {
+      const index = row.index < plan.prefix.length ? plan.prefix[row.index] : plan.firstNal + row.index - plan.prefix.length;
+      const next = plan.pictures[row.metadata];
+      if (next?.nal === index) {
+        assert.equal(await f.protocol.metadata(plan.stream, row.metadata + 1, row.index, next.pts), true); row.metadata++;
+      }
+      await f.protocol.sendNals(plan.stream, row.index, [Uint8Array.of(f.clip.h264.nals[index].type | 0x60, index)]);
+      row.index++; row.consumed = row.index; row.budget = 3;
+      await f.protocol.owned(VIDEO.credits, plan.stream, plan.tokens, 6);
+      row.running = pump.requested && row.index < plan.count;
+    } finally { native = false; }
+  };
+  f.onView = view => {
+    if (view.position > 0 && !flow) flow = (async () => {
+      await f.player.pause(true); await f.player.seek(700); await f.player.pause(false);
+    })();
+  };
+  await f.player.run(); await flow;
+  assert.equal(pumps.length, 2); assert.ok(pumps.every(p => p.closed));
+  assert.equal(f.player.view.cleanupFailed, false); assert.equal(f.closed(), true);
+});
+
+test('Native pump failure still fences and attempts STOP and original PHY restoration', async () => {
+  const f = fixture(5); let closed = false;
+  f.protocol.createUploadPump = () => ({resume() {}, pause() {}, close() {closed = true;},
+    snapshot: () => ({index: 0, metadata: 0, consumed: -1, budget: 0, blocked: false, running: false, error: 'paired native input refused'})});
+  await assert.rejects(f.player.run(), /paired native input refused/);
+  assert.equal(closed, true); assert.equal(f.closed(), true);
+  assert.ok(f.calls.some(row => Array.isArray(row) && row[0] === 'status' && row[1] === VIDEO.stop));
+  assert.equal(f.player.view.cleanupFailed, false);
+});
+
 test('LEASE refusal retries the same stream only on the unadmitted lens', async () => {
   const f = fixture(5), start = f.protocol.start, calls = [];
   f.protocol.start = async (...args) => {

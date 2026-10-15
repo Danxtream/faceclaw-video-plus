@@ -395,7 +395,17 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                     waiting = "page=$page lens=$side ACK"
                     val command = byteArrayOf(31, 5, 1, 0,
                         id.toByte(), (id shr 8).toByte(), (id shr 16).toByte(), (id shr 24).toByte(), page.toByte())
-                    check(send(arrayOf(command), side, ingressLeft, generation, deadline)[0] == side) { "Frozen page refused" }
+                    for (attempt in 1..3) {
+                        val acceptedPage = send(arrayOf(command), side, ingressLeft, generation, deadline)[0] == side
+                        if (acceptedPage) break
+                        check(attempt < 3) {
+                            "Frozen page refused op=${unsigned(payload[1])} request=$id side=$side page=$page pages=${first.first} attempts=$attempt"
+                        }
+                        // Only repeat the read-only PAGE, never its owning command or NAL.
+                        await(generation, deadline) { true }
+                        check(deadline - System.nanoTime() > 100_000_000L) { "Video exact ACK or frozen page timed out" }
+                        Thread.sleep(100)
+                    }
                     waiting = "page=$page lens=$side reply"
                     await(generation, deadline) { Pair(side, page) in pages }
                     val part = synchronized(monitor) { pages[Pair(side, page)]!! }

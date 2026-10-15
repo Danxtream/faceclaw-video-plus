@@ -36,15 +36,24 @@ class VideoFileReader(private val path: String) : AutoCloseable {
     @Synchronized fun beginRead(index: Int) {
         val checked = checkNotNull(audited) { "Video has not been audited" }
         require(index in checked.nals.indices) { "NAL index outside audited source" }
+        submit { "\"${hex(readNalBytes(index))}\"" }
+    }
+
+    internal fun nalCount(): Int = synchronized(this) { check(!closed); checkNotNull(audited).nals.size }
+
+    /** Caller must be a background writer; never convert payload bytes to hex. */
+    internal fun readNalBytes(index: Int): ByteArray {
+        val (checked, stamp) = synchronized(this) { check(!closed); Pair(checkNotNull(audited), modified) }
+        require(index in checked.nals.indices) { "NAL index outside audited source" }
+        check(!Thread.currentThread().isInterrupted) { "Video read cancelled" }
         val nal = checked.nals[index]
-        submit {
-            val file = File(path)
-            require(file.length() == checked.bytes && file.lastModified() == modified) { "Video source changed" }
-            val bytes = ByteArray(nal.bytes)
-            RandomAccessFile(file, "r").use { input -> input.seek(nal.offset); input.readFully(bytes) }
-            require(digest(bytes) == nal.sha256) { "Audited NAL changed" }
-            "\"${hex(bytes)}\""
-        }
+        val file = File(path)
+        require(file.length() == checked.bytes && file.lastModified() == stamp) { "Video source changed" }
+        val bytes = ByteArray(nal.bytes)
+        RandomAccessFile(file, "r").use { input -> input.seek(nal.offset); input.readFully(bytes) }
+        require(digest(bytes) == nal.sha256) { "Audited NAL changed" }
+        synchronized(this) { check(!closed) }
+        return bytes
     }
 
     /** 0 pending, 1 complete; takeResult propagates worker errors unchanged. */

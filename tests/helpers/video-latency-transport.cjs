@@ -42,7 +42,7 @@ function latencyTransport(frames = 160, decodeMs = 70, pageMs = 0) {
   }
   async function request(kind, bytes, passive = false, lenses = 2) {
     const pages = Math.ceil(bytes / 6), trips = 1 + lenses * (pages - 1);
-    calls.push({kind, bytes, pages: pages * lenses, trips, at: now, occupied: occupied(), active, accepted});
+    calls.push({kind, bytes, pages: pages * lenses, trips, passive: passive || passiveStep, at: now, occupied: occupied(), active, accepted});
     if ((passive || passiveStep) && active && accepted < types.length) observations.push({kind, free: 4 - occupied(), pages: pages * lenses, trips, at: now});
     advance(pageMs ? trips * pageMs : replyLatency(bytes));
   }

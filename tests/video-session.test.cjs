@@ -103,6 +103,28 @@ test('Forwarded gestures enqueue the real menu vocabulary without drawing a seco
   assert.deepEqual(calls, [['pause', true], ['menu', 'next'], ['menu', 'previous'], ['menu', 'apply'], ['stop'], ['pop'], ['stop'], ['unsubscribe']]);
 });
 
+test('Rapid glasses clicks toggle requested pause before actual state settles', async () => {
+  const calls = [], pending = [], view = {active: true, paused: false, menuOpen: false};
+  const player = {view, pause: value => {calls.push(value); return new Promise(resolve => pending.push(resolve));},
+    menu: async value => calls.push(value)};
+  const load = loader({}, {
+    '../../graphics/image': {}, '../../graphics/ui-fonts': {}, '../../graphics/textwrap': {},
+    './video-session': {VideoSession: class {constructor() {this.engine = player;} run() {return Promise.resolve();} stop() {}},
+      observeVideoSession: () => () => {}},
+  });
+  const {VideoPlaybackLayer} = load('app/apps/video/video-playback-layer.ts');
+  const layer = new VideoPlaybackLayer('clip.h264', () => {}), ctx = {actions: {requestRender() {}}};
+  layer.handleInput({type: 'click'}, ctx); layer.handleInput({type: 'click'}, ctx);
+  assert.deepEqual(calls, [true, false]);
+  pending[0](); await Promise.resolve(); await Promise.resolve();
+  layer.handleInput({type: 'click'}, ctx); assert.equal(calls.at(-1), true);
+  view.menuOpen = true; layer.handleInput({type: 'click'}, ctx); assert.equal(calls.at(-1), 'apply');
+  pending[1](); pending[2](); await Promise.resolve(); await Promise.resolve();
+  view.menuOpen = false; view.paused = true;
+  layer.handleInput({type: 'click'}, ctx); assert.equal(calls.at(-1), false);
+  pending[3](); layer.onRemoved();
+});
+
 test('In-process render suppression preserves input and resumes ordinary output afterwards', async () => {
   let suppressed = true, painted = 0, submitted = 0, inputs = 0;
   const finishes = [];

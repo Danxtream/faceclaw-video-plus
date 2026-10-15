@@ -31,18 +31,19 @@ class VideoIdentityAllocator(private val context: Context, private val legacyNex
     init { require(legacyNext in 1..0xfffffffdL) { "Invalid legacy video request identity" } }
     @Synchronized fun beginReserve() {
         check(pending == null) { "Video identity reservation already pending" }
-        pending = worker.submit<Long> {
-            synchronized(lock) {
-                if (range == null) {
-                    val prefs = context.getSharedPreferences("faceclaw_video_identity", Context.MODE_PRIVATE)
-                    range = VideoIdentityRange(object : VideoIdentityStore {
-                        override fun read(): Long = prefs.getLong("reservedEnd", legacyNext)
-                        override fun save(reservedEnd: Long): Boolean = prefs.edit().putLong("reservedEnd", reservedEnd).commit()
-                    })
-                }
-                range!!.reserve()
-            }
+        pending = worker.submit<Long> { reserveNow() }
+    }
+
+    /** Native writers consume the same durable block without a UI round trip. */
+    internal fun reserveNow(): Long = synchronized(lock) {
+        if (range == null) {
+            val prefs = context.getSharedPreferences("faceclaw_video_identity", Context.MODE_PRIVATE)
+            range = VideoIdentityRange(object : VideoIdentityStore {
+                override fun read(): Long = prefs.getLong("reservedEnd", legacyNext)
+                override fun save(reservedEnd: Long): Boolean = prefs.edit().putLong("reservedEnd", reservedEnd).commit()
+            })
         }
+        range!!.reserve()
     }
     @Synchronized fun poll(): Int = if (checkNotNull(pending).isDone) 1 else 0
     @Synchronized fun takeResult(): Long {

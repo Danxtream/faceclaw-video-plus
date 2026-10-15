@@ -52,12 +52,14 @@ class VideoFileReaderTest {
             reader.beginAudit()
             assertFails { reader.beginAudit() }
             assertTrue(result(reader).contains("\"nals\""))
+            assertEquals(listOf(0x67.toByte(), 42.toByte()), reader.readNalBytes(0).toList())
             assertFails { reader.beginRead(3) }
             reader.beginRead(0)
             assertEquals("\"672a\"", result(reader))
             val stamp = source.lastModified()
             source.writeBytes(valid().apply { this[5] = 99 })
             source.setLastModified(stamp)
+            assertFails { reader.readNalBytes(0) }
             reader.beginRead(0)
             assertFails { result(reader) }
         } finally { reader.close(); source.delete() }

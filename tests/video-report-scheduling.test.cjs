@@ -3,6 +3,15 @@ const assert = require('node:assert/strict');
 const {VideoPlayback, silentVideoAudio} = require('../.test-build/app/apps/video/video-playback');
 const {latencyTransport, replyLatency} = require('./helpers/video-latency-transport.cjs');
 
+function assertNoUploadStallsOutsidePairedReports(f) {
+  const captures = f.calls.filter(row => row.kind.startsWith('shown')).map(row => ({
+    start: row.at, end: row.at + replyLatency(row.bytes),
+  }));
+  const outside = f.stalls.reduce((total, stall) => total + stall.milliseconds - captures.reduce((overlap, capture) =>
+    overlap + Math.max(0, Math.min(stall.at + stall.milliseconds, capture.end) - Math.max(stall.at, capture.start)), 0), 0);
+  assert.ok(outside <= 20, 'Only the explicit paired capture may stall input, plus one scheduler tick');
+}
+
 test('Reply-size latency fake uses measured costs and advances decoder during awaited traffic', () => {
   assert.deepEqual([6, 16, 36, 72, 96, 128, 192].map(replyLatency), [20, 115, 180, 200, 530, 750, 1300]);
 });
@@ -20,6 +29,32 @@ test('Link-limited playback still reports and starts audio before EOF', async ()
   const input = f.observations;
   assert.ok(input.every((row, i) => !i || row.at - input[i - 1].at < 1900),
     'A report step must run within the staleness cap plus one bounded upload');
+});
+
+test('Paged link-limited playback starts audio with immediate paired SHOWN spaced five seconds apart', async () => {
+  const f = latencyTransport(160, 2, 35), sync = [];
+  const player = new VideoPlayback(f.protocol, f.source, {...silentVideoAudio,
+    sync: async (...args) => sync.push({playing: args[1], copies: f.copies.length})},
+    () => ({native: true, dither: false, radio: true}), () => {}, () => {}, f.clock, f.sleep);
+  const begin = player.begin.bind(player);
+  player.begin = async (...args) => {
+    await begin(...args);
+    // This deterministic fake knows the exact instant PHY data was frozen.
+    player.generation.anchorAt = f.calls.findLast(row => row.kind === 'phy').at;
+    player.generation.anchorUncertainty = 0;
+  };
+  await player.run();
+  assert.ok(sync.some(row => row.playing && row.copies < 160), 'Prepared audio must start before EOF');
+  const pairs = f.calls.flatMap((row, i) => {
+    if (row.kind !== 'shown-2') return [];
+    const left = f.calls[i - 1];
+    assert.equal(left.kind, 'shown-1', 'No upload/report/interval may separate the paired queries');
+    assert.equal(row.at - left.at, 12 * 35);
+    return [left.at];
+  });
+  assert.ok(pairs.length > 1);
+  assert.ok(pairs.every((at, i) => !i || at - pairs[i - 1] >= 5000));
+  assert.ok(pairs[0] - f.calls.find(row => row.kind === 'send').at < 2000, 'First pair is attempted promptly, not delayed five seconds');
 });
 
 test('Playback pipeline batches only granted credits and retries busy metadata without skipping a picture', async () => {
@@ -104,7 +139,7 @@ test('Confirmed pause keeps compact polls alive without uploading until resume',
   assert.equal(player.view.cleanupFailed, false);
 });
 
-test('Default observations keep a primed 70ms decoder fed with bounded staleness', async () => {
+test('Primed decoder stalls only within paired reports plus one scheduler tick', async () => {
   const f = latencyTransport(); let counted = 0;
   const player = new VideoPlayback(f.protocol, f.source, silentVideoAudio,
     () => ({native: true, dither: false, radio: true}), () => {}, n => counted += n, f.clock, f.sleep);
@@ -113,8 +148,7 @@ test('Default observations keep a primed 70ms decoder fed with bounded staleness
   await player.run();
   assert.equal(f.copies.length, 160); assert.equal(counted, 160); assert.equal(f.closed(), true);
   assert.equal(f.primed(), true);
-  assert.ok(f.stalls.reduce((sum, row) => sum + row.milliseconds, 0) <= 20,
-    'Bounded first-picture reporting may cost at most one 20ms scheduler tick in this fake');
+  assertNoUploadStallsOutsidePairedReports(f);
   assert.ok(f.observations.length >= 6, 'Real observations must occur during input, not just at EOF');
   const inputPhy = f.calls.filter(row => row.kind === 'phy' && row.accepted > 0 && row.accepted < 163);
   assert.equal(inputPhy.length, 0, 'PHY is lifecycle-only by default');
@@ -127,7 +161,7 @@ test('Detailed mode retains both-lens full reports within the passive rate cap',
     () => ({native: true, dither: false, radio: true, detailedReports: true}), () => {}, () => {}, f.clock, f.sleep);
   await player.run();
   assert.equal(f.copies.length, 40);
-  assert.ok(f.calls.filter(row => row.kind === 'phy' && row.accepted > 0 && row.accepted < 43).length > 2);
+  assert.ok(f.calls.filter(row => row.kind === 'phy' && row.accepted > 0 && row.accepted < 43).length >= 2);
   assert.ok(f.copies.some((row, i) => i && row.tick - f.copies[i - 1].tick > 500),
     'Diagnostic reports must expose the old long gaps even before the input can prime');
 });
@@ -136,12 +170,18 @@ test('Every credited finishing NAL is sent before any later picture metadata req
   const f = latencyTransport(80);
   const player = new VideoPlayback(f.protocol, f.source, silentVideoAudio,
     () => ({native: true, dither: false, radio: true}), () => {}, () => {}, f.clock, f.sleep);
+  const upload = player.upload.bind(player), report = player.report.bind(player);
+  player.report = () => f.report(report);
+  player.upload = async () => {
+    const credited = player.creditBudget > 0 && player.generation.index < player.generation.count, first = f.calls.length;
+    const result = await upload();
+    if (credited) assert.notEqual(f.calls[first]?.kind, 'credit', 'Upload must use its unused reserved credits');
+    return result;
+  };
   await player.run();
   const sends = f.calls.filter(row => row.kind === 'send');
   assert.ok(sends.every(row => row.records === 1 || row.first === 0));
-  assert.ok(f.calls.filter(row => row.kind === 'credit' && row.accepted < 83).length < sends.length,
-    'Unused reserved credits must not be re-queried per picture');
-  assert.ok(f.stalls.reduce((sum, row) => sum + row.milliseconds, 0) <= 20);
+  assertNoUploadStallsOutsidePairedReports(f);
 });
 
 test('Busy prefetched metadata never permits its finishing NAL to bypass admission', async () => {

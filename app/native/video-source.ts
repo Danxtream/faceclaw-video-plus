@@ -23,6 +23,7 @@ export async function openVideoSource(path: string, cancelled: () => boolean = (
     const clip = parseVideoClip(JSON.parse(await File.fromPath(sidecar).readText()), audit);
     return {
       clip,
+      uploadHandle: reader,
       readNal: async (index) => {
         if (closed) throw new Error("Video source closed");
         reader.beginRead(index);

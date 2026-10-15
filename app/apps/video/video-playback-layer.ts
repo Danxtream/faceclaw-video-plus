@@ -11,6 +11,8 @@ export class VideoPlaybackLayer implements Layer {
   readonly session: VideoSession;
   private readonly unsubscribe: () => void;
   private context: LayerContext | null = null;
+  private requestedPause: boolean | null = null;
+  private pauseSerial = 0;
   constructor(path: string, requestRender: () => void, options: () => VideoOptions = () => ({native: false, dither: false, radio: true}), position = 0) {
     this.session = new VideoSession(path, options);
     this.unsubscribe = observeVideoSession(() => {
@@ -18,7 +20,7 @@ export class VideoPlaybackLayer implements Layer {
           this.context?.stack.topMatches((layer) => layer === this)) this.context.stack.pop();
       requestRender();
     });
-    void this.session.run(position).catch((error) => { console.error("Video playback failed", error); requestRender(); });
+    void this.session.run(position).catch((error) => { console.error("Video playback failed", String(error), error); requestRender(); });
   }
   paint(ctx: LayerContext): GrayImage {
     this.context = ctx;
@@ -37,7 +39,14 @@ export class VideoPlaybackLayer implements Layer {
     const player = this.session.engine;
     if (!player?.view.active) return;
     let command: Promise<void> | null = null;
-    if (event.type === "click") command = player.view.menuOpen ? player.menu("apply") : player.pause(!player.view.paused);
+    if (event.type === "click") {
+      if (player.view.menuOpen) command = player.menu("apply");
+      else {
+        const paused = !(this.requestedPause ?? player.view.paused), serial = ++this.pauseSerial;
+        this.requestedPause = paused;
+        command = player.pause(paused).finally(() => { if (serial === this.pauseSerial) this.requestedPause = null; });
+      }
+    }
     if (player.view.paused && event.type === "scroll-up") command = player.menu("previous");
     if (player.view.paused && event.type === "scroll-down") command = player.menu("next");
     void command?.catch((error) => { console.error("Video control failed", error); ctx.actions.requestRender(); });
