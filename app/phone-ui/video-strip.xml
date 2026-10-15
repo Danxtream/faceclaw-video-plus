@@ -1,0 +1,8 @@
+<GridLayout xmlns="http://schemas.nativescript.org/tns.xsd" rows="auto" columns="auto,*,44"
+    loaded="loaded" unloaded="unloaded" visibility="{{ stripVisibility }}" height="48" padding="0 8">
+  <Label col="0" text="{{ timeLabel }}" fontSize="12" verticalAlignment="center" marginRight="8" />
+  <Slider col="1" minValue="0" maxValue="{{ duration }}" value="{{ position }}"
+      touch="{{ onSeekTouch }}" valueChange="{{ onSeekChange }}" isEnabled="{{ canControl }}" accessibilityLabel="Video position" />
+  <Button col="2" text="{{ playSymbol }}" width="44" height="44" padding="0"
+      tap="{{ onToggleTap }}" isEnabled="{{ canControl }}" accessibilityLabel="Play or pause video" />
+</GridLayout>

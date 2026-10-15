@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const {loader} = require('./helpers/load-typescript.cjs');
 
-function modelFixture() {
+function modelFixture(strip = false) {
   const calls = [], values = new Map(); let timer, observer;
   const settings = key => ({get: () => values.get(key) ?? (key === 'radio' ? 'video' : key === 'scale' ? 'native' : false),
     set: value => {values.set(key, value); calls.push([key, value]);}, displayValue: () => values.get(key) === 'off' ? 'Off' : 'Video-only'});
@@ -25,8 +25,9 @@ function modelFixture() {
     '../apps/video/video-session': {activeVideoSession: () => session, observeVideoSession: () => () => calls.push(['unsub-video'])},
     '../apps/video/video-settings': {videoRadioSetting: settings('radio'), videoScaleSetting: settings('scale'), videoDitherSetting: settings('dither'), videoDeblockingSetting: settings('deblock')},
   });
-  const module = load('app/phone-ui/video-view-model.ts');
-  return {module, calls, values, player, fixture: new module.VideoViewModel(), tick: () => timer?.(), seekTick: () => observer?.()};
+  const module = load(strip ? 'app/phone-ui/video-strip.ts' : 'app/phone-ui/video-view-model.ts');
+  return {module, calls, values, player, fixture: strip ? new module.VideoStripViewModel() : new module.VideoViewModel(),
+    tick: () => timer?.(), seekTick: () => observer?.()};
 }
 
 test('Time entry handles seconds and clock forms without accepting invalid or overflowing values', () => {
@@ -54,6 +55,28 @@ test('Programmatic slider updates do not seek and library refresh does not recre
   f.fixture.onSeekChange({value: 5000}); f.seekTick(); await new Promise(resolve => setImmediate(resolve));
   assert.ok(f.calls.some(row => row[0] === 'seek' && row[1] === 5000));
   f.fixture.dispose();
+});
+
+test('Remote and strip retain drag target/label across refresh, debounce release and restore playback tracking', async () => {
+  for (const strip of [false, true]) {
+    const f = modelFixture(strip); f.fixture.attach();
+    f.fixture.onSeekTouch({action: 'down'});
+    f.fixture.onSeekChange({value: 5000});
+    f.player.view.position = 2000; f.tick();
+    assert.equal(f.fixture.get('position'), 5000);
+    assert.equal(f.fixture.get('timeLabel'), '0:05 / 0:20');
+    f.seekTick(); assert.ok(!f.calls.some(row => row[0] === 'seek'));
+    f.fixture.onSeekChange({value: 6000}); f.fixture.onSeekTouch({action: 'up'});
+    f.tick(); assert.equal(f.fixture.get('position'), 6000);
+    assert.equal(f.fixture.get('timeLabel'), '0:06 / 0:20');
+    f.seekTick(); await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(f.calls.filter(row => row[0] === 'seek'), [['seek', 6000]]);
+    f.player.view.position = 6200; f.tick(); assert.equal(f.fixture.get('position'), 6200);
+    f.fixture.onSeekTouch({action: 'down'}); f.fixture.onSeekChange({value: 9000});
+    f.fixture.onSeekTouch({action: 'cancel'}); f.tick();
+    assert.equal(f.fixture.get('position'), 6200);
+    f.fixture.dispose();
+  }
 });
 
 test('Programmatic selected settings do not resubmit controls or settings writes', () => {

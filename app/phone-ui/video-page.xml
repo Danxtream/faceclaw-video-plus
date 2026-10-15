@@ -20,7 +20,7 @@
         <ScrollView><StackLayout class="p-16">
           <Label text="{{ title }}" textWrap="true" class="h2" />
           <Label text="{{ timeLabel }}" />
-          <Slider minValue="0" maxValue="{{ duration }}" value="{{ position }}" valueChange="{{ onSeekChange }}" isEnabled="{{ canControl }}" />
+          <Slider minValue="0" maxValue="{{ duration }}" value="{{ position }}" touch="{{ onSeekTouch }}" valueChange="{{ onSeekChange }}" isEnabled="{{ canControl }}" />
           <GridLayout columns="*,*,*,*" rows="auto">
             <Button col="0" text="-30" tap="{{ onBack30Tap }}" isEnabled="{{ canControl }}" />
             <Button col="1" text="-10" tap="{{ onBack10Tap }}" isEnabled="{{ canControl }}" />

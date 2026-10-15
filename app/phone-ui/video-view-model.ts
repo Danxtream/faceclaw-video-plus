@@ -4,7 +4,9 @@ import { hasAllFilesAccess, requestAllFilesAccess, statPath, type DirectoryEntry
 import { ensureG2VideoDirectory, listG2Videos, listG2ConversionSources, resolveG2H264Path, g2VideoMetadataPath } from "../native/g2-video-library";
 import { convertVideo, cancelVideoConversion, videoConversionState } from "../native/video-converter";
 import { openPhoneVideo } from "../apps/video";
-import { activeVideoSession, observeVideoSession } from "../apps/video/video-session";
+import { activeVideoSession, observeVideoSession, type VideoSession } from "../apps/video/video-session";
+import { VideoSeekControls } from "./video-seek-controls";
+export { formatVideoTime } from "./video-seek-controls";
 import { videoRadioSetting, videoScaleSetting, videoDitherSetting, videoDeblockingSetting } from "../apps/video/video-settings";
 
 /** Strict remote time input, with no changes to the source's fixed frame cadence. */
@@ -16,21 +18,16 @@ export function parseVideoTime(text: string): number {
   if (!Number.isSafeInteger(seconds) || seconds * 1000 > 0xfffffffe) throw new Error("Invalid video time");
   return seconds * 1000;
 }
-export function formatVideoTime(milliseconds: number): string {
-  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
-  const minutes = Math.floor(seconds / 60), tail = String(seconds % 60).padStart(2, "0");
-  return minutes >= 60 ? `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}:${tail}` : `${minutes}:${tail}`;
-}
 
 /** Library, converter and remote reuse the single Video session and native job. */
 export class VideoViewModel extends Observable {
   private unsubscribers: Array<() => void> = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   private busy = false;
-  private seekTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly seekControls = new VideoSeekControls<VideoSession>((key, value) => this.set(key, value),
+    (session, value) => this.action(async () => { await session.engine?.seek(value); }));
   private refreshing = false;
   private libraryStamp: string | null = null;
-  private programmaticPosition = 0;
   constructor(tab = 0) { super(); this.set("tab", tab); this.set("status", ""); this.set("timeEntry", "0:00"); this.refresh(); }
   attach(): void {
     if (this.timer !== null) return;
@@ -41,7 +38,7 @@ export class VideoViewModel extends Observable {
   dispose(): void {
     for (const remove of this.unsubscribers.splice(0)) remove();
     if (this.timer !== null) clearInterval(this.timer); this.timer = null;
-    if (this.seekTimer !== null) clearTimeout(this.seekTimer); this.seekTimer = null;
+    this.seekControls.dispose();
   }
   private refresh(): void {
     this.refreshing = true;
@@ -64,9 +61,7 @@ export class VideoViewModel extends Observable {
       this.set("active", !!view?.active); this.set("canControl", !!view?.active && !this.busy);
       this.set("title", session?.path.split(/[/\\]/).pop() ?? "Video");
       this.set("playSymbol", view?.paused ? "\u25b6" : "\u23f8");
-      this.programmaticPosition = view?.position ?? 0;
-      this.set("position", this.programmaticPosition); this.set("duration", view?.duration ?? 1);
-      this.set("timeLabel", `${formatVideoTime(view?.position ?? 0)} / ${formatVideoTime(view?.duration ?? 0)}`);
+      this.seekControls.update(view?.position ?? 0, view?.duration ?? 0, view?.active ? session : null);
       this.set("fpsLabel", view?.fps === null || view?.fps === undefined ? "Copied fps: --" : `Copied ${view.fps.toFixed(1)} fps (${view.intervals} intervals)`);
       this.set("audioLabel", session ? session.hasAudio ? "MP4 audio" : "Silent" : "");
       this.set("radioIndex", videoRadioSetting.get() === "video" ? 1 : 0);
@@ -113,12 +108,9 @@ export class VideoViewModel extends Observable {
   onTimeTap(): void { void this.action(async () => { const player = activeVideoSession()?.engine; if (player) await player.seek(parseVideoTime(String(this.get("timeEntry")))); }); }
   onSeekChange(args: {value?: number; object?: {value?: number}}): void {
     if (this.refreshing) return;
-    const value = Number(args.object?.value ?? args.value);
-    if (!Number.isFinite(value)) return;
-    if (Math.abs(value - this.programmaticPosition) < 1) return;
-    if (this.seekTimer !== null) clearTimeout(this.seekTimer);
-    this.seekTimer = setTimeout(() => { this.seekTimer = null; void this.action(async () => { await activeVideoSession()?.engine?.seek(value); }); }, 200);
+    this.seekControls.onChange(args);
   }
+  onSeekTouch(args: {action?: string}): void { this.seekControls.onTouch(args); }
   onScaleChange(args: {object?: {selectedIndex?: number}}): void {
     if (this.refreshing) return;
     const native = args.object?.selectedIndex === 0;
