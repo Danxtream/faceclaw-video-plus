@@ -1,17 +1,19 @@
 package com.faceclaw.app
 
 import org.json.JSONObject
+import java.nio.ByteBuffer
 
 internal data class VideoUploadPicture(val source: Int, val pts: Long)
 internal data class VideoUploadPlan(val stream: Long, val tokens: LongArray, val prefix: IntArray,
     val firstNal: Int, val count: Int, val pictures: List<VideoUploadPicture>)
 
-/** Credit-bounded upload state; only the pump's background writer mutates it. */
+/** Credit-bounded state; the report handoff may stage a grant only while fenced. */
 internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: Int,
     private val read: (Int) -> ByteArray, private val reserve: () -> Long,
     private val checkEpoch: () -> Unit, private val exchange: (ByteArray) -> Array<ByteArray>,
     private val pipeline: (Array<ByteArray>, Array<ByteArray?>) -> IntArray,
-    val measurement: VideoMeasurement = VideoMeasurement()) {
+    val measurement: VideoMeasurement = VideoMeasurement(),
+    private val canReuse: () -> Boolean = { true }) {
     var index = 0; private set
     var metadata = 0; private set
     var consumed = -1L; private set
@@ -21,6 +23,8 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
     var leftConsumed = -1L; private set
     var rightConsumed = -1L; private set
     var creditAt = 0L; private set
+    private data class Grant(val index: Int, val rows: Array<ByteArray>, val at: Long)
+    private var offered: Grant? = null
     val done get() = index == plan.count
     init {
         require(plan.stream in 1..0xfffffffeL && plan.tokens.size == 2 && plan.tokens.all { it in 1..0xffffffffL })
@@ -31,7 +35,47 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
                 (i == 0 || p.source > plan.pictures[i - 1].source && p.pts > plan.pictures[i - 1].pts)
         })
     }
-    fun refreshCredits() { budget = 0 }
+    fun invalidateCredits() { offered = null }
+    /** A report grant is single-use, exact-position and at most 500 ms old. */
+    fun offerCredits(stream: Long, tokens: LongArray, sent: Int, rows: Array<ByteArray>, ageMs: Long): Boolean {
+        checkEpoch(); offered = null
+        if (!canReuse() || stream != plan.stream || !tokens.contentEquals(plan.tokens) || sent != index || ageMs !in 0..500) return false
+        try { creditBudget(rows) } catch (_: IllegalStateException) { return false }
+        offered = Grant(index, rows.map { it.copyOf() }.toTypedArray(), measurement.now() - ageMs * 1_000_000)
+        return true
+    }
+    fun refreshCredits() {
+        checkEpoch(); budget = 0
+        val grant = offered; offered = null
+        if (grant == null) return
+        val age = measurement.now() - grant.at
+        if (!canReuse() || grant.index != index || age !in 0..500_000_000L) {
+            measurement.add(VideoMeasurement.CREDIT_DISCARD); return
+        }
+        acceptCredits(grant.rows)
+        creditAt = grant.at
+        measurement.add(VideoMeasurement.CREDIT_REUSE)
+    }
+    private fun creditBudget(credit: Array<ByteArray>): Int {
+        check(credit.size == 2 && credit.all { it.size == 6 }) { "Missing lens video reply" }
+        var available = 6
+        for ((side, raw) in credit.withIndex()) {
+            val expected = word(raw, 0)
+            val packed = u(raw[4]); val capacity = if (packed and 8 != 0) 6 else 4; val free = packed and 7
+            check(u(raw[5]) == 0 && packed and 128 == 0 && (packed shr 4 and 7) == 2 && free <= capacity &&
+                expected <= index && index - expected <= capacity &&
+                expected >= if (side == 0) leftConsumed else rightConsumed) { "Video owner credit window failed" }
+            available = minOf(available, free, (capacity + expected - index).toInt())
+        }
+        return available
+    }
+    private fun acceptCredits(credit: Array<ByteArray>) {
+        budget = creditBudget(credit)
+        consumed = credit.minOf { word(it, 0) }
+        leftConsumed = word(credit[0], 0); rightConsumed = word(credit[1], 0)
+        creditAt = measurement.now()
+        blocked = false
+    }
     private fun source(sequence: Int): Int = if (sequence < plan.prefix.size) plan.prefix[sequence]
         else plan.firstNal + sequence - plan.prefix.size
     private fun query(op: Int, size: Int): ByteArray {
@@ -68,19 +112,7 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
         }
         checkEpoch()
         val credit = rows ?: return false
-        require(credit.size == 2 && credit.all { it.size == 6 }) { "Missing lens video reply" }
-        budget = 4
-        for (raw in credit) {
-            val expected = word(raw, 0)
-            val packed = u(raw[4]); val capacity = if (packed and 8 != 0) 6 else 4; val free = packed and 7
-            check(u(raw[5]) == 0 && packed and 128 == 0 && (packed shr 4 and 7) == 2 && free <= capacity &&
-                expected <= index && index - expected <= capacity) { "Video owner credit window failed" }
-            budget = minOf(budget, free, (capacity + expected - index).toInt())
-        }
-        consumed = credit.minOf { word(it, 0) }
-        leftConsumed = word(credit[0], 0); rightConsumed = word(credit[1], 0)
-        creditAt = measurement.now()
-        blocked = false
+        acceptCredits(credit)
         return true
     }
     /** Finish exactly one existing native pipeline batch before any writer handoff. */
@@ -93,7 +125,7 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
             if (!metadataAccepted(metadataCommand(metadata + 1, index))) { blocked = true; return false }
             metadata++
         }
-        val count = minOf(budget, plan.count - index)
+        val count = minOf(4, budget, plan.count - index)
         if (count == 0) { blocked = true; return false }
         val following = arrayOfNulls<ByteArray>(count)
         var next = metadata
@@ -144,6 +176,7 @@ class VideoUploadPump internal constructor(create: () -> VideoUploadEngine) {
     private var engine: VideoUploadEngine? = null
     private var sampleAt = Long.MIN_VALUE
     private var sample = "{}"
+    private var offeredCredits = false
 
     constructor(transport: FaceclawVideoTransport, reader: VideoFileReader, identities: VideoIdentityAllocator,
         plan: String, ingressLeft: Boolean, epoch: Long) : this({
@@ -156,7 +189,8 @@ class VideoUploadPump internal constructor(create: () -> VideoUploadEngine) {
         VideoUploadEngine(config, reader.nalCount(), reader::readNalBytes, identities::reserveNow,
             { check(transport.epoch == epoch) { "Video connection generation changed; restart at IDR" } },
             { transport.exchange(it, 6, 3, ingressLeft, 5, epoch) },
-            { records, following -> transport.pipeline(records, following, 3, ingressLeft, epoch) })
+            { records, following -> transport.pipeline(records, following, 3, ingressLeft, epoch) },
+            canReuse = { transport.creditReuseSafe(epoch) })
     })
 
     init {
@@ -169,6 +203,8 @@ class VideoUploadPump internal constructor(create: () -> VideoUploadEngine) {
                         running = false; monitor.notifyAll()
                         while (!requested && !closed) monitor.wait()
                         if (closed) return@Thread
+                        if (!offeredCredits) engine.invalidateCredits()
+                        offeredCredits = false
                         running = true
                     }
                     engine.refreshCredits()
@@ -197,10 +233,26 @@ class VideoUploadPump internal constructor(create: () -> VideoUploadEngine) {
         if (failure.isEmpty()) check(!closed) { "Video upload pump closed" }
         requested = true; monitor.notifyAll()
     }
-    fun pauseUpload() = synchronized(monitor) { requested = false; monitor.notifyAll() }
+    fun pauseUpload() = synchronized(monitor) {
+        requested = false
+        // Only the fenced writer can install a grant; never mutate its budget here.
+        offeredCredits = false
+        monitor.notifyAll()
+    }
     fun closeUpload() = synchronized(monitor) {
         check(!running) { "Video upload pump is not fenced" }
         closed = true; requested = false; monitor.notifyAll()
+    }
+    /** Copy one validated paired report while no upload batch owns the writer. */
+    fun offerCreditSnapshot(buffer: ByteBuffer, stream: Long, leftToken: Long, rightToken: Long,
+        sent: Int, ageMs: Long): Boolean = synchronized(monitor) {
+        check(!running && !requested && !closed) { "Video credit writer is not fenced" }
+        offeredCredits = false
+        val bytes = buffer.duplicate()
+        if (bytes.remaining() != 12) return@synchronized false
+        val rows = Array(2) { ByteArray(6).also { bytes.get(it) } }
+        engine!!.offerCredits(stream, longArrayOf(leftToken, rightToken), sent, rows, ageMs)
+            .also { offeredCredits = it }
     }
     fun uploadSnapshot(): String = synchronized(monitor) {
         val now = System.nanoTime()

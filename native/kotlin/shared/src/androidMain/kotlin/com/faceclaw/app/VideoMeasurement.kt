@@ -34,8 +34,10 @@ internal class VideoMeasurement(private val clock: () -> Long = System::nanoTime
         const val PAGE = 12; const val REFUSAL = 13; const val FAILURE = 14
         const val BUILD = 15
         const val REPLY_WAIT = 16; const val REPLY_BYTES = 17; const val PLANNED_PAGES = 18
+        const val CREDIT_REUSE = 19; const val CREDIT_DISCARD = 20
         val NAMES = arrayOf("read", "identity", "pipeline", "credits", "metadata", "creditWait",
             "metadataWait", "nals", "bytes", "queueToWrite", "writeToAck", "query", "pageFetch",
-            "refusal", "failure", "build", "pageReplyWait", "replyBytes", "declaredPages")
+            "refusal", "failure", "build", "pageReplyWait", "replyBytes", "declaredPages",
+            "creditReuse", "creditDiscard")
     }
 }

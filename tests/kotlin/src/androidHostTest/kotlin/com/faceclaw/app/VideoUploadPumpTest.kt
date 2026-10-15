@@ -3,6 +3,7 @@ package com.faceclaw.app
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.nio.ByteBuffer
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -11,6 +12,170 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class VideoUploadPumpTest {
+    @Test fun conservativeCreditReuseLatencyModelReportsRateStarvationAndFenceCost() {
+        data class Result(val rate: Double, val queries: Int, val inputDryMs: Double, val fenceMs: Double)
+        fun measure(legacy: Boolean): Result {
+            var now=0.0;var completed=0;var accepted=0;var nextDone=Double.POSITIVE_INFINITY
+            var dry=0.0;var maxFence=0.0;var queries=0;var id=1L
+            fun advance(ms: Double) {
+                val end=now+ms
+                while(nextDone<=end) {
+                    now=nextDone;completed++
+                    nextDone=if(completed<accepted)now+58 else Double.POSITIVE_INFINITY
+                }
+                if(completed==accepted)dry+=end-now
+                now=end
+            }
+            fun credits(): Array<ByteArray> {
+                queries++
+                val free=6-(accepted-completed)
+                check(free in 0..6)
+                val row=reply(completed.toLong(),40+if(legacy)minOf(4,free)else free)
+                advance(38.0)
+                return arrayOf(row,row)
+            }
+            val engine=VideoUploadEngine(plan(96),96,{advance(3.0);byteArrayOf(0x61)},{id++},{},
+                {command->if(command[1].toInt()==10)credits()else {
+                    advance(38.0);val row=reply(word(command,12),1);arrayOf(row,row)
+                }},
+                {records,following->
+                    val began=now
+                    records.forEachIndexed{i,record->
+                        assertEquals(accepted.toLong(),word(record,6))
+                        advance(listOf(9.0,12.0,15.0)[accepted%3])
+                        if(accepted++==completed)nextDone=now+58
+                        check(accepted-completed<=6)
+                        if(following[i]!=null)advance(listOf(30.0,38.0,45.0)[accepted%3])
+                    }
+                    advance(38.0)
+                    maxFence=maxOf(maxFence,now-began)
+                    intArrayOf(records.size,following.count{it!=null})
+                },VideoMeasurement{(now*1_000_000).toLong()})
+            var due=1500.0
+            while(!engine.done) {
+                if(now>=due) {
+                    engine.invalidateCredits();engine.refreshCredits()
+                    val rows=credits()
+                    if(!legacy)assertTrue(engine.offerCredits(50,longArrayOf(101,102),engine.index,rows,38))
+                    engine.refreshCredits();due=now+1500
+                }
+                engine.step()
+            }
+            return Result(96_000/now,queries,dry,maxFence)
+        }
+        val before=measure(true);val after=measure(false)
+        println("D1 latency model NAL/s before=${before.rate} after=${after.rate}; credit requests=${before.queries}->${after.queries}; input-dry ms=${before.inputDryMs}->${after.inputDryMs}; max batch fence ms=${before.fenceMs}->${after.fenceMs}; writes9/12/15ms, ACK30/38/45ms, service58ms; not a phone FPS prediction")
+        assertTrue(after.queries<before.queries);assertTrue(after.rate>=before.rate)
+        assertTrue(after.inputDryMs<=before.inputDryMs)
+        assertTrue(after.fenceMs<=4*(15+45)+38)
+    }
+    @Test fun handoffIsPairedExactPositionOneUseAndConservesPartiallySpentGrant() {
+        var now = 1_000_000_000L; var id = 1L; var queries = 0; var sent = 0; var capacity = 6
+        val batches = mutableListOf<Int>()
+        val engine = VideoUploadEngine(plan(12), 12, { byteArrayOf(0x61) }, { id++ }, {},
+            { command ->
+                val row = if (command[1].toInt() == 10) {
+                    queries++; reply(sent.toLong(), 32 + if(capacity == 6) 14 else 4)
+                } else reply(word(command,12),1)
+                arrayOf(row,row)
+            }, { records, following ->
+                batches.add(records.size); sent += records.size
+                intArrayOf(records.size, following.count { it != null })
+            }, VideoMeasurement { now })
+        val rows = arrayOf(reply(0,46),reply(0,46))
+        assertTrue(engine.offerCredits(50,longArrayOf(101,102),0,rows,40))
+        rows[0][4] = 0 // The handed-off reply is immutable.
+        engine.refreshCredits(); assertEquals(6,engine.budget)
+        engine.step(); assertEquals(2,engine.budget)
+        engine.step(); assertEquals(listOf(4,2),batches); assertEquals(0,queries)
+        // The exact same snapshot cannot be spent a second time.
+        assertFalse(engine.offerCredits(50,longArrayOf(101,102),0,arrayOf(reply(0,46),reply(0,46)),0))
+        capacity = 4; engine.refreshCredits(); engine.step()
+        assertEquals(1,queries); assertEquals(10,engine.index)
+    }
+
+    @Test fun mismatchedStaleRefusedUncertainOrRetiredHandoffsNeverCreateCredits() {
+        var now = 1_000_000_000L; var live = true; var safe = true; var queries = 0
+        val engine = VideoUploadEngine(plan(),8,{byteArrayOf(0x61)},{1},{check(live)},
+            { command ->
+                val row = if(command[1].toInt()==10) {queries++;reply(0,33)} else reply(word(command,12),1)
+                arrayOf(row,row)
+            },{records,following->intArrayOf(records.size,following.count{it!=null})},
+            VideoMeasurement {now}, {safe})
+        val good = arrayOf(reply(0,46),reply(0,46))
+        assertFalse(engine.offerCredits(49,longArrayOf(101,102),0,good,0))
+        assertFalse(engine.offerCredits(50,longArrayOf(101,103),0,good,0))
+        assertFalse(engine.offerCredits(50,longArrayOf(101,102),1,good,0))
+        assertFalse(engine.offerCredits(50,longArrayOf(101,102),0,good,501))
+        assertFalse(engine.offerCredits(50,longArrayOf(101,102),0,arrayOf(good[0]),0))
+        for (bad in listOf(reply(0,46,8),reply(0,174),reply(1,46),reply(0,47),ByteArray(5))) {
+            assertFalse(engine.offerCredits(50,longArrayOf(101,102),0,arrayOf(good[0],bad),0))
+        }
+        safe=false; assertFalse(engine.offerCredits(50,longArrayOf(101,102),0,good,0)); safe=true
+        assertTrue(engine.offerCredits(50,longArrayOf(101,102),0,good,0))
+        now += 501_000_000; engine.refreshCredits(); assertEquals(0,engine.budget)
+        assertTrue(engine.offerCredits(50,longArrayOf(101,102),0,good,0))
+        safe=false;engine.refreshCredits();assertEquals(0,engine.budget);safe=true
+        assertTrue(engine.offerCredits(50,longArrayOf(101,102),0,good,0))
+        engine.invalidateCredits();engine.refreshCredits();assertEquals(0,engine.budget)
+        live=false;assertFails{engine.offerCredits(50,longArrayOf(101,102),0,good,0)}
+        assertFails{engine.refreshCredits()};live=true
+        engine.step();assertEquals(1,queries);assertEquals(1,engine.index)
+    }
+
+    @Test fun mixedLensCapacitiesAndOccupiedSlotsUseTheSmallerConservativeGrant() {
+        for ((rows,wanted) in listOf(
+            arrayOf(reply(0,46),reply(0,36)) to 4,
+            arrayOf(reply(0,46),reply(0,42)) to 2,
+            arrayOf(reply(0,40),reply(0,46)) to 0)) {
+            val engine=VideoUploadEngine(plan(),8,{byteArrayOf(0x61)},{1},{},{rows},
+                {_,_->error("No upload in this test")})
+            assertTrue(engine.offerCredits(50,longArrayOf(101,102),0,rows,0))
+            engine.refreshCredits();assertEquals(wanted,engine.budget)
+        }
+    }
+
+    @Test fun reportHandoffCannotCrossAnUnfencedPumpOrAControlFence() {
+        // The same fenced handoff is spent on resume, unless a control fence came first.
+        for (invalidate in listOf(false, true)) {
+        val entered=CountDownLatch(1);val release=CountDownLatch(1)
+        var queries=0
+        val engine=VideoUploadEngine(plan(),8,{byteArrayOf(0x61)},{1},{},
+            {command->val row=if(command[1].toInt()==10){queries++;reply(0,33)}else reply(word(command,12),1);arrayOf(row,row)},
+            {records,following->entered.countDown();check(release.await(2,TimeUnit.SECONDS));intArrayOf(records.size,following.count{it!=null})})
+        val pump=VideoUploadPump{engine}
+        fun fence(){val until=System.nanoTime()+2_000_000_000L;while(pump.uploadSnapshot().contains("\"running\":true")){check(System.nanoTime()<until);Thread.sleep(1)}}
+        val raw=ByteBuffer.wrap(reply(0,33)+reply(0,33))
+        try {
+            fence()
+            assertTrue(pump.offerCreditSnapshot(raw,50,101,102,0,0))
+            if (invalidate) pump.pauseUpload() // Another control invalidates the proposed handoff.
+            pump.resumeUpload();assertTrue(entered.await(1,TimeUnit.SECONDS))
+            assertFails{pump.offerCreditSnapshot(raw,50,101,102,0,0)}
+            pump.pauseUpload();release.countDown();fence()
+            assertEquals(if (invalidate) 1 else 0,queries);assertEquals(1,engine.index)
+        } finally {release.countDown();pump.pauseUpload();fence();pump.closeUpload()}
+        }
+    }
+    @Test fun sixSlotGrantIsSpentAsFourThenTwoWithoutAnExtraQuery() {
+        var id = 1L; var sent = 0; var queries = 0
+        val batches = mutableListOf<Int>()
+        val engine = VideoUploadEngine(plan(12), 12, { byteArrayOf(0x61) }, { id++ }, {},
+            { command ->
+                val row = if (command[1].toInt() == 10) {
+                    queries++; reply(sent.toLong(), 46)
+                } else reply(word(command, 12), 1)
+                arrayOf(row, row)
+            }, { records, following ->
+                batches.add(records.size); sent += records.size
+                intArrayOf(records.size, following.count { it != null })
+            })
+        engine.step(); engine.step()
+        assertEquals(listOf(4, 2), batches)
+        assertEquals(1, queries)
+        assertEquals(6, engine.index)
+        assertEquals(0, engine.budget)
+    }
     private fun word(bytes: ByteArray, at: Int) = VideoUploadEngine.word(bytes, at)
     private fun reply(expected: Long, packed: Int = 36, error: Int = 0) = ByteArray(6).also {
         VideoUploadEngine.put(it, 0, expected); it[4] = packed.toByte(); it[5] = error.toByte()

@@ -15,4 +15,6 @@ export interface VideoUploadPump {
   pause(): void;
   snapshot(): VideoUploadProgress;
   close(): void;
+  offerCredits?(stream: number, tokens: readonly number[], sent: number,
+    rows: readonly Uint8Array[], ageMs: number): boolean;
 }

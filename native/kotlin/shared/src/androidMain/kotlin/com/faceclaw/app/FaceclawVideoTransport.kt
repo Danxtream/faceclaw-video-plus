@@ -61,6 +61,9 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         check(pending.isEmpty() && request == 0L) { "Video measurement writer is not fenced" }
         recordMeasurement.begin(stream, epoch)
     }
+    internal fun creditReuseSafe(generation: Long): Boolean = synchronized(monitor) {
+        epoch == generation && uncertainContexts == 0
+    }
     private val writer = ReentrantLock()
     private val pagePadding = SecureRandom()
     private val monitor = java.lang.Object()
