@@ -11,12 +11,41 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class VideoTransportTest {
+    @Test fun largeVideoRepliesAndFreshPaddedFetchesPreserveBothIngressesAndSmallPages() {
+        for (left in listOf(true, false)) for (stride in listOf(1, 6, 22, 192)) {
+            val f = Fixture()
+            val raw = ByteArray(192) { it.toByte() }.also { it[2] = 0 }
+            val count = (raw.size + stride - 1) / stride
+            val padding = mutableListOf<ByteArray>()
+            val encoder = CfwTransport(testPlatform())
+            f.respond = { record ->
+                val page = if (record.payload[1].toInt() == 5) {
+                    assertEquals(195, record.payload.size)
+                    assertEquals(70, record.payload[4].toInt())
+                    val packets = encoder.encode(record.payload, record.message!!.magic, record.targets, 247)
+                    assertTrue(packets.maxOf { it.size - 11 } >= FaceclawVideoTransport.VIDEO_REPLY_MAX_BYTES)
+                    padding.add(record.payload.copyOfRange(9, record.payload.size))
+                    record.payload[8].toInt() and 255
+                } else 0
+                for (side in 1..2) if (record.targets and side != 0) {
+                    f.page(70, side, page, count, raw.copyOfRange(page * stride, minOf(raw.size, (page + 1) * stride)), left)
+                    f.ack(record, side)
+                }
+            }
+            val replies = f.transport.exchange(byteArrayOf(31, 4, 1, 0, 70, 0, 0, 0), 192, 3, left, 2)
+            replies.forEach { assertContentEquals(raw, it) }
+            if (padding.size > 1) assertFalse(padding[0].contentEquals(padding[1]))
+            assertEquals(2 * (count - 1), padding.size)
+            encoder.close()
+        }
+    }
+
     internal class Fixture {
         val records = LinkedBlockingQueue<VideoSubmission>()
         var next = 40
         var respond: ((VideoSubmission) -> Unit)? = null
         val transport = FaceclawVideoTransport(VideoRecordQueue { record ->
-            val message = OutboundMessage("video", "test", 0xf0, 0, next++, record.payload, 100, -1, record.ingressLeft)
+            val message = OutboundMessage("video", "test", 0xf0, 0, next++ and 255, record.payload, 100, -1, record.ingressLeft)
             record.message = message
             message.onAck = MessageCallback { record.delivered() }
             records.add(record)
@@ -232,9 +261,12 @@ class VideoTransportTest {
     @Test fun refusedPageRetriesOnlyThatReadAndNamesItsExactIdentityAfterThreeFailures() {
         for (permanent in listOf(false, true)) {
             val f = Fixture(); var tries = 0; var parents = 0
+            val encoder = CfwTransport(testPlatform())
             f.respond = { record ->
                 val parent = record.payload[1].toInt() != 5
                 if (parent) parents++
+                else assertTrue(encoder.encode(record.payload, record.message!!.magic, record.targets, 247)
+                    .maxOf { it.size - 11 } >= FaceclawVideoTransport.VIDEO_REPLY_MAX_BYTES)
                 val page = if (parent) 0 else record.payload[8].toInt()
                 for (side in 1..2) if (record.targets and side != 0) {
                     val refuse = side == 2 && page == 1 && (++tries <= 2 || permanent)
@@ -251,6 +283,7 @@ class VideoTransportTest {
                 assertTrue(error.message!!.contains("op=4 request=70 side=2 page=1 pages=3 attempts=3"))
             } else assertContentEquals(byteArrayOf(1, 7, 0, 2, 9, 8), f.transport.exchange(query, 6, 3, true, 2)[1])
             assertEquals(3, tries); assertEquals(1, parents)
+            encoder.close()
         }
     }
 

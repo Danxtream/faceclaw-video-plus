@@ -2,6 +2,7 @@ package com.faceclaw.app
 
 import java.util.concurrent.locks.ReentrantLock
 import java.nio.ByteBuffer
+import java.security.SecureRandom
 import java.util.concurrent.Executors
 import kotlin.concurrent.withLock
 
@@ -44,6 +45,7 @@ class VideoCompletion(
  */
 class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
     private val writer = ReentrantLock()
+    private val pagePadding = SecureRandom()
     private val monitor = java.lang.Object()
     private val pending = mutableListOf<VideoSubmission>()
     private val completions = mutableListOf<VideoCompletion>()
@@ -283,7 +285,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             unsigned(packet[5]) != 1 || unsigned(packet[6]) != CfwTransport.SID || packet[7].toInt() != 0) return false
         if (unsigned(packet[8]) == MESSAGE) {
             val body = packet.copyOfRange(8, packet.size - 2)
-            if (body.size !in 9..30 || CfwTransport.crc(body) != u16(packet, packet.size - 2)) return true
+            if (body.size !in 9..VIDEO_REPLY_MAX_BYTES || CfwTransport.crc(body) != u16(packet, packet.size - 2)) return true
             val side = unsigned(body[1])
             val id = u32(body, 2)
             val page = unsigned(body[6])
@@ -393,9 +395,14 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                 var offset = first.second.size
                 for (page in 1 until first.first) {
                     waiting = "page=$page lens=$side ACK"
-                    val command = byteArrayOf(31, 5, 1, 0,
-                        id.toByte(), (id shr 8).toByte(), (id shr 16).toByte(), (id shr 24).toByte(), page.toByte())
                     for (attempt in 1..3) {
+                        // Refresh padding on retries too: persistent compression
+                        // must not erase the proof of the reply packet budget.
+                        val command = ByteArray(VIDEO_REPLY_MAX_BYTES - 5).also {
+                            pagePadding.nextBytes(it)
+                            byteArrayOf(31, 5, 1, 0, id.toByte(), (id shr 8).toByte(),
+                                (id shr 16).toByte(), (id shr 24).toByte(), page.toByte()).copyInto(it)
+                        }
                         val acceptedPage = send(arrayOf(command), side, ingressLeft, generation, deadline)[0] == side
                         if (acceptedPage) break
                         check(attempt < 3) {
@@ -446,6 +453,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
 
     companion object {
         const val MESSAGE = 31
+        const val VIDEO_REPLY_MAX_BYTES = 200
         private fun unsigned(value: Byte) = value.toInt() and 255
         private fun u16(data: ByteArray, offset: Int) = unsigned(data[offset]) or (unsigned(data[offset + 1]) shl 8)
         private fun u32(data: ByteArray, offset: Int): Long =
