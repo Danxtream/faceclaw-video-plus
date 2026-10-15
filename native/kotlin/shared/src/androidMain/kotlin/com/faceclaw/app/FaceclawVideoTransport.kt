@@ -58,6 +58,9 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
     private var queryIngressLeft = true
     private var replyFailure: String? = null
     private var uncertainContexts = 0
+    @Volatile internal var evidenceReserve: (() -> Long)? = null
+    private var collectingEvidence = false
+    private var refusalEvidenceTargets = 0
     private class Operation(val epoch: Long) {
         var complete = false
         var result = ""
@@ -70,6 +73,11 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
     }
     @Volatile var epoch = 1L
         private set
+
+    /** Enable only after both lenses advertise receive/clock diagnostics. */
+    fun configureEvidence(identities: VideoIdentityAllocator, enabled: Boolean) {
+        evidenceReserve = if (enabled) identities::reserveNow else null
+    }
 
     /** Return only this class's envelope mask; ordinary CFW records stay unchanged. */
     fun targetsFor(message: OutboundMessage): Int = synchronized(monitor) {
@@ -116,6 +124,8 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         check(epoch != Long.MAX_VALUE) { "Video connection epoch exhausted" }
         epoch++
         uncertainContexts = 0
+        evidenceReserve = null
+        refusalEvidenceTargets = 0
         pending.forEach { it.failure = reason }
         pending.clear()
         completions.clear()
@@ -131,7 +141,9 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         val payload = snapshot(buffer)
         require(payload.size in 8..4096)
         return begin { generation ->
-            exchange(payload, length, targets, ingressLeft, resultOffset, generation)
+            val evidence = payload.size == 12 && unsigned(payload[1]) == 7 && unsigned(payload[8]) in 4..5
+            exchange(payload, length, targets, ingressLeft, resultOffset, generation,
+                deadline = System.nanoTime() + if (evidence) 2_000_000_000L else 15_000_000_000L)
                 .joinToString(prefix = "[", postfix = "]") { data ->
                     "\"" + data.joinToString("") { unsigned(it).toString(16).padStart(2, '0') } + "\""
                 }
@@ -241,7 +253,10 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             await(generation, deadline) { submitted.all { it.delivered } }
             check(submitted.all { it.accepted == targets }) { "Paired NAL transport refused" }
             intArrayOf(submitted.size, admitted)
-        } finally { synchronized(monitor) { pending.removeAll(submitted.toSet()) } }
+        } finally {
+            synchronized(monitor) { pending.removeAll(submitted.toSet()) }
+            flushRefusalEvidence(ingressLeft, generation)
+        }
     }
 
     private fun begin(work: (Long) -> String): Long {
@@ -393,6 +408,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             pages.clear()
         }
         val began = System.nanoTime()
+        var refusalTargets = 0
         var waiting = "transport ACK"
         try {
             val masks = send(leading + payload, targets, ingressLeft, generation, deadline, overlap)
@@ -426,6 +442,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                         val attemptAt = System.nanoTime()
                         val acceptedPage = send(arrayOf(command), side, ingressLeft, generation, deadline)[0] == side
                         if (acceptedPage) break
+                        refusalTargets = refusalTargets or side
                         val evidence = "Frozen page refused op=${unsigned(payload[1])} request=$id side=$side " +
                             "page=$page pages=${first.first} attempt=$attempt attempts=$attempt " +
                             "elapsedMs=${(System.nanoTime() - began) / 1_000_000} " +
@@ -461,7 +478,57 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                 "elapsedMs=${(System.nanoTime() - began) / 1_000_000}: ${error.message}")
         } finally {
             synchronized(monitor) { request = 0; pages.clear() }
+            if (!collectingEvidence && epoch == generation) {
+                refusalEvidenceTargets = refusalEvidenceTargets or refusalTargets
+                if (!overlap) flushRefusalEvidence(ingressLeft, generation)
+            }
         }
+    }
+
+    private fun flushRefusalEvidence(ingressLeft: Boolean, generation: Long) {
+        if (collectingEvidence || epoch != generation) return
+        val targets = refusalEvidenceTargets
+        refusalEvidenceTargets = 0
+        if (targets != 0) collectRefusalEvidence(targets, ingressLeft, generation)
+    }
+
+    /* Fence the whole pipeline: its unsent metadata already has reserved IDs.
+     * An earlier diagnostic would advance high-water past those IDs, while a
+     * fetch between every PAGE retry could also evict the parent's replay. */
+    private fun collectRefusalEvidence(targets: Int, ingressLeft: Boolean, generation: Long) {
+        val reserve = evidenceReserve ?: return
+        collectingEvidence = true
+        val deadline = System.nanoTime() + 2_000_000_000L
+        try {
+            for (side in 1..2) if (targets and side != 0 && epoch == generation) {
+                try {
+                    val id = reserve()
+                    require(id in 1..0xfffffffeL)
+                    val command = ByteArray(12)
+                    command[0] = 31; command[1] = 7; command[2] = 1
+                    for (i in 0..3) command[4 + i] = (id shr (8 * i)).toByte()
+                    command[8] = 4; command[9] = if (ingressLeft) 0 else 1
+                    val raw = exchange(command, 128, side, ingressLeft, 2, generation, deadline = deadline)[0]
+                    require(raw[0].toInt() == 1 && raw[1].toInt() == 7 && raw[2].toInt() == 0 &&
+                        raw[3].toInt() == 4 && raw[4].toInt() == 1 && unsigned(raw[5]) == (if (ingressLeft) 1 else 2) &&
+                        unsigned(raw[6]) == side && unsigned(raw[7]) <= 4 && unsigned(raw[16]) == 24)
+                    System.err.println("Video refusal ring side=$side origin=${unsigned(raw[5])} request=$id " +
+                        "serial=${u32(raw, 8)} dropped=${u32(raw, 12)} rows=${unsigned(raw[7])}")
+                    val reasons = arrayOf("none", "lock timeout", "missing entry", "page range", "capacity", "pending",
+                        "reply allocation", "send failure", "format", "replay", "command")
+                    for (i in 0 until unsigned(raw[7])) {
+                        val at = 32 + i * 24
+                        System.err.println("Video refusal side=$side serial=${u32(raw, at)} tick=${u32(raw, at + 4)} " +
+                            "request=${u32(raw, at + 8)} op=${unsigned(raw[at + 12])} page=${unsigned(raw[at + 13])} " +
+                            "reason=${reasons.getOrElse(unsigned(raw[at + 14])) { "unknown" }} " +
+                            "budget=${unsigned(raw[at + 15])} frozen=${unsigned(raw[at + 16])} " +
+                            "pages=${unsigned(raw[at + 17])} detail=${u32(raw, at + 20)}")
+                    }
+                } catch (error: Exception) {
+                    System.err.println("Video refusal evidence unavailable side=$side: ${error.message}")
+                }
+            }
+        } finally { collectingEvidence = false }
     }
 
     private fun await(generation: Long, deadline: Long, ready: () -> Boolean) {

@@ -11,6 +11,72 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class VideoTransportTest {
+    @Test fun diagnosticIdsCannotOvertakePreallocatedMetadataInsideTheUploadPipeline() {
+        val f = Fixture(); var identity = 1000L; var high = 0L; var once = true
+        val events = mutableListOf<String>()
+        f.transport.evidenceReserve = { identity++ }
+        f.respond = { record ->
+            val op = record.payload[1].toInt()
+            val id = if (op == 6) 0 else VideoUploadEngine.word(record.payload, 4)
+            if (op == 14 || op == 7) { assertTrue(id > high); high = id; events.add("$op:$id") }
+            for (side in 1..2) if (record.targets and side != 0) {
+                val refuse = op == 5 && side == 1 && once
+                if (refuse) once = false
+                if (op == 14 || op == 5) {
+                    val raw = byteArrayOf((id - 100).toByte(), 0, 0, 0, 1, 0)
+                    val page = if (op == 5) record.payload[8].toInt() else 0
+                    if (!refuse) f.page(id, side, page, 2, raw.copyOfRange(page * 3, page * 3 + 3), true)
+                } else if (op == 7) {
+                    val raw = ByteArray(128); raw[0] = 1; raw[1] = 7; raw[3] = 4; raw[4] = 1
+                    raw[5] = 1; raw[6] = side.toByte(); raw[16] = 24
+                    f.page(id, side, 0, 1, raw, true)
+                }
+                f.ack(record, side, success = !refuse)
+            }
+        }
+        assertContentEquals(intArrayOf(2, 2), f.transport.pipeline(arrayOf(nal(1), nal(2)),
+            arrayOf(metadata(2), metadata(3)), 3, true))
+        assertEquals(listOf("14:102", "14:103", "7:1000"), events)
+    }
+    @Test fun refusalEvidenceIsFetchedAfterParentFenceWithoutRecursiveFetchOrMaskedFailure() {
+        for (left in listOf(true, false)) for (diagnosticRefused in listOf(false, true)) {
+            val f = Fixture(); var next = 80L; var diagnostics = 0; var parentAttempts = 0
+            f.transport.evidenceReserve = { next++ }
+            val log = java.io.ByteArrayOutputStream(); val previous = System.err
+            System.setErr(java.io.PrintStream(log))
+            f.respond = { record ->
+                val diagnostic = record.payload[1].toInt() == 7
+                val fetch = record.payload[1].toInt() == 5
+                val id = VideoUploadEngine.word(record.payload, 4)
+                if (diagnostic) {
+                    diagnostics++; assertEquals(4, parentAttempts)
+                    assertEquals(4, record.payload[8].toInt()); assertEquals(if (left) 0 else 1, record.payload[9].toInt())
+                }
+                for (side in 1..2) if (record.targets and side != 0) {
+                    val refuse = fetch || diagnostic && diagnosticRefused
+                    if (fetch) parentAttempts++
+                    if (!fetch) {
+                        if (diagnostic) {
+                            val raw = ByteArray(128); raw[0] = 1; raw[1] = 7; raw[3] = 4; raw[4] = 1
+                            raw[5] = if (left) 1 else 2; raw[6] = side.toByte(); raw[7] = 1; raw[16] = 24
+                            raw[44] = 15; raw[45] = 1; raw[46] = 7
+                            if (diagnosticRefused) { raw[2] = 3; raw[7] = 0 }
+                            f.page(id, side, 0, 1, raw, left)
+                        } else f.page(id, side, 0, 2, byteArrayOf(1, 7, 0), left)
+                    }
+                    f.ack(record, side, success = !refuse)
+                }
+            }
+            try {
+                val error = assertFailsWith<VideoQueryUnavailable> {
+                    f.transport.exchange(byteArrayOf(31,15,1,0,70,0,0,0), 6, 1, left, 2)
+                }
+                assertTrue(error.message!!.contains("op=15 request=70")); assertEquals(1, diagnostics)
+                assertTrue(log.toString().contains(if (diagnosticRefused) "evidence unavailable side=1" else "reason=send failure"))
+            } finally { System.setErr(previous) }
+            f.transport.retire("disconnect"); assertEquals(null, f.transport.evidenceReserve)
+        }
+    }
     @Test fun largeVideoRepliesAndFreshPaddedFetchesPreserveBothIngressesAndSmallPages() {
         for (left in listOf(true, false)) for (stride in listOf(1, 6, 22, 192)) {
             val f = Fixture()

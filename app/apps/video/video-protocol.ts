@@ -15,6 +15,7 @@ export interface VideoBackend {
   sendPicture?(record: Uint8Array, metadata: Uint8Array): Promise<Uint8Array[]>;
   sendPipeline?(records: readonly Uint8Array[], following: readonly (Uint8Array | null)[]): Promise<number[]>;
   createUploadPump?(reader: unknown, plan: VideoUploadPlan): VideoUploadPump;
+  configureEvidence?(enabled: boolean): void;
 }
 
 export const VIDEO = {
@@ -60,6 +61,7 @@ export function parseVideoStatus(raw: Uint8Array): VideoStatus {
 /** One serialized caller owns controls and uploads; requests survive exact replay. */
 export class VideoProtocol {
   readonly epoch: number;
+  private evidence = false;
   constructor(private readonly backend: VideoBackend, private readonly reserve: () => number | Promise<number>) {
     this.epoch = backend.epoch();
   }
@@ -111,8 +113,30 @@ export class VideoProtocol {
     if ((await this.status(VIDEO.caps)).some((row) => row.result || row.error)) throw new Error("Video capabilities refused");
     const rows = await this.query(await this.header(VIDEO.playbackCaps, 8), 16);
     if (rows.some((row) => row[0] !== 1 || row[1] !== 13 || row[2] || row[3] !== 255 ||
-      row[4] !== 2 || row[5] !== 16 || row[6] !== 255 || (row[7] & 7) !== 7 || (row[7] & ~31)))
+      row[4] !== 2 || row[5] !== 16 || row[6] !== 255 || (row[7] & 7) !== 7 || (row[7] & ~63)))
       throw new Error("Paired queued playback controls are not supported");
+    this.evidence = rows.every(row => !!(row[7] & 32));
+    this.backend.configureEvidence?.(this.evidence);
+  }
+  /** Read presenter-owned samples only when the paired firmware advertises them. */
+  async clockEvidence(phase: number): Promise<void> {
+    if (!this.evidence) return;
+    if (![0, 1, 2].includes(phase)) throw new Error("Invalid clock phase");
+    const raw = await this.header(7, 12); raw[8] = 5; raw[9] = phase;
+    const rows = await this.query(raw, 128);
+    rows.forEach((row, i) => {
+      if (row[0] !== 1 || row[1] !== 7 || row[2] || row[3] !== 5 || row[4] !== phase || row[5] !== 1 || row[6] !== i + 1)
+        throw new Error("Invalid clock evidence reply");
+      const words = Array.from({length: 22}, (_, j) => videoU32(row, 8 + j * 4));
+      const ticks = (words[5] - words[2]) >>> 0, cycles = (words[6] - words[3]) >>> 0;
+      const qualified = (row[7] & 7) === 7 && !(row[7] & 24) && ticks >= 250 && ticks <= 1000;
+      console.error(`Video clock side=${i + 1} phase=${phase} flags=${row[7]} stream=${words[0]} generation=${words[1]} ` +
+        `cyclesPerMs=${qualified ? cycles / ticks : "unqualified"} perfRequest=${words[8] & 3} ` +
+        `perfAck=${words[8] >>> 2 & 1} perfStatus=${words[8] >>> 3 & 3} manager=${words[15]} sdkMode=${words[17]} ` +
+        `clockEnable=${words[9]} clockMisc=${words[10]} clockControl=${words[11]} ` +
+        `pllControl=${words[12]} pllFraction=${words[13]} pllDividers=${words[14]} ` +
+        `pllStatus=${words[20]} pllMux=${words[21]} raw=${JSON.stringify(words)}`);
+    });
   }
   async radioSelection(enabled: boolean): Promise<void> {
     const raw = await this.header(VIDEO.radio, 12);

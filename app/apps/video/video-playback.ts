@@ -21,7 +21,7 @@ export type VideoPlaybackView = {
   cleanupFailed: boolean;
   hostPhy: string;
 };
-type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump">>;
+type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence">>;
 type Intent = { kind: "pause" | "seek" | "scale" | "menu"; value: number | boolean; resolve: () => void; reject: (error: unknown) => void };
 type Generation = { stream: number; tokens: number[]; idr: number; target: number; prefix: number[]; firstNal: number; index: number; count: number; metadata: number; paused: boolean; reached: boolean; oldPhy: VideoPhy[]; started: number; anchor: VideoPhy[]; anchorAt: number; anchorUncertainty: number; detailedReports: boolean; pump?: VideoUploadPump };
 
@@ -223,6 +223,7 @@ export class VideoPlayback {
     }
     const ready = await this.waitReady(stream);
     this.generation.tokens = ready.map((row) => row.token);
+    await this.clockEvidence(0);
     const anchorBegin = this.clock();
     const ownedPhy = await this.phy();
     videoLive(oldPhy, ownedPhy);
@@ -275,6 +276,7 @@ export class VideoPlayback {
       await this.sleep(20);
     }
     this.generation = null;
+    await this.clockEvidence(2);
     if (sampleFailure) throw sampleFailure;
   }
   private async playback(op: number = VIDEO.playback, value?: number): Promise<VideoPlaybackState[]> {
@@ -282,6 +284,11 @@ export class VideoPlayback {
     const g = this.generation!;
     return (await this.protocol.owned(op, g.stream, g.tokens, op === VIDEO.menu || op === VIDEO.scale ? 48 : 36, value))
       .map((raw, i) => parsePlayback(raw, i + 1, g.stream, g.tokens[i]));
+  }
+  private async clockEvidence(phase: number): Promise<void> {
+    if (!this.protocol.clockEvidence) return;
+    try { await this.protocol.clockEvidence(phase); }
+    catch (error) { console.error(`Video clock evidence unavailable phase=${phase}: ${error}`); }
   }
   private async settle(paused?: boolean): Promise<VideoPlaybackState[]> {
     const deadline = this.clock() + 30_000;
@@ -530,6 +537,7 @@ export class VideoPlayback {
       if (g.detailedReports) {
         if (!await this.observe()) this.shownDue = began;
         this.updatePlayback(await this.playback());
+        await this.clockEvidence(1);
       } else {
         const left = parseShown(await this.protocol.shown(g.stream, g.tokens[0], 1), 1, g.stream, g.tokens[0]);
         if (!left) this.shownDue = began;
@@ -542,6 +550,7 @@ export class VideoPlayback {
             const ages = captures.map((row, i) => Math.max(0, this.clock() - g.anchorAt -
               videoTickSpan(row.copyTick, g.anchor[i].tick)));
             await this.applyShown(captures, ages, g.anchorUncertainty + this.clock() - began);
+            await this.clockEvidence(1);
           }
         }
       }

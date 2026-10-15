@@ -49,6 +49,33 @@ function status() {
   return raw;
 }
 
+test('Paired capability gates refusal evidence and raw read-only clock logging', async () => {
+  for (const flags of [23, 55, 87]) {
+    let id = 100, configured = null, clocks = 0;
+    const output = [], original = console.error;
+    const protocol = new VideoProtocol({epoch: () => 1, configureEvidence: value => configured = value,
+      exchange: async (raw, length) => {
+        if (raw[1] === VIDEO.caps) return [status().slice(0, 128), status().slice(0, 128)];
+        if (raw[1] === VIDEO.playbackCaps) return [1, 2].map(() => Uint8Array.from([1,13,0,255,2,16,255,flags,0,0,0,0,0,0,0,0]));
+        assert.equal(raw[1], 7); assert.equal(raw[8], 5); assert.equal(raw[9], 1); clocks++;
+        return [1, 2].map(side => {
+          const row = new Uint8Array(length); row.set([1,7,0,5,1,1,side,7]);
+          const view = new DataView(row.buffer);
+          view.setUint32(16, 100, true); view.setUint32(20, 0xff000000, true);
+          view.setUint32(28, 400, true); view.setUint32(32, (0xff000000 + 75000000) >>> 0, true);
+          return row;
+        });
+      }}, () => id++);
+    if (flags === 87) { await assert.rejects(protocol.capabilities(), /not supported/); continue; }
+    try {
+      console.error = line => output.push(line);
+      await protocol.capabilities(); await protocol.clockEvidence(1);
+    } finally { console.error = original; }
+    assert.equal(configured, flags === 55); assert.equal(clocks, flags === 55 ? 1 : 0);
+    if (flags === 55) assert.ok(output.length === 2 && output.every(line => line.includes('cyclesPerMs=250000')));
+  }
+});
+
 test('Video status rejects wrong geometry, slots, credits and incoherent counts', () => {
   assert.equal(parseVideoStatus(status()).capacity, 4);
   for (const offset of [32, 36, 40, 42, 44, 45, 48, 50]) {

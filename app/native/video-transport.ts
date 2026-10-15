@@ -14,6 +14,7 @@ export function createVideoProtocol(ingressLeft = true): VideoProtocol {
   const legacyNext = Number(getStringSetting("video.requestId", "1"));
   if (!Number.isInteger(legacyNext) || legacyNext < 1 || legacyNext >= 0xfffffffe) throw new Error("Invalid legacy video request identity");
   const identities = new com.faceclaw.app.VideoIdentityAllocator(Utils.android.getApplicationContext(), legacyNext);
+  transport.configureEvidence(identities, false);
   async function collect(id: number): Promise<any> {
     const deadline = Date.now() + 30_000;
     while (Number(transport.pollOperation(id)) === 0) {
@@ -24,6 +25,7 @@ export function createVideoProtocol(ingressLeft = true): VideoProtocol {
   }
   const backend: VideoBackend = {
     epoch: () => Number(transport.getEpoch()),
+    configureEvidence: enabled => transport.configureEvidence(identities, enabled),
     createUploadPump: (reader, plan) => {
       const pump = new com.faceclaw.app.VideoUploadPump(transport, reader, identities, JSON.stringify(plan), ingressLeft, uploadEpoch);
       return {
