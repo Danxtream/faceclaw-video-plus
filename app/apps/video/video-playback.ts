@@ -54,6 +54,7 @@ export class VideoPlayback {
   private av: VideoAvSync | null = null;
   private audioPlaying = false;
   private positionShownAt = 0;
+  private rate = { at: 0, sent: 0, consumed: 0, samples: 0, blocked: 0, drops: 0 };
   constructor(private readonly protocol: Protocol, private readonly source: VideoSource,
     private readonly audio: VideoAudio, private readonly options: () => VideoOptions,
     private readonly changed: (view: VideoPlaybackView) => void = () => {},
@@ -249,6 +250,7 @@ export class VideoPlayback {
     this.progressAt = this.clock(); this.progress = -1;
     this.lastSeek = 0;
     this.av = this.audio.position ? new VideoAvSync(this.source.clip.duration) : null;
+    this.rate = { at: this.clock(), sent: 0, consumed: Math.max(0, this.consumed), samples: 0, blocked: 0, drops: 0 };
     const g = this.generation;
     g.pump = this.protocol.createUploadPump?.(this.source.uploadHandle, {
       stream, tokens: g.tokens, prefix: g.prefix, firstNal: g.firstNal, count: g.count,
@@ -388,6 +390,7 @@ export class VideoPlayback {
       g.pump.resume();
       await this.sleep(50);
       const row = this.uploadProgress();
+      this.rate.samples++; if (row.blocked) this.rate.blocked++;
       this.reportSafe = row.blocked || g.index === g.count;
       this.metadataStaged = false;
       return g.index > previous;
@@ -454,6 +457,24 @@ export class VideoPlayback {
     g.index += records.length;
     this.creditBudget -= records.length;
     return true;
+  }
+  /**
+   * Once per second: pictures sent, decoder consumption and credit-blocked
+   * share separate delivery limits (free credits, few sent) from decode
+   * limits (blocked, slow consumption). Console only; no extra wire traffic.
+   */
+  private logRate(): void {
+    const g = this.generation, now = this.clock();
+    if (!g || now - this.rate.at < 1000) return;
+    const seconds = (now - this.rate.at) / 1000, consumed = Math.max(0, this.consumed);
+    const video = this.av?.video(now) ?? null, audio = this.audio.position?.() ?? null;
+    const lag = video === null || audio === null || !this.audioPlaying ? "--" : `${Math.round(audio - video)}ms`;
+    console.error(`Video rate: sent=${((g.index - this.rate.sent) / seconds).toFixed(1)}/s ` +
+      `consumed=${((consumed - this.rate.consumed) / seconds).toFixed(1)}/s ` +
+      `blocked=${this.rate.samples ? Math.round(100 * this.rate.blocked / this.rate.samples) : 0}% ` +
+      `fps=${this.view.fps === null ? "--" : this.view.fps.toFixed(1)} lag=${lag} ` +
+      `paused=${this.view.paused} drops=${this.rate.drops}`);
+    this.rate = { at: now, sent: g.index, consumed, samples: 0, blocked: 0, drops: 0 };
   }
   private async pauseAudio(): Promise<void> {
     await this.audio.pause();
@@ -573,6 +594,7 @@ export class VideoPlayback {
     if (!(error instanceof VideoReportUnavailable) || this.stopping) return false;
     const now = this.clock();
     console.error(`Video passive report dropped; retry after backoff: ${error}`);
+    this.rate.drops++;
     this.reportAt = now; this.reportDue = now + 1500; this.shownDue = now + 5000;
     // Missing evidence is not proof of stalled copies; do not invent progress.
     this.progressAt += now - began;
@@ -665,6 +687,7 @@ export class VideoPlayback {
         const report = (!g.reached || g.detailedReports || this.reportSafe || stale) && this.clock() >= this.reportDue;
         if (report) await this.report();
         await this.syncAudio();
+        this.logRate();
         if (this.ended && !this.intents.length) break;
         if (!this.view.paused && this.clock() - this.progressAt > 30_000) throw new Error("Video stopped making copy progress");
         if ((!uploaded || this.view.paused) && !report && !this.metadataStaged) await this.sleep(20);
