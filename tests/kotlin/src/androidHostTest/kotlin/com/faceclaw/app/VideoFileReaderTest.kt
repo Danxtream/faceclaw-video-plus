@@ -66,4 +66,27 @@ class VideoFileReaderTest {
         assertFails { reader.beginAudit() }
         reader.close()
     }
+
+    @Test fun oneOpenHandleServesConcurrentReadsReauditsAndReleasesOnClose() {
+        val source = file(valid())
+        val reader = VideoFileReader(source.path)
+        try {
+            reader.beginAudit(); result(reader)
+            val threads = (0 until 4).map { worker -> Thread {
+                repeat(200) { i -> val index = (worker + i) % 3
+                    assertEquals(listOf(listOf<Byte>(0x67, 42), listOf<Byte>(0x68, 43), listOf<Byte>(0x65, 44))[index],
+                        reader.readNalBytes(index).toList()) }
+            } }
+            var failure: Throwable? = null
+            threads.forEach { it.setUncaughtExceptionHandler { _, error -> failure = error }; it.start() }
+            threads.forEach { it.join(5_000) }
+            failure?.let { throw it }
+            // A new audit must read the replaced file, not the handle opened before it.
+            source.writeBytes(prefix + byteArrayOf(0x67, 7) + prefix + byteArrayOf(0x68, 8) + prefix + byteArrayOf(0x65, 9, 10))
+            reader.beginAudit(); result(reader)
+            assertEquals(listOf<Byte>(0x65, 9, 10), reader.readNalBytes(2).toList())
+        } finally { reader.close() }
+        assertFails { reader.readNalBytes(0) }
+        assertTrue(source.delete(), "close releases the open handle")
+    }
 }

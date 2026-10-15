@@ -20,6 +20,11 @@ class VideoFileReader(private val path: String) : AutoCloseable {
     private var audited: Audit? = null
     private var modified = 0L
     private var closed = false
+    // Opening the file for every NAL cost ~3 ms per picture on the phone; keep one
+    // handle per audit. Guarded by `io`, which is never held while taking `this`.
+    private val io = Any()
+    private var input: RandomAccessFile? = null
+    private var inputClosed = false
 
     @Synchronized fun beginAudit() {
         submit {
@@ -27,6 +32,7 @@ class VideoFileReader(private val path: String) : AutoCloseable {
             val stamp = file.lastModified()
             val result = audit(file)
             require(file.length() == result.bytes && file.lastModified() == stamp) { "Video changed during audit" }
+            synchronized(io) { input?.close(); input = null }
             synchronized(this) { check(!closed); audited = result; modified = stamp }
             "{\"bytes\":${result.bytes},\"sha256\":\"${result.sha256}\",\"nals\":[" +
                 result.nals.joinToString(",") { "{\"offset\":${it.offset},\"bytes\":${it.bytes},\"type\":${it.type},\"sha256\":\"${it.sha256}\"}" } + "]}"
@@ -50,7 +56,11 @@ class VideoFileReader(private val path: String) : AutoCloseable {
         val file = File(path)
         require(file.length() == checked.bytes && file.lastModified() == stamp) { "Video source changed" }
         val bytes = ByteArray(nal.bytes)
-        RandomAccessFile(file, "r").use { input -> input.seek(nal.offset); input.readFully(bytes) }
+        synchronized(io) {
+            check(!inputClosed) { "Video file reader is closed" }
+            val handle = input ?: RandomAccessFile(file, "r").also { input = it }
+            handle.seek(nal.offset); handle.readFully(bytes)
+        }
         require(digest(bytes) == nal.sha256) { "Audited NAL changed" }
         synchronized(this) { check(!closed) }
         return bytes
@@ -77,6 +87,7 @@ class VideoFileReader(private val path: String) : AutoCloseable {
         pending = null
         audited = null
         worker.shutdownNow()
+        synchronized(io) { inputClosed = true; input?.close(); input = null }
     }
 
     companion object {
