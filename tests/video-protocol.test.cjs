@@ -63,6 +63,8 @@ test('Paired capability gates refusal evidence and raw read-only clock logging',
           const view = new DataView(row.buffer);
           view.setUint32(16, 100, true); view.setUint32(20, 0xff000000, true);
           view.setUint32(28, 400, true); view.setUint32(32, (0xff000000 + 75000000) >>> 0, true);
+          view.setUint32(24, 100, true); view.setUint32(36, 400, true);
+          view.setUint32(72, 1, true);
           return row;
         });
       }}, () => id++);

@@ -25,6 +25,10 @@ export const VIDEO = {
   pause: 16, resume: 17, playback: 18, menu: 19, scale: 20, radio: 21,
 } as const;
 
+// Donor clock paths top out at 250 MHz; allow two ticks for endpoint quantization.
+const VIDEO_CLOCK_MAX_CYCLES_PER_MS = 250000;
+const VIDEO_CLOCK_TICK_ALLOWANCE_MS = 2;
+
 /** Read a wire uint32 without signed conversion or alignment assumptions. */
 export function videoU32(data: Uint8Array, offset: number): number {
   if (offset < 0 || offset + 4 > data.length) throw new Error("Truncated video field");
@@ -141,9 +145,16 @@ export class VideoProtocol {
         throw new Error("Invalid clock evidence reply");
       const words = Array.from({length: 22}, (_, j) => videoU32(row, 8 + j * 4));
       const ticks = (words[5] - words[2]) >>> 0, cycles = (words[6] - words[3]) >>> 0;
-      const qualified = (row[7] & 7) === 7 && !(row[7] & 24) && ticks >= 250 && ticks <= 1000;
+      const qualification = ticks < 250 || ticks > 1000 ? "interval outside 250..1000 ms" :
+        (row[7] & 7) !== 7 || (row[7] & ~31) ? "firmware flags" :
+        (row[7] & 8) || words[8] !== words[18] || words[8] !== words[19] ? "performance changed" :
+        (row[7] & 16) || words[2] !== words[4] || words[5] !== words[7] ? "tick skew" :
+        !(words[16] & 1) ? "counter disabled" :
+        !cycles || cycles > VIDEO_CLOCK_MAX_CYCLES_PER_MS * (ticks + VIDEO_CLOCK_TICK_ALLOWANCE_MS) ?
+          "counter discontinuity/implausible delta" : "qualified";
       console.error(`Video clock side=${i + 1} phase=${phase} flags=${row[7]} stream=${words[0]} generation=${words[1]} ` +
-        `cyclesPerMs=${qualified ? cycles / ticks : "unqualified"} perfRequest=${words[8] & 3} ` +
+        `cyclesPerMs=${qualification === "qualified" ? cycles / ticks : "unqualified"} qualification=${qualification} ` +
+        `perfRequest=${words[8] & 3} ` +
         `perfAck=${words[8] >>> 2 & 1} perfStatus=${words[8] >>> 3 & 3} manager=${words[15]} sdkMode=${words[17]} ` +
         `clockEnable=${words[9]} clockMisc=${words[10]} clockControl=${words[11]} ` +
         `pllControl=${words[12]} pllFraction=${words[13]} pllDividers=${words[14]} ` +
