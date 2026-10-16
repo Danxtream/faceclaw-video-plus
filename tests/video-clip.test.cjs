@@ -75,3 +75,35 @@ test('Every VCL must have a mapped picture, with bounded hidden preroll', () => 
   long.clip.pictures.forEach((p, i) => { p.idr = i === 0; long.audit.nals[p.nal].type = long.clip.h264.nals[p.nal].type = p.idr ? 5 : 1; });
   assert.throws(() => parseVideoClip(long.clip, long.audit), /preroll/);
 });
+
+function slicedFixture(types = [7, 8, 6, 5, 5, 5, 1, 1, 1], finishing = [5, 7, 8]) {
+  const hash = 'a'.repeat(64);
+  const nals = types.map((type, i) => ({offset: 4 + i * 10, bytes: 6, type, sha256: hash}));
+  const audit = {bytes: nals.at(-1).offset + 6, sha256: hash, nals};
+  const clip = {version: 1, width: 320, height: 192, fps: 15, range: 'full', deblocking: false,
+    duration: Math.round(finishing.length * 1000 / 15), encoder: 'test', options: [], keyframes: 'large',
+    source: {name: 'test.mp4', bytes: 20, sha256: hash}, h264: structuredClone(audit),
+    pictures: finishing.map((nal, i) => ({pts: Math.round(i * 1000 / 15), nal, idr: i === 0, sps: 0, pps: 1}))};
+  return {clip, audit};
+}
+
+test('Large-keyframe clips may split pictures into consecutive slices and record each first slice', () => {
+  const {clip, audit} = slicedFixture();
+  const parsed = parseVideoClip(clip, audit);
+  assert.deepEqual(parsed.pictures.map(p => [p.first, p.nal]), [[3, 5], [6, 7], [8, 8]]);
+  assert.equal(parsed.slices, true);
+  const plain = fixture();
+  assert.equal(parseVideoClip(plain.clip, plain.audit).slices, false);
+  assert.deepEqual(parseVideoClip(plain.clip, plain.audit).pictures.map(p => p.first), [3, 4, 5, 6, 7]);
+});
+
+test('Split pictures stay refused without Large keyframes, across parameter sets or mixed slice types', () => {
+  const unmarked = slicedFixture(); delete unmarked.clip.keyframes;
+  assert.throws(() => parseVideoClip(unmarked.clip, unmarked.audit), /Multiple or unmapped VCL/);
+  const parameterSet = slicedFixture([7, 8, 6, 5, 8, 5, 1, 1, 1]);
+  assert.throws(() => parseVideoClip(parameterSet.clip, parameterSet.audit), /Multiple or unmapped VCL|active SPS\/PPS/);
+  const mixed = slicedFixture([7, 8, 6, 5, 5, 5, 5, 1, 1], [5, 7, 8]);
+  assert.throws(() => parseVideoClip(mixed.clip, mixed.audit), /Multiple or unmapped VCL/);
+  const unknown = slicedFixture(); unknown.clip.keyframes = 'huge';
+  assert.throws(() => parseVideoClip(unknown.clip, unknown.audit), /keyframe size/);
+});

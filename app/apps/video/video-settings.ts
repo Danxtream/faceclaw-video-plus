@@ -29,9 +29,15 @@ export const videoConversionHeightSetting = new ConfigSettingEnum<"192" | "176">
   values: ["192", "176"], formatValue: value => "320x" + value,
 });
 /** How the converter turns color into gray; applies to the next conversion only. */
-export const videoConversionContrastSetting = new ConfigSettingEnum<"default" | "medium" | "high">({
+export const videoConversionContrastSetting = new ConfigSettingEnum<"default" | "medium" | "high" | "veryhigh">({
   id: "video-conversion-contrast", label: "Contrast", storageKey: "video.conversionContrast", defaultValue: "default",
-  values: ["default", "medium", "high"], formatValue: value => value === "default" ? "Default" : value === "medium" ? "Medium" : "High",
+  values: ["default", "medium", "high", "veryhigh"],
+  formatValue: value => value === "default" ? "Default" : value === "medium" ? "Medium" : value === "high" ? "High" : "Very high",
+});
+/** Large keyframes need firmware that decodes several slices per picture; applies to the next conversion. */
+export const videoConversionKeyframesSetting = new ConfigSettingEnum<"default" | "large">({
+  id: "video-conversion-keyframes", label: "Keyframes", storageKey: "video.conversionKeyframes", defaultValue: "default",
+  values: ["default", "large"], formatValue: value => value === "default" ? "Default" : "Large",
 });
 export const videoDetailedReportsSetting = new ConfigSettingBoolean({
   id: "video-detailed-reports", label: "Video detailed reports", storageKey: "video.detailedReports", defaultValue: false,

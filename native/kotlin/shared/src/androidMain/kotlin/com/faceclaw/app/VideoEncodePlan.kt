@@ -42,11 +42,26 @@ enum class VideoContrast(val id: String) {
     /** The green channel alone, so skin's color differences also become brightness steps. */
     MEDIUM("medium"),
     /** Medium plus a local-contrast boost. */
-    HIGH("high");
+    HIGH("high"),
+    /** High's boost over larger shapes (blur sigma 6). */
+    VERY_HIGH("veryhigh");
 
     companion object {
         fun of(id: String): VideoContrast = entries.firstOrNull { it.id == id }
-            ?: throw IllegalArgumentException("Choose Default, Medium or High contrast")
+            ?: throw IllegalArgumentException("Choose Default, Medium, High or Very high contrast")
+    }
+}
+
+/** How large keyframes may grow, chosen per conversion. */
+enum class VideoKeyframes(val id: String) {
+    /** One slice per picture within the NAL limit; plays on every firmware. */
+    DEFAULT("default"),
+    /** Detailed keyframes up to about 10 KB, split into slices; needs multi-slice firmware. */
+    LARGE("large");
+
+    companion object {
+        fun of(id: String): VideoKeyframes = entries.firstOrNull { it.id == id }
+            ?: throw IllegalArgumentException("Choose Default or Large keyframes")
     }
 }
 
@@ -59,25 +74,33 @@ object VideoEncodePlan {
     // measured 3.6 KB) while the 110 kbps cap stays.
     private const val RECIPE = "scenecut=0:crf=12:" +
         "aq-mode=2:aq-strength=1.0:chroma-qp-offset=-2:subme=8:trellis=2:me=hex:merange=16:" +
-        "rc-lookahead=50:ipratio=1.00:vbv-maxrate=110:vbv-bufsize=32:threads=1:range=pc"
+        "rc-lookahead=50:ipratio=1.00:vbv-maxrate=110:"
+    private const val RECIPE_TAIL = "threads=1:range=pc"
+    // Large keyframes: detailed keyframes needed about 9-10 KB before their blur disappeared, so
+    // a 96 kbit buffer lets them grow that far (the 110 kbps cap stays) and slice-max-size splits
+    // any picture into slices that each stay under the 4,086-byte NAL limit.
+    private const val LARGE_KEYFRAMES = "vbv-bufsize=96:slice-max-size=4000:"
     // Y + 0.8 * (Y - blur), with the boost fading only within 64 levels of the end it would push
     // toward, so bright skin still gains darker texture but nothing new clips to white or black.
     // lut2 evaluates the expression once into a table; a per-pixel blend expression gave the same
     // pictures but made the whole conversion about 26% slower.
-    private const val HIGH_BOOST = "split[o][s];[s]gblur=sigma=3[bl];[o][bl]lut2=c0=" +
+    private fun boost(sigma: Int) = "split[o][s];[s]gblur=sigma=$sigma[bl];[o][bl]$BOOST_EXPRESSION"
+    private const val BOOST_EXPRESSION = "lut2=c0=" +
         "'clip(x+0.8*(x-y)*if(gt(x\\,y)\\,min(1\\,(255-x)/64)\\,min(1\\,x/64))\\,0\\,255)'"
 
     /** Refuse unsupported recipes before starting a foreground job. */
     fun checkRate(fps: Int) { require(fps in listOf(10, 15, 20)) { "Choose 10, 15 or 20 fps and re-convert this clip" } }
     @JvmStatic fun arguments(input: String, output: String, deblocking: Boolean, fps: Int = 15,
-        geometry: VideoFrameGeometry = VideoFrameGeometry(320,192), contrast: VideoContrast = VideoContrast.DEFAULT): Array<String> {
+        geometry: VideoFrameGeometry = VideoFrameGeometry(320,192), contrast: VideoContrast = VideoContrast.DEFAULT,
+        keyframes: VideoKeyframes = VideoKeyframes.DEFAULT): Array<String> {
         checkRate(fps)
         require(input.isNotBlank() && output.isNotBlank() && input != output && !input.contains('\u0000') && !output.contains('\u0000'))
         val size = "scale=${geometry.pictureWidth}:${geometry.pictureHeight}:flags=lanczos:in_range=auto"
         val gray = when (contrast) {
             VideoContrast.DEFAULT -> "$size:out_range=full,format=gray"
             VideoContrast.MEDIUM -> "$size,format=gbrp,extractplanes=g"
-            VideoContrast.HIGH -> "$size,format=gbrp,extractplanes=g,$HIGH_BOOST"
+            VideoContrast.HIGH -> "$size,format=gbrp,extractplanes=g,${boost(3)}"
+            VideoContrast.VERY_HIGH -> "$size,format=gbrp,extractplanes=g,${boost(6)}"
         }
         // Gray permits odd picture edges before the final even-sized 4:2:0 canvas.
         val filter = "$gray,setsar=1," +
@@ -86,7 +109,8 @@ object VideoEncodePlan {
             "-vf", "fps=$fps,$filter", "-c:v", "libx264", "-profile:v", "baseline", "-pix_fmt", "yuvj420p", "-color_range", "pc",
             // Preserve eight-second GOPs; x264's minimum is half a GOP plus one picture.
             "-x264-params", "ref=1:bframes=0:weightp=0:8x8dct=0:cabac=0:keyint=${fps * 8}:min-keyint=${fps * 4 + 1}:" +
-                RECIPE + if (deblocking) ":deblock=0,0" else ":no-deblock=1", "-f", "h264", output)
+                RECIPE + (if (keyframes == VideoKeyframes.LARGE) LARGE_KEYFRAMES else "vbv-bufsize=32:") + RECIPE_TAIL +
+                if (deblocking) ":deblock=0,0" else ":no-deblock=1", "-f", "h264", output)
     }
 }
 
@@ -98,7 +122,7 @@ data class VideoPictureTime(val pts: Long, val nal: Int, val idr: Boolean, val s
 /** Join decoded access-unit offsets to the bounded native scan, one VCL per picture. */
 object VideoPictureMap {
     fun build(audit: VideoFileReader.Audit, decoded: List<VideoDecodedPicture>, fps: Int = 15,
-        geometry: VideoFrameGeometry = VideoFrameGeometry(320,192)): List<VideoPictureTime> {
+        geometry: VideoFrameGeometry = VideoFrameGeometry(320,192), multiSlice: Boolean = false): List<VideoPictureTime> {
         VideoEncodePlan.checkRate(fps)
         require(decoded.isNotEmpty()) { "Converter decoded no pictures" }
         val result = ArrayList<VideoPictureTime>()
@@ -119,7 +143,9 @@ object VideoPictureMap {
                 when (nal.type) {
                     7 -> sps = index
                     8 -> pps = index
-                    1, 5 -> { require(finishing < 0) { "Multiple slices per picture are unsupported" }; finishing = index }
+                    // Large-keyframe clips may split a picture into slices of one type; the last finishes it.
+                    1, 5 -> { require(finishing < 0 || multiSlice && audit.nals[finishing].type == nal.type) {
+                        "Multiple slices per picture are unsupported" }; finishing = index }
                 }
                 index++
             }

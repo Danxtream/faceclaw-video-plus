@@ -473,6 +473,39 @@ test('Pause waits actual state; paused seek resets, restores and displays a fres
   assert.equal(send[3][0][0] & 31, 7); assert.equal(send[3][1][0] & 31, 8); assert.equal(send[3][2][0] & 31, 5);
 });
 
+// Large keyframes: picture 10's IDR is two slices (NALs 13 and 14); `nal` names the last one.
+function slicedFixture() {
+  const f = fixture(20);
+  f.clip.h264.nals.splice(13, 0, {...f.clip.h264.nals[13]});
+  for (const picture of f.clip.pictures.slice(10)) picture.nal++;
+  f.clip.pictures[10].first = 13;
+  f.clip.slices = true;
+  return f;
+}
+
+test('Large-keyframe clips are refused before START unless both lenses decode split pictures', async () => {
+  const f = slicedFixture();
+  await assert.rejects(f.player.run(), /Update both lenses to play this video's large keyframes/);
+  assert.ok(!f.calls.some(row => Array.isArray(row) && row[0] === 'start'));
+});
+
+test('A seek into a split keyframe sends every slice from its first one', async () => {
+  const f = slicedFixture(); let flow;
+  f.protocol.slices = true;
+  f.onView = v => {
+    if (v.position > 0 && !flow) flow = f.player.seek(750);
+  };
+  await f.player.run(); await flow;
+  const starts = f.calls.filter(row => Array.isArray(row) && row[0] === 'start');
+  assert.equal(starts.length, 2);
+  const sent = f.calls.filter(row => Array.isArray(row) && row[0] === 'send' && row[1] === starts[1][1]).flatMap(row => row[3]);
+  assert.deepEqual(sent.slice(0, 4).map(row => row[1]), [0, 1, 13, 14]);
+  // After SPS and PPS, the keyframe's picture completes at its second slice.
+  const after = f.calls.slice(f.calls.indexOf(starts[1]));
+  assert.deepEqual(after.find(row => Array.isArray(row) && row[0] === 'metadata').slice(1), [1, 3, f.clip.pictures[10].pts]);
+  assert.equal(f.state.shown.at(-1).pts, f.clip.pictures[19].pts);
+});
+
 test('An idle POWER error left by an interrupted stream does not block the next playback', async () => {
   const f = fixture(20);
   f.state.staleError = 16;

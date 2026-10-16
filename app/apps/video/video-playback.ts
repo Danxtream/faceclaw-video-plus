@@ -26,7 +26,7 @@ export type VideoPlaybackView = {
   cleanupFailed: boolean;
   hostPhy: string;
 };
-type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement" | "timedNal">>;
+type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement" | "timedNal" | "slices">>;
 type Intent = { kind: "pause" | "seek" | "scale" | "menu"; value: number | boolean; resolve: () => void; reject: (error: unknown) => void };
 type Generation = { stream: number; tokens: number[]; idr: number; target: number; prefix: number[]; firstNal: number; index: number; count: number; metadata: number; paused: boolean; reached: boolean; oldPhy: VideoPhy[]; started: number; anchor: VideoPhy[]; anchorAt: number; anchorUncertainty: number; detailedReports: boolean; pump?: VideoUploadPump };
 
@@ -201,9 +201,12 @@ export class VideoPlayback {
     if (rows.some((row) => row.state !== 0)) throw new Error("Video START requires idle owners");
     const stream = Math.max(...rows.map((row) => row.high)) + 1;
     if (stream >= 0xffffffff) throw new Error("Video stream identity exhausted");
+    if (this.source.clip.slices && !this.protocol.slices)
+      throw new Error("Update both lenses to play this video's large keyframes.");
     const { frame: target, idr, preroll } = videoSeekPoint(this.source.clip, targetMs);
     const picture = this.source.clip.pictures[idr];
-    const firstNal = idr === 0 ? 0 : picture.nal;
+    // A seek starts at the keyframe's first slice; `nal` is its last one.
+    const firstNal = idr === 0 ? 0 : picture.first ?? picture.nal;
     const prefix = idr === 0 ? [] : [picture.sps, picture.pps];
     const oldPhy = await this.cleanStartPhy();
     if (this.stopping) throw new VideoCancelled();

@@ -10,17 +10,20 @@ test('Converter starts independently of glasses and requires explicit overwrite'
     {'@nativescript/core': {Utils: {android: {getApplicationContext: () => 'context'}}}});
   const bridge = load('app/native/video-converter.ts');
   bridge.convertVideo('source.mp4');
-  assert.deepEqual(calls[0], ['start', 'context', 'source.mp4', false, false, 15,176,'default']);
+  assert.deepEqual(calls[0], ['start', 'context', 'source.mp4', false, false, 15,176,'default','default']);
   bridge.convertVideo('source.mp4', true, true);
-  assert.deepEqual(calls[1], ['start', 'context', 'source.mp4', true, true, 15,176,'default']);
+  assert.deepEqual(calls[1], ['start', 'context', 'source.mp4', true, true, 15,176,'default','default']);
   bridge.convertVideo('source.mp4',false,false,10,192);
-  assert.deepEqual(calls.pop(),['start','context','source.mp4',false,false,10,192,'default']);
-  for (const contrast of ['medium','high']) {
+  assert.deepEqual(calls.pop(),['start','context','source.mp4',false,false,10,192,'default','default']);
+  for (const contrast of ['medium','high','veryhigh']) {
     bridge.convertVideo('source.mp4',false,false,10,176,contrast);
-    assert.deepEqual(calls.pop(),['start','context','source.mp4',false,false,10,176,contrast]);
+    assert.deepEqual(calls.pop(),['start','context','source.mp4',false,false,10,176,contrast,'default']);
   }
+  bridge.convertVideo('source.mp4',false,false,10,176,'high','large');
+  assert.deepEqual(calls.pop(),['start','context','source.mp4',false,false,10,176,'high','large']);
+  assert.throws(()=>bridge.convertVideo('source.mp4',false,false,15,176,'high','huge'),/Default or Large keyframes/);
   assert.throws(()=>bridge.convertVideo('source.mp4',false,false,15,180),/320x192 or 320x176/);
-  assert.throws(()=>bridge.convertVideo('source.mp4',false,false,15,176,'extra'),/Default, Medium or High/);
+  assert.throws(()=>bridge.convertVideo('source.mp4',false,false,15,176,'extra'),/Default, Medium, High or Very high/);
   state.running = true;
   assert.throws(() => bridge.convertVideo('other.mp4'), /running/);
   bridge.cancelVideoConversion(); assert.deepEqual(calls[2], ['cancel', 'context']);

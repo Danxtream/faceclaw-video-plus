@@ -3,13 +3,18 @@ import { videoGeometry, type VideoGeometry } from "./video-geometry";
 
 /** Audited conversion metadata; file offsets and pictures remain distinct. */
 export type VideoNal = { offset: number; bytes: number; type: number; sha256: string };
-export type VideoPicture = { pts: number; nal: number; idr: boolean; sps: number; pps: number };
+/** `nal` is the finishing slice; `first` (filled in by parseVideoClip) is the picture's first slice. */
+export type VideoPicture = { pts: number; nal: number; idr: boolean; sps: number; pps: number; first?: number };
 export type VideoAudit = { bytes: number; sha256: string; nals: VideoNal[] };
 export type VideoClip = VideoGeometry & {
   version: 1; fps: VideoPictureRate; duration: number;
   range: "full"; deblocking: boolean; encoder: string; options: string[];
   source: { name: string; bytes: number; sha256: string };
   h264: VideoAudit; pictures: VideoPicture[];
+  /** "large" clips may split big pictures into several slices; older sidecars have no field. */
+  keyframes?: "default" | "large";
+  /** True when some picture has more than one slice (firmware must support it). */
+  slices?: boolean;
 };
 
 function integer(value: unknown, min: number, max = 0xfffffffe): value is number {
@@ -39,6 +44,11 @@ export function parseVideoClip(value: unknown, audit: VideoAudit): VideoClip {
       throw new Error("Audited NAL index does not match video source");
   }
   if (!Array.isArray(clip.pictures) || !clip.pictures.length) throw new Error("Missing audited picture map");
+  if (clip.keyframes !== undefined && clip.keyframes !== "default" && clip.keyframes !== "large")
+    throw new Error("Unsupported keyframe size; re-convert this clip.");
+  const large = clip.keyframes === "large";
+  const pictures: VideoPicture[] = [];
+  let slices = false;
   let lastNal = -1;
   let lastIdr = -1;
   let activeSps = -1;
@@ -48,12 +58,18 @@ export function parseVideoClip(value: unknown, audit: VideoAudit): VideoClip {
     if (!frame || frame.pts !== Math.round(i * 1000 / clip.fps) || !integer(frame.nal, 0, audit.nals.length - 1) ||
         frame.nal <= lastNal || typeof frame.idr !== "boolean" || !integer(frame.sps, 0, frame.nal - 1) ||
         !integer(frame.pps, 0, frame.nal - 1)) throw new Error("Invalid audited picture timeline");
+    // Large-keyframe clips split big pictures into consecutive slices of the
+    // finishing slice's type, with no parameter set between them.
+    let first = frame.nal;
+    while (large && first - 1 > lastNal && audit.nals[first - 1].type === audit.nals[frame.nal].type) first--;
     for (let n = lastNal + 1; n <= frame.nal; n++) {
       if (audit.nals[n].type === 7) activeSps = n;
       if (audit.nals[n].type === 8) activePps = n;
-      if ([1, 5].includes(audit.nals[n].type) && n !== frame.nal)
+      if ([1, 5].includes(audit.nals[n].type) && n < first)
         throw new Error("Multiple or unmapped VCL NALs are unsupported");
     }
+    if (first < frame.nal) slices = true;
+    pictures.push({ ...frame, first });
     if (frame.sps !== activeSps || frame.pps !== activePps || audit.nals[frame.sps].type !== 7 ||
         audit.nals[frame.pps].type !== 8 || audit.nals[frame.nal].type !== (frame.idr ? 5 : 1))
       throw new Error("Picture map lacks active SPS/PPS or correct finishing NAL");
@@ -63,7 +79,7 @@ export function parseVideoClip(value: unknown, audit: VideoAudit): VideoClip {
   }
   if (audit.nals.slice(lastNal + 1).some((nal) => [1, 5].includes(nal.type)) ||
       clip.duration !== Math.round(clip.pictures.length * 1000 / clip.fps)) throw new Error("Incomplete picture map or duration");
-  return { ...clip, ...videoGeometry(clip) };
+  return { ...clip, ...videoGeometry(clip), pictures, slices };
 }
 
 /** Nearest preceding IDR plus its active parameter sets, never a P-frame reset. */

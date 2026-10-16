@@ -89,12 +89,51 @@ class VideoConversionAuditTest {
         assertEquals("fps=10,scale=135:240:flags=lanczos:in_range=auto,format=gbrp,extractplanes=g," +
             "split[o][s];[s]gblur=sigma=3[bl];[o][bl]lut2=c0='clip(x+0.8*(x-y)*if(gt(x\\,y)\\,min(1\\,(255-x)/64)\\,min(1\\,x/64))\\,0\\,255)'$tail",
             filter(VideoContrast.HIGH))
+        assertEquals(filter(VideoContrast.HIGH).replace("gblur=sigma=3", "gblur=sigma=6"), filter(VideoContrast.VERY_HIGH))
         for (contrast in VideoContrast.entries) {
             val base = args(null).toMutableList().apply { removeAt(indexOf("-vf") + 1) }
             assertEquals(base, args(contrast).toMutableList().apply { removeAt(indexOf("-vf") + 1) })
         }
-        assertEquals(VideoContrast.entries, listOf("default","medium","high").map(VideoContrast::of))
+        assertEquals(VideoContrast.entries, listOf("default","medium","high","veryhigh").map(VideoContrast::of))
         assertFails { VideoContrast.of("extra") }
+    }
+
+    @Test fun largeKeyframesOnlyWidenTheBufferAndSplitSlices() {
+        fun args(keyframes: VideoKeyframes?) = if (keyframes == null) VideoEncodePlan.arguments("in.mp4","out.h264",false,10)
+            else VideoEncodePlan.arguments("in.mp4","out.h264",false,10,keyframes = keyframes)
+        fun x264(keyframes: VideoKeyframes?) = args(keyframes).let { it[it.indexOf("-x264-params") + 1] }
+        assertEquals(x264(null), x264(VideoKeyframes.DEFAULT))
+        assertTrue(x264(null).endsWith("ipratio=1.00:vbv-maxrate=110:vbv-bufsize=32:threads=1:range=pc:no-deblock=1"))
+        assertEquals(x264(null).replace("vbv-bufsize=32:", "vbv-bufsize=96:slice-max-size=4000:"), x264(VideoKeyframes.LARGE))
+        val base = args(null).toMutableList().apply { removeAt(indexOf("-x264-params") + 1) }
+        assertEquals(base, args(VideoKeyframes.LARGE).toMutableList().apply { removeAt(indexOf("-x264-params") + 1) })
+        assertEquals(VideoKeyframes.entries, listOf("default","large").map(VideoKeyframes::of))
+        assertFails { VideoKeyframes.of("huge") }
+    }
+
+    @Test fun multiSliceClipsMapEachPictureToItsLastSlice() {
+        // IDR in three slices, then a P picture in two.
+        val nals = listOf(7, 8, 5, 5, 5, 1, 1).mapIndexed { index, type -> VideoFileReader.Nal(index * 8L + 4, 4, type, "a".repeat(64)) }
+        val audit = VideoFileReader.Audit(56, "b".repeat(64), nals)
+        val frames = listOf(VideoDecodedPicture(0, 40, true, 320, 192, "yuvj420p", "I", 0, 0),
+            VideoDecodedPicture(40, 16, false, 320, 192, "yuvj420p", "P", 0, 0))
+        assertEquals(listOf(4, 6), VideoPictureMap.build(audit, frames, multiSlice = true).map { it.nal })
+        assertFails { VideoPictureMap.build(audit, frames) }
+        val mixed = audit.copy(nals = nals.mapIndexed { i, n -> if (i == 3) n.copy(type = 1) else n })
+        assertFails { VideoPictureMap.build(mixed, frames, multiSlice = true) }
+    }
+
+    @Test fun headerAuditCountsPicturesNotSlicesForLargeKeyframes() {
+        val headers = section("Sequence Parameter Set", sps + ("time_scale" to 20L)) + section("Picture Parameter Set", pps) +
+            section("Slice Header", slice(false)) + section("Slice Header", slice(false) + ("first_mb_in_slice" to 13L))
+        val audit = VideoHeaderAudit(false, 10, multiSlice = true)
+        audit.accept(headers)
+        audit.finish()
+        assertEquals(2, audit.slices)
+        assertEquals(1, audit.pictures)
+        val single = VideoHeaderAudit(false, 10)
+        single.accept(headers)
+        assertFails { single.finish() }
     }
 
     @Test fun pictureKeepsItsShapeInsideTheFrameWithUnlitBars() {

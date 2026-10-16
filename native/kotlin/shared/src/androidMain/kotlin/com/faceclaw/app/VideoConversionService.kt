@@ -40,7 +40,8 @@ class VideoConversionService : Service() {
             wake!!.acquire(6 * 60 * 60 * 1000L)
             val conversion = VideoConversion(File(path), intent.getBooleanExtra("deblocking", false), intent.getBooleanExtra("overwrite", false),
                 intent.getIntExtra("fps", 15),intent.getIntExtra("landscapeHeight",176),
-                VideoContrast.of(intent.getStringExtra("contrast") ?: VideoContrast.DEFAULT.id)) { stage, progress ->
+                VideoContrast.of(intent.getStringExtra("contrast") ?: VideoContrast.DEFAULT.id),
+                VideoKeyframes.of(intent.getStringExtra("keyframes") ?: VideoKeyframes.DEFAULT.id)) { stage, progress ->
                 state = JSONObject().put("running", true).put("stage", stage).put("progress", progress).put("source", path).toString()
                 val now = System.currentTimeMillis()
                 if (now - lastNotification >= 500) {
@@ -86,13 +87,14 @@ class VideoConversionService : Service() {
         @Volatile private var state = "{\"running\":false,\"stage\":\"idle\",\"progress\":0}"
         @JvmStatic fun snapshotJson(): String = state
         @JvmStatic fun start(context: Context, source: String, deblocking: Boolean, overwrite: Boolean, fps: Int, landscapeHeight: Int,
-            contrast: String) {
+            contrast: String, keyframes: String) {
             VideoEncodePlan.checkRate(fps)
             require(landscapeHeight in listOf(176,192))
             VideoContrast.of(contrast)
+            VideoKeyframes.of(keyframes)
             val intent = Intent(context, VideoConversionService::class.java).setAction(START).putExtra("source", source)
                 .putExtra("deblocking", deblocking).putExtra("overwrite", overwrite).putExtra("fps", fps).putExtra("landscapeHeight",landscapeHeight)
-                .putExtra("contrast", contrast)
+                .putExtra("contrast", contrast).putExtra("keyframes", keyframes)
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else context.startService(intent)
         }
         @JvmStatic fun cancel(context: Context) { context.startService(Intent(context, VideoConversionService::class.java).setAction(CANCEL)) }

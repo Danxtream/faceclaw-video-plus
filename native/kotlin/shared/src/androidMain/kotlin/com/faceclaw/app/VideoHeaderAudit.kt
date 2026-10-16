@@ -2,7 +2,7 @@ package com.faceclaw.app
 
 /** Validate fields parsed by FFmpeg trace_headers, not a second H.264 parser. */
 class VideoHeaderAudit(private val deblocking: Boolean, private val fps: Int = 15,
-    private val geometry: VideoFrameGeometry = VideoFrameGeometry(320,192)) {
+    private val geometry: VideoFrameGeometry = VideoFrameGeometry(320,192), private val multiSlice: Boolean = false) {
     init { VideoEncodePlan.checkRate(fps) }
     private val fields = HashMap<String, Long>()
     private val sps = HashSet<Long>()
@@ -12,6 +12,9 @@ class VideoHeaderAudit(private val deblocking: Boolean, private val fps: Int = 1
     private var failed: String? = null
     private var closed = false
     var slices = 0
+        private set
+    /** Slices that start a picture (first_mb_in_slice 0); equals slices unless multiSlice. */
+    var pictures = 0
         private set
     var parameterSets = 0
         private set
@@ -78,7 +81,8 @@ class VideoHeaderAudit(private val deblocking: Boolean, private val fps: Int = 1
                 pps[id] = source; parameterSets++
             }
             "slice" -> {
-                equals("first_mb_in_slice", 0)
+                if (!multiSlice) equals("first_mb_in_slice", 0)
+                if (field("first_mb_in_slice") == 0L) pictures++
                 require(field("slice_type") % 5 in listOf(0L, 2L) && field("nal_unit_type") in listOf(1L, 5L)) { "Unsupported video picture type" }
                 require(field("pic_parameter_set_id") in pps) { "Slice lacks an active PPS" }
                 equals("disable_deblocking_filter_idc", if (deblocking) 0 else 1)

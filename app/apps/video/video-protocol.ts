@@ -78,8 +78,11 @@ export class VideoProtocol {
   private timed = false;
   private geometry = false;
   private pictureStyle = false;
+  private multiSlice = false;
   /** Both lenses accept a picture's frame time inside its VCL NAL record. */
   get timedNal(): boolean { return this.timed; }
+  /** Both lenses decode pictures split into several slices (large-keyframe clips). */
+  get slices(): boolean { return this.multiSlice; }
   constructor(private readonly backend: VideoBackend, private readonly reserve: () => number | Promise<number>) {
     this.epoch = backend.epoch();
   }
@@ -147,6 +150,8 @@ export class VideoProtocol {
     this.timed = rows.every(row => !!(row[7] & 128));
     this.geometry = rows.every(row => !!(row[4] & 128));
     this.pictureStyle = rows.every(row => !!(row[4] & 64));
+    // Bit 8 of byte 7 was reserved before multi-slice pictures; older firmware leaves it clear.
+    this.multiSlice = rows.every(row => !!(row[7] & 8));
     this.backend.configureEvidence?.(this.evidence);
   }
   measurementSnapshot(): unknown { return this.backend.measurementSnapshot?.() ?? null; }

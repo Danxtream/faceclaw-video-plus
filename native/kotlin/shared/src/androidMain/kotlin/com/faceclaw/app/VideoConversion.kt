@@ -71,6 +71,7 @@ internal fun videoDecodedPictures(frames: BufferedReader, packets: BufferedReade
 class VideoConversion(private val input: File, private val deblocking: Boolean, private val overwrite: Boolean,
     private val fps: Int = 15, private val landscapeHeight: Int = 176,
     private val contrast: VideoContrast = VideoContrast.DEFAULT,
+    private val keyframes: VideoKeyframes = VideoKeyframes.DEFAULT,
     private val progress: (String, Double) -> Unit) {
     init { VideoEncodePlan.checkRate(fps); require(landscapeHeight in listOf(176,192)) }
     private val cancelled = AtomicBoolean(false)
@@ -151,7 +152,7 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
                 if (sideData.getJSONObject(i).has("rotation")) rotation = sideData.getJSONObject(i).getInt("rotation")
             val geometry = VideoFrameGeometry.fit(stream.getInt("width"),stream.getInt("height"),
                 stream.optString("sample_aspect_ratio","1:1"),rotation,landscapeHeight)
-            val args = VideoEncodePlan.arguments(input.path, publication.candidate.path, deblocking, fps, geometry, contrast)
+            val args = VideoEncodePlan.arguments(input.path, publication.candidate.path, deblocking, fps, geometry, contrast, keyframes)
             progress("encoding", 0.0)
             execute(args, duration)
             progress("auditing headers", 0.99)
@@ -161,7 +162,7 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
                 execute(arrayOf("-nostdin", "-report", "-v", "error", "-f", "h264", "-i", publication.candidate.path,
                     "-map", "0:v:0", "-c:v", "copy", "-bsf:v", "trace_headers", "-f", "null", "-"))
             }
-            val headerAudit = VideoHeaderAudit(deblocking, fps, geometry)
+            val headerAudit = VideoHeaderAudit(deblocking, fps, geometry, keyframes == VideoKeyframes.LARGE)
             publication.report.bufferedReader().useLines { lines -> lines.forEach { checkActive(); headerAudit.accept(it + "\n") } }
             headerAudit.finish()
             val audit = VideoFileReader.audit(publication.candidate)
@@ -175,15 +176,15 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
             val frames = publication.frames.bufferedReader().use { decoded ->
                 publication.packets.bufferedReader().use { packets -> videoDecodedPictures(decoded, packets, ::checkActive) }
             }
-            val pictures = VideoPictureMap.build(audit, frames, fps, geometry)
-            require(headerAudit.slices == pictures.size) { "Header and decoded picture counts disagree" }
+            val pictures = VideoPictureMap.build(audit, frames, fps, geometry, keyframes == VideoKeyframes.LARGE)
+            require(headerAudit.pictures == pictures.size) { "Header and decoded picture counts disagree" }
             require(input.length() == bytes && input.lastModified() == modified && hash(input) == sourceHash) { "MP4 changed during conversion" }
             checkActive()
             val sidecar = JSONObject().put("version", 1).put("width", geometry.width).put("height", geometry.height).put("fps", fps)
                 .put("picture",JSONObject().put("x",geometry.x).put("y",geometry.y)
                     .put("width",geometry.pictureWidth).put("height",geometry.pictureHeight))
                 .put("duration", (pictures.size * 1000L + fps / 2) / fps).put("range", "full").put("deblocking", deblocking)
-                .put("contrast", contrast.id)
+                .put("contrast", contrast.id).put("keyframes", keyframes.id)
                 .put("encoder", "${VideoEncodePlan.ENCODER}; FFmpeg ${FFmpegKitConfig.getFFmpegVersion()}")
                 .put("options", JSONArray(args.toList())).put("source", JSONObject().put("name", input.name).put("bytes", bytes).put("sha256", sourceHash))
                 .put("h264", JSONObject().put("bytes", audit.bytes).put("sha256", audit.sha256)
