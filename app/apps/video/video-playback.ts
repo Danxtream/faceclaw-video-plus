@@ -365,7 +365,7 @@ export class VideoPlayback {
     }
     const settled = await this.settle(request.kind === "pause" ? Boolean(request.value) : undefined);
     const wasPaused = this.view.paused;
-    this.view.paused = settled.every((row) => row.paused);
+    this.setPaused(settled.every((row) => row.paused));
     if (wasPaused !== this.view.paused) {
       this.copyFirst = this.copyPrevious = null;
       // A resumed picture starts moving now from the frame the lenses held.
@@ -650,10 +650,15 @@ export class VideoPlayback {
       speed, Math.max(100, uncertainty));
     this.notify();
   }
+  /** Paused time is not missing progress, so resuming restarts the copy-progress timer. */
+  private setPaused(paused: boolean): void {
+    if (this.view.paused && !paused) this.progressAt = this.clock();
+    this.view.paused = paused;
+  }
   private updatePlayback(rows: VideoPlaybackState[]): void {
     const g = this.generation!;
     if (rows.some((row) => row.result)) throw new Error("Video playback owner report refused");
-    this.view.paused = g.paused && !g.reached || rows.every((row) => row.paused);
+    this.setPaused(g.paused && !g.reached || rows.every((row) => row.paused));
     const shown = Math.min(...rows.map((row) => row.shown));
     if (shown !== this.progress) { this.progress = shown; this.progressAt = this.clock(); }
     this.ended = g.index === g.count && this.shownCount === this.source.clip.pictures.length - g.target &&

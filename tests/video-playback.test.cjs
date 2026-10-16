@@ -470,6 +470,20 @@ test('Pause waits actual state; paused seek resets, restores and displays a fres
   assert.equal(send[3][0][0] & 31, 7); assert.equal(send[3][1][0] & 31, 8); assert.equal(send[3][2][0] & 31, 5);
 });
 
+test('A pause longer than the copy-progress limit resumes without a stall error', async () => {
+  const f = fixture(20); let flow;
+  f.onView = v => {
+    if (v.position > 0 && !flow) flow = (async () => {
+      await f.player.pause(true);
+      await f.player.sleep(31_000);
+      await f.player.pause(false);
+    })();
+  };
+  await f.player.run(); await flow;
+  assert.equal(f.player.view.error, null);
+  assert.equal(f.state.shown.length, 20);
+});
+
 test('Firmware menu apply hands seek to the same writer and scale uses values 1/2', async () => {
   const f = fixture(20); let flow;
   f.onView = v => {
