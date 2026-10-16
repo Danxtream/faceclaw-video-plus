@@ -12,7 +12,7 @@ class VideoConversionAuditTest {
             assertTrue(args[args.indexOf("-vf")+1].startsWith("fps=$fps,scale=320:192:"))
             val recipe=args[args.indexOf("-x264-params")+1]
             assertTrue(recipe.contains("keyint=${fps*8}:min-keyint=${fps*4+1}:"))
-            assertTrue(recipe.contains("vbv-maxrate=110:vbv-bufsize=22:"))
+            assertTrue(recipe.contains("ipratio=1.00:vbv-maxrate=110:vbv-bufsize=32:"))
             val audit=VideoHeaderAudit(false,fps)
             audit.accept(section("Sequence Parameter Set",sps+("time_scale" to fps*2L))+
                 section("Picture Parameter Set",pps)+section("Slice Header",slice(false)))
@@ -71,7 +71,7 @@ class VideoConversionAuditTest {
         assertTrue(off.contains("libx264") && off.contains("baseline"))
         assertTrue(off[off.indexOf("-x264-params") + 1].endsWith(":no-deblock=1"))
         assertTrue(on[on.indexOf("-x264-params") + 1].endsWith(":deblock=0,0"))
-        assertTrue(off[off.indexOf("-x264-params") + 1].contains("vbv-maxrate=110:vbv-bufsize=22"))
+        assertTrue(off[off.indexOf("-x264-params") + 1].contains("ipratio=1.00:vbv-maxrate=110:vbv-bufsize=32"))
         assertTrue(off.none { it.contains("slice-max") || it.contains("cabac=1") })
         assertFails { VideoEncodePlan.arguments("same", "same", false) }
     }

@@ -53,9 +53,13 @@ enum class VideoContrast(val id: String) {
 /** Fixed high-effort recipe apart from the chosen clip cadence. */
 object VideoEncodePlan {
     const val ENCODER = "dev.ffmpegkit-maintained:ffmpeg-kit-min-gpl:8.1.7"
+    // Keyframes get a normal budget: ipratio 0.50 with a 22 kbit buffer made each keyframe about
+    // 4.5 dB worse than the pictures before it, a visible blur every 8 s that took ~8 pictures to
+    // recover. A 32 kbit buffer keeps every picture under the 4,086-byte NAL limit (largest
+    // measured 3.6 KB) while the 110 kbps cap stays.
     private const val RECIPE = "scenecut=0:crf=12:" +
         "aq-mode=2:aq-strength=1.0:chroma-qp-offset=-2:subme=8:trellis=2:me=hex:merange=16:" +
-        "rc-lookahead=50:ipratio=0.50:vbv-maxrate=110:vbv-bufsize=22:threads=1:range=pc"
+        "rc-lookahead=50:ipratio=1.00:vbv-maxrate=110:vbv-bufsize=32:threads=1:range=pc"
     // Y + 0.8 * (Y - blur), with the boost fading only within 64 levels of the end it would push
     // toward, so bright skin still gains darker texture but nothing new clips to white or black.
     // lut2 evaluates the expression once into a table; a per-pixel blend expression gave the same
