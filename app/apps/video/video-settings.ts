@@ -18,8 +18,8 @@ export const videoBlackFloorSetting = new ConfigSettingEnum<"0" | "0.25" | "0.5"
   values: ["0", "0.25", "0.5", "1"], formatValue: value => value,
 });
 /** Positive values play sound earlier than the picture, for headphones whose delay the phone
- *  does not report: 25 ms steps from 100 ms later to 400 ms earlier. */
-export const VIDEO_AUDIO_OFFSETS: readonly string[] = Array.from({length: 21}, (_, i) => String(i * 25 - 100));
+ *  does not report: 25 ms steps from 100 ms later to 1000 ms earlier. */
+export const VIDEO_AUDIO_OFFSETS: readonly string[] = Array.from({length: 45}, (_, i) => String(i * 25 - 100));
 export function formatVideoAudioOffset(value: string): string {
   const ms = Number(value);
   return ms === 0 ? "0 ms" : ms > 0 ? `Sound ${ms} ms earlier` : `Sound ${-ms} ms later`;

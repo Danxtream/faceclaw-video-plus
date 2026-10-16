@@ -20,6 +20,7 @@ test('Video settings retain old scale/radio keys with new defaults and generatio
   saved.set('video.blackFloor','bad');assert.equal(settings.configuredVideoOptions().blackFloor,1);
   saved.set('video.detailedReports', true); assert.equal(settings.configuredVideoOptions().detailedReports, true);
   saved.set('video.audioOffsetMs', '175'); assert.equal(settings.configuredVideoOptions().audioOffsetMs, 175);
+  for (const kept of ['400', '1000']) { saved.set('video.audioOffsetMs', kept); assert.equal(settings.configuredVideoOptions().audioOffsetMs, Number(kept)); }
   saved.set('video.audioOffsetMs', '170'); assert.equal(settings.configuredVideoOptions().audioOffsetMs, 0);
   saved.set('video.blePhy', '1m'); assert.equal(settings.configuredVideoOptions().radio, false);
   saved.set('video.blePhy', '2m'); assert.equal(settings.configuredVideoOptions().radio, true);
