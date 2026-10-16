@@ -76,6 +76,27 @@ class VideoConversionAuditTest {
         assertFails { VideoEncodePlan.arguments("same", "same", false) }
     }
 
+    @Test fun contrastChangesOnlyTheGrayStepAndDefaultKeepsTheEarlierRecipe() {
+        val geometry = VideoFrameGeometry(144,240,4,0,135,240)
+        fun args(contrast: VideoContrast?) = if (contrast == null) VideoEncodePlan.arguments("in.mp4","out.h264",false,10,geometry)
+            else VideoEncodePlan.arguments("in.mp4","out.h264",false,10,geometry,contrast)
+        fun filter(contrast: VideoContrast?) = args(contrast).let { it[it.indexOf("-vf") + 1] }
+        val tail = ",setsar=1,pad=144:240:4:0:color=black,format=yuvj420p"
+        assertEquals("fps=10,scale=135:240:flags=lanczos:in_range=auto:out_range=full,format=gray$tail", filter(null))
+        assertEquals(filter(null), filter(VideoContrast.DEFAULT))
+        assertEquals("fps=10,scale=135:240:flags=lanczos:in_range=auto,format=gbrp,extractplanes=g$tail", filter(VideoContrast.MEDIUM))
+        // The exact chain checked on PC FFmpeg against the per-pixel version (identical pictures).
+        assertEquals("fps=10,scale=135:240:flags=lanczos:in_range=auto,format=gbrp,extractplanes=g," +
+            "split[o][s];[s]gblur=sigma=3[bl];[o][bl]lut2=c0='clip(x+0.8*(x-y)*if(gt(x\\,y)\\,min(1\\,(255-x)/64)\\,min(1\\,x/64))\\,0\\,255)'$tail",
+            filter(VideoContrast.HIGH))
+        for (contrast in VideoContrast.entries) {
+            val base = args(null).toMutableList().apply { removeAt(indexOf("-vf") + 1) }
+            assertEquals(base, args(contrast).toMutableList().apply { removeAt(indexOf("-vf") + 1) })
+        }
+        assertEquals(VideoContrast.entries, listOf("default","medium","high").map(VideoContrast::of))
+        assertFails { VideoContrast.of("extra") }
+    }
+
     @Test fun pictureKeepsItsShapeInsideTheFrameWithUnlitBars() {
         val geometry = VideoFrameGeometry.fit(1920,1080)
         assertEquals(VideoFrameGeometry(320,176,3,0,313,176),geometry)

@@ -7,7 +7,7 @@ import { openPhoneVideo } from "../apps/video";
 import { activeVideoSession, observeVideoSession, type VideoSession } from "../apps/video/video-session";
 import { VideoSeekControls } from "./video-seek-controls";
 export { formatVideoTime } from "./video-seek-controls";
-import { videoRadioSetting, videoScaleSetting, videoDitherSetting, videoBlackFloorSetting, videoDeblockingSetting, videoConversionRateSetting, videoConversionHeightSetting } from "../apps/video/video-settings";
+import { videoRadioSetting, videoScaleSetting, videoDitherSetting, videoBlackFloorSetting, videoDeblockingSetting, videoConversionRateSetting, videoConversionHeightSetting, videoConversionContrastSetting } from "../apps/video/video-settings";
 
 /** Strict remote time input, with no changes to the source's fixed frame cadence. */
 export function parseVideoTime(text: string): number {
@@ -70,6 +70,7 @@ export class VideoViewModel extends Observable {
       this.set("blackFloorIndex", ["0", "0.25", "0.5", "1"].indexOf(videoBlackFloorSetting.get()));
       this.set("conversionRateIndex", ["10", "15", "20"].indexOf(videoConversionRateSetting.get()));
       this.set("conversionHeightIndex", ["192", "176"].indexOf(videoConversionHeightSetting.get()));
+      this.set("conversionContrastIndex", ["default", "medium", "high"].indexOf(videoConversionContrastSetting.get()));
       this.set("radioLabel", `Selected: ${videoRadioSetting.displayValue()} / Confirmed: ${view?.hostPhy ?? "Unknown"}`);
       const conversion = videoConversionState();
       this.set("conversionRunning", conversion.running); this.set("progress", conversion.progress * 100);
@@ -96,7 +97,7 @@ export class VideoViewModel extends Observable {
     const existing = resolveG2H264Path(entry.path) !== null || statPath(g2VideoMetadataPath(entry.path)) !== null;
     if (existing && !await Dialogs.confirm({title: "Replace converted video?", message: entry.name, okButtonText: "Replace", cancelButtonText: "Cancel"})) return;
     try { convertVideo(entry.path, videoDeblockingSetting.get(), existing, Number(videoConversionRateSetting.get()) as 10 | 15 | 20,
-      Number(videoConversionHeightSetting.get()) as 176 | 192); this.refresh(); }
+      Number(videoConversionHeightSetting.get()) as 176 | 192, videoConversionContrastSetting.get()); this.refresh(); }
     catch (error) { this.set("status", String(error)); }
   }
   onAccessTap(): void { requestAllFilesAccess(); }
@@ -111,6 +112,11 @@ export class VideoViewModel extends Observable {
     if (this.refreshing) return;
     const height = (["192", "176"] as const)[args.object?.selectedIndex ?? -1];
     if (height) videoConversionHeightSetting.set(height);
+  }
+  onConversionContrastChange(args: {object?: {selectedIndex?: number}}): void {
+    if (this.refreshing) return;
+    const contrast = (["default", "medium", "high"] as const)[args.object?.selectedIndex ?? -1];
+    if (contrast) videoConversionContrastSetting.set(contrast);
   }
   onToggleTap(): void { void this.action(async () => { const player = activeVideoSession()?.engine; if (player) await player.pause(!player.view.paused); }); }
   onStopTap(): void { activeVideoSession()?.stop(); }

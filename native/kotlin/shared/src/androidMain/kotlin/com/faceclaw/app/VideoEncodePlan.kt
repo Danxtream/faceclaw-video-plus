@@ -31,22 +31,52 @@ data class VideoFrameGeometry(val width: Int, val height: Int, val x: Int = 0, v
     }
 }
 
+/**
+ * How a color picture becomes the glasses' gray, chosen per conversion.
+ * Medium and High were picked by eye on the glasses (2026-10-16): skin in bright scenes
+ * showed too few shades with the standard luma mix.
+ */
+enum class VideoContrast(val id: String) {
+    /** Standard luma, as every earlier conversion. */
+    DEFAULT("default"),
+    /** The green channel alone, so skin's color differences also become brightness steps. */
+    MEDIUM("medium"),
+    /** Medium plus a local-contrast boost. */
+    HIGH("high");
+
+    companion object {
+        fun of(id: String): VideoContrast = entries.firstOrNull { it.id == id }
+            ?: throw IllegalArgumentException("Choose Default, Medium or High contrast")
+    }
+}
+
 /** Fixed high-effort recipe apart from the chosen clip cadence. */
 object VideoEncodePlan {
     const val ENCODER = "dev.ffmpegkit-maintained:ffmpeg-kit-min-gpl:8.1.7"
     private const val RECIPE = "scenecut=0:crf=12:" +
         "aq-mode=2:aq-strength=1.0:chroma-qp-offset=-2:subme=8:trellis=2:me=hex:merange=16:" +
         "rc-lookahead=50:ipratio=0.50:vbv-maxrate=110:vbv-bufsize=22:threads=1:range=pc"
+    // Y + 0.8 * (Y - blur), with the boost fading only within 64 levels of the end it would push
+    // toward, so bright skin still gains darker texture but nothing new clips to white or black.
+    // lut2 evaluates the expression once into a table; a per-pixel blend expression gave the same
+    // pictures but made the whole conversion about 26% slower.
+    private const val HIGH_BOOST = "split[o][s];[s]gblur=sigma=3[bl];[o][bl]lut2=c0=" +
+        "'clip(x+0.8*(x-y)*if(gt(x\\,y)\\,min(1\\,(255-x)/64)\\,min(1\\,x/64))\\,0\\,255)'"
 
     /** Refuse unsupported recipes before starting a foreground job. */
     fun checkRate(fps: Int) { require(fps in listOf(10, 15, 20)) { "Choose 10, 15 or 20 fps and re-convert this clip" } }
     @JvmStatic fun arguments(input: String, output: String, deblocking: Boolean, fps: Int = 15,
-        geometry: VideoFrameGeometry = VideoFrameGeometry(320,192)): Array<String> {
+        geometry: VideoFrameGeometry = VideoFrameGeometry(320,192), contrast: VideoContrast = VideoContrast.DEFAULT): Array<String> {
         checkRate(fps)
         require(input.isNotBlank() && output.isNotBlank() && input != output && !input.contains('\u0000') && !output.contains('\u0000'))
+        val size = "scale=${geometry.pictureWidth}:${geometry.pictureHeight}:flags=lanczos:in_range=auto"
+        val gray = when (contrast) {
+            VideoContrast.DEFAULT -> "$size:out_range=full,format=gray"
+            VideoContrast.MEDIUM -> "$size,format=gbrp,extractplanes=g"
+            VideoContrast.HIGH -> "$size,format=gbrp,extractplanes=g,$HIGH_BOOST"
+        }
         // Gray permits odd picture edges before the final even-sized 4:2:0 canvas.
-        val filter = "scale=${geometry.pictureWidth}:${geometry.pictureHeight}:" +
-            "flags=lanczos:in_range=auto:out_range=full,format=gray,setsar=1," +
+        val filter = "$gray,setsar=1," +
             "pad=${geometry.width}:${geometry.height}:${geometry.x}:${geometry.y}:color=black,format=yuvj420p"
         return arrayOf("-nostdin", "-v", "error", "-y", "-i", input, "-map", "0:v:0", "-an",
             "-vf", "fps=$fps,$filter", "-c:v", "libx264", "-profile:v", "baseline", "-pix_fmt", "yuvj420p", "-color_range", "pc",

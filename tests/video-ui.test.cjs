@@ -4,8 +4,8 @@ const fs = require('node:fs');
 const {loader} = require('./helpers/load-typescript.cjs');
 
 function modelFixture(strip = false) {
-  const calls = [], values = new Map(); let timer, observer;
-  const settings = key => ({get: () => values.get(key) ?? (key === 'radio' ? 'video' : key === 'scale' ? 'native' : key === 'rate' ? '15' : key === 'height' ? '176' : key === 'floor' ? '1' : false),
+  const calls = [], values = new Map(); let timer, observer, replace = false;
+  const settings = key => ({get: () => values.get(key) ?? (key === 'radio' ? 'video' : key === 'scale' ? 'native' : key === 'rate' ? '15' : key === 'height' ? '176' : key === 'floor' ? '1' : key === 'contrast' ? 'default' : false),
     set: value => {values.set(key, value); calls.push([key, value]);}, displayValue: () => values.get(key) === 'off' ? 'Off' : 'Video-only'});
   const player = {view: {active: true, paused: false, position: 1234, duration: 20000},
     pause: async value => calls.push(['pause', value]), seek: async value => calls.push(['seek', value]),
@@ -15,7 +15,7 @@ function modelFixture(strip = false) {
   class Observable {constructor() {this.values = new Map();} get(key) {return this.values.get(key);} set(key, value) {this.values.set(key, value);} }
   const load = loader({setInterval: callback => {timer = callback; return 1;}, clearInterval: () => calls.push(['clear-interval']),
     setTimeout: callback => {observer = callback; return 1;}, clearTimeout: () => calls.push(['clear-timeout'])}, {
-    '@nativescript/core': {Observable, Dialogs: {confirm: async () => false}, Frame: {topmost: () => ({goBack() {}})}},
+    '@nativescript/core': {Observable, Dialogs: {confirm: async () => replace}, Frame: {topmost: () => ({goBack() {}})}},
     '../g2/dashboard-controller': {dashboardController: {subscribe: callback => {callback({phase: 'connected'}); return () => calls.push(['unsub']);}, openVideoWindow: async () => calls.push(['window'])}},
     '../native/file-access': {hasAllFilesAccess: () => true, requestAllFilesAccess() {}, statPath: () => null},
     '../native/g2-video-library': {ensureG2VideoDirectory() {}, listG2Videos: () => files, listG2ConversionSources: () => files,
@@ -23,11 +23,12 @@ function modelFixture(strip = false) {
     '../native/video-converter': {convertVideo: (...args) => calls.push(['convert', ...args]), cancelVideoConversion() {}, videoConversionState: () => ({running: false, stage: 'idle', progress: 0})},
     '../apps/video': {openPhoneVideo: async path => calls.push(['play', path])},
     '../apps/video/video-session': {activeVideoSession: () => session, observeVideoSession: () => () => calls.push(['unsub-video'])},
-    '../apps/video/video-settings': {videoRadioSetting: settings('radio'), videoScaleSetting: settings('scale'), videoDitherSetting: settings('dither'), videoBlackFloorSetting: settings('floor'), videoDeblockingSetting: settings('deblock'), videoConversionRateSetting: settings('rate'),videoConversionHeightSetting: settings('height')},
+    '../apps/video/video-settings': {videoRadioSetting: settings('radio'), videoScaleSetting: settings('scale'), videoDitherSetting: settings('dither'), videoBlackFloorSetting: settings('floor'), videoDeblockingSetting: settings('deblock'), videoConversionRateSetting: settings('rate'),videoConversionHeightSetting: settings('height'),
+      videoConversionContrastSetting: settings('contrast')},
   });
   const module = load(strip ? 'app/phone-ui/video-strip.ts' : 'app/phone-ui/video-view-model.ts');
   return {module, calls, values, player, fixture: strip ? new module.VideoStripViewModel() : new module.VideoViewModel(),
-    tick: () => timer?.(), seekTick: () => observer?.()};
+    tick: () => timer?.(), seekTick: () => observer?.(), confirmReplace: value => {replace = value;}};
 }
 
 test('Time entry handles seconds and clock forms without accepting invalid or overflowing values', () => {
@@ -58,6 +59,22 @@ test('Canvas selector has only 192 and 176 with automatic orientation left to th
   f.fixture.onConversionHeightChange({object:{selectedIndex:2}});
   assert.equal(f.values.get('height'),'176');
   assert.ok(f.calls.every(row=>row[0]==='height'));
+});
+
+test('Contrast defaults to Default and the chosen level goes to the next conversion',async()=>{
+  const f=modelFixture(); f.fixture.attach();
+  assert.equal(f.fixture.get('conversionContrastIndex'),0);
+  for(const [i,contrast] of [[0,'default'],[1,'medium'],[2,'high']]) {
+    f.fixture.onConversionContrastChange({object:{selectedIndex:i}});
+    assert.equal(f.values.get('contrast'),contrast);
+  }
+  f.fixture.onConversionContrastChange({object:{selectedIndex:3}});
+  assert.equal(f.values.get('contrast'),'high');
+  f.confirmReplace(true);
+  f.fixture.get('sources')[0].convert(); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.calls.find(row=>row[0]==='convert'),['convert','/Download/G2/movie.mp4',false,true,15,176,'high']);
+  assert.ok(fs.readFileSync('app/phone-ui/video-page.xml','utf8').includes('selectedIndexChanged="{{ onConversionContrastChange }}"'));
+  f.fixture.dispose();
 });
 
 test('Dither remains On/Off with an independent four-choice default-one floor for next START',()=>{

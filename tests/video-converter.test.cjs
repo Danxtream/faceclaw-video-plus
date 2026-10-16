@@ -10,12 +10,17 @@ test('Converter starts independently of glasses and requires explicit overwrite'
     {'@nativescript/core': {Utils: {android: {getApplicationContext: () => 'context'}}}});
   const bridge = load('app/native/video-converter.ts');
   bridge.convertVideo('source.mp4');
-  assert.deepEqual(calls[0], ['start', 'context', 'source.mp4', false, false, 15,176]);
+  assert.deepEqual(calls[0], ['start', 'context', 'source.mp4', false, false, 15,176,'default']);
   bridge.convertVideo('source.mp4', true, true);
-  assert.deepEqual(calls[1], ['start', 'context', 'source.mp4', true, true, 15,176]);
+  assert.deepEqual(calls[1], ['start', 'context', 'source.mp4', true, true, 15,176,'default']);
   bridge.convertVideo('source.mp4',false,false,10,192);
-  assert.deepEqual(calls.pop(),['start','context','source.mp4',false,false,10,192]);
+  assert.deepEqual(calls.pop(),['start','context','source.mp4',false,false,10,192,'default']);
+  for (const contrast of ['medium','high']) {
+    bridge.convertVideo('source.mp4',false,false,10,176,contrast);
+    assert.deepEqual(calls.pop(),['start','context','source.mp4',false,false,10,176,contrast]);
+  }
   assert.throws(()=>bridge.convertVideo('source.mp4',false,false,15,180),/320x192 or 320x176/);
+  assert.throws(()=>bridge.convertVideo('source.mp4',false,false,15,176,'extra'),/Default, Medium or High/);
   state.running = true;
   assert.throws(() => bridge.convertVideo('other.mp4'), /running/);
   bridge.cancelVideoConversion(); assert.deepEqual(calls[2], ['cancel', 'context']);

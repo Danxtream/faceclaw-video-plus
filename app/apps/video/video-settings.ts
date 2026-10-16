@@ -28,6 +28,11 @@ export const videoConversionHeightSetting = new ConfigSettingEnum<"192" | "176">
   id: "video-conversion-height", label: "Frame size", storageKey: "video.conversionHeight", defaultValue: "176",
   values: ["192", "176"], formatValue: value => "320x" + value,
 });
+/** How the converter turns color into gray; applies to the next conversion only. */
+export const videoConversionContrastSetting = new ConfigSettingEnum<"default" | "medium" | "high">({
+  id: "video-conversion-contrast", label: "Contrast", storageKey: "video.conversionContrast", defaultValue: "default",
+  values: ["default", "medium", "high"], formatValue: value => value === "default" ? "Default" : value === "medium" ? "Medium" : "High",
+});
 export const videoDetailedReportsSetting = new ConfigSettingBoolean({
   id: "video-detailed-reports", label: "Video detailed reports", storageKey: "video.detailedReports", defaultValue: false,
 });
