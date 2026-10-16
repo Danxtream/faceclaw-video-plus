@@ -76,6 +76,15 @@ class VideoConversionAuditTest {
         assertFails { VideoEncodePlan.arguments("same", "same", false) }
     }
 
+    @Test fun pictureKeepsItsShapeInsideTheFrameWithUnlitBars() {
+        val filter = VideoEncodePlan.arguments("in.mp4", "out.h264", false, 10).let { it[it.indexOf("-vf") + 1] }.split(',')
+        assertEquals("fps=10", filter[0])
+        assertTrue(filter[1].startsWith("scale=320:192:force_original_aspect_ratio=decrease:force_divisible_by=2:"))
+        assertTrue(filter[1].contains("out_range=full"))
+        // Bars are added after the full-range gray conversion, so black is 0 rather than 16.
+        assertEquals(listOf("format=gray", "pad=320:192:(ow-iw)/2:(oh-ih)/2:color=black", "format=yuvj420p"), filter.drop(2))
+    }
+
     @Test fun chunkedFfmpegHeadersAuditAllParameterSetsAndSlices() {
         for (db in listOf(false, true)) {
             val audit = VideoHeaderAudit(db)
