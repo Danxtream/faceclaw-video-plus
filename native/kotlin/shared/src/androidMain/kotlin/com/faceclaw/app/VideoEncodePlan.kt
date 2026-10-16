@@ -3,9 +3,10 @@ package com.faceclaw.app
 /** Fixed high-effort recipe apart from the chosen clip cadence. */
 object VideoEncodePlan {
     const val ENCODER = "dev.ffmpegkit-maintained:ffmpeg-kit-min-gpl:8.1.7"
-    // Fit the source inside 320x192 at its own shape and fill the rest with black, which the
-    // glasses leave unlit; stretching made tall videos about three times too wide. Padding in
-    // full-range gray keeps the bars at 0. FFmpeg turns rotation-flagged phone recordings upright first.
+    // Fit the source inside 320x192 at its own shape and fill the rest with black; stretching made
+    // tall videos about three times too wide. Padding in full-range gray keeps the bars at Y 0, the
+    // video's own black (the firmware's default curve shows it as panel level 1, its dimmest lit
+    // level). FFmpeg turns rotation-flagged phone recordings upright first.
     private const val FILTER = "scale=320:192:force_original_aspect_ratio=decrease:force_divisible_by=2:" +
         "flags=lanczos:in_range=auto:out_range=full,format=gray,pad=320:192:(ow-iw)/2:(oh-ih)/2:color=black,format=yuvj420p"
     private const val RECIPE = "scenecut=0:crf=12:" +
