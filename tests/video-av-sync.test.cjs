@@ -25,6 +25,19 @@ test('Audio waits for the first shown picture, then starts at it with a seek lea
   assert.equal(start.speed, 1);
 });
 
+test('An audio timing offset is the target, not audio running ahead, and a new offset seeks at once', () => {
+  const av = new VideoAvSync(60_000);
+  av.anchor(5000, 900);
+  const start = av.decide(1000, 0, false, false, 200);
+  assert.equal(start.position, 5100 + 200 + VIDEO_AV_DEFAULTS.seekLeadMs);
+  // 200 ms ahead of the picture is on target: no hold and no speed change.
+  assert.deepEqual(av.decide(2000, 6300, true, false, 200), {kind: 'none'});
+  assert.deepEqual(av.decide(2400, 6700, true, false, 200), {kind: 'none'});
+  const moved = av.decide(2500, 6800, true, false, 350);
+  assert.equal(moved.kind, 'play'); assert.equal(moved.seek, true); assert.equal(moved.reason, 'audio offset changed');
+  assert.equal(moved.position, av.video(2500) + 350 + VIDEO_AV_DEFAULTS.seekLeadMs);
+});
+
 test('Audio ahead of the picture holds, then resumes without a seek once the picture leads', () => {
   const av = new VideoAvSync(60_000);
   av.anchor(1000, 0);

@@ -18,7 +18,9 @@ export interface VideoAudio {
   position?(): number | null;
 }
 export const silentVideoAudio: VideoAudio = { sync: async () => {}, pause: async () => {}, close: async () => {} };
-export type VideoOptions = { native: boolean; dither: boolean; radio: boolean; detailedReports?: boolean; blackFloor?: 0 | 0.25 | 0.5 | 1 };
+export type VideoOptions = { native: boolean; dither: boolean; radio: boolean; detailedReports?: boolean; blackFloor?: 0 | 0.25 | 0.5 | 1;
+  /** Phone-side only and read while playing: audio plays this many ms ahead of the picture. */
+  audioOffsetMs?: number };
 export type VideoPlaybackView = {
   active: boolean; paused: boolean; menuOpen: boolean; selection: number; native: boolean;
   position: number; duration: number; fps: number | null; intervals: number;
@@ -54,6 +56,8 @@ export class VideoPlayback {
   private creditBudget = 0;
   private metadataStaged = false;
   private av: VideoAvSync | null = null;
+  private audioOffsetMs = 0;
+  private audioOffsetAt = Number.NEGATIVE_INFINITY;
   private audioPlaying = false;
   private positionShownAt = 0;
   private rate = { at: 0, sent: 0, consumed: 0, sentPictures: 0, consumedPictures: 0, drops: 0 };
@@ -573,7 +577,9 @@ export class VideoPlayback {
     if (!this.av || !g?.reached || !this.audio.position) return;
     this.av.available(this.consumedPts());
     const now = this.clock();
-    const action: VideoAvAction = this.av.decide(now, this.audio.position(), this.audioPlaying, this.view.paused);
+    // The offset is tuned by ear during playback; a few reads a second is enough.
+    if (now - this.audioOffsetAt >= 250) { this.audioOffsetMs = this.options().audioOffsetMs ?? 0; this.audioOffsetAt = now; }
+    const action: VideoAvAction = this.av.decide(now, this.audio.position(), this.audioPlaying, this.view.paused, this.audioOffsetMs);
     if (action.kind === "pause") {
       await this.pauseAudio();
       console.error(`Video audio hold: ${action.reason}${action.lag === null ? "" : ` lag=${Math.round(action.lag)}ms`}`);

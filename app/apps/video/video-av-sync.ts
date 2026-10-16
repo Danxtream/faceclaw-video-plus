@@ -82,6 +82,7 @@ export class VideoAvSync {
   private resyncAt = Number.NEGATIVE_INFINITY;
   private behindSince: number | null = null;
   private aheadSince: number | null = null;
+  private offset = 0;
 
   constructor(private readonly duration: number, private readonly options: VideoAvOptions = VIDEO_AV_DEFAULTS) {
     this.lead = options.seekLeadMs;
@@ -167,8 +168,13 @@ export class VideoAvSync {
     return true;
   }
 
-  /** One decision; the caller performs it before asking again. */
-  decide(now: number, audio: number | null, playing: boolean, paused: boolean): VideoAvAction {
+  /**
+   * One decision; the caller performs it before asking again. A positive
+   * `offset` keeps audio that many ms ahead of the shown picture, cancelling
+   * output delay the phone's audio position does not include (for example
+   * Bluetooth headphones); a negative one delays it.
+   */
+  decide(now: number, audio: number | null, playing: boolean, paused: boolean, offset = 0): VideoAvAction {
     if (paused) {
       this.holding = false; this.started = false;
       this.aheadSince = this.behindSince = null;
@@ -180,11 +186,16 @@ export class VideoAvSync {
       this.aheadSince = this.behindSince = null;
       return { kind: "none" };
     }
-    const lag = audio - video;
+    const target = Math.max(0, Math.min(this.duration, video + offset));
+    const offsetChanged = offset !== this.offset;
+    this.offset = offset;
+    const lag = audio - target;
     const resync = (reason: string): VideoAvAction => {
       this.started = true; this.holding = false;
-      return this.play(now, video + this.lead * this.rate, true, this.targetSpeed(now, true), reason, lag);
+      return this.play(now, target + this.lead * this.rate, true, this.targetSpeed(now, true), reason, lag);
     };
+    // A new offset is heard at once, not drifted in by speed over many seconds.
+    if (playing && this.started && offsetChanged) return resync("audio offset changed");
     if (!playing) {
       this.aheadSince = null;
       if (!this.started) return resync("start at the shown picture");
