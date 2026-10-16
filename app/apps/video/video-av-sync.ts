@@ -11,6 +11,8 @@ export type VideoAvOptions = {
   frameMs: number;
   /** Hold audio when it runs this far ahead of the picture. */
   holdMs: number;
+  /** A single stale credit/report sample must not audibly interrupt audio. */
+  aheadConfirmMs: number;
   /** Resume held audio once it is this far behind the picture. */
   resumeMs: number;
   /** Seek audio forward when it falls this far behind the picture. */
@@ -45,7 +47,7 @@ export const VIDEO_AV_DEFAULTS: VideoAvOptions = {
   // A lens tick about 2% fast needs fine speed steps (1.5% stopped short and left a seek every
   // few seconds), and an 8 s rate window keeps report timing noise from hunting the speed.
   seekLeadMs: 60, minSpeed: 0.95, maxSpeed: 1.05, speedStep: 0.004, speedIntervalMs: 3000, rateWindowMs: 8000,
-  settleMs: 500, settleLimitMs: 2000, resyncIntervalMs: 1500, behindConfirmMs: 300,
+  settleMs: 500, settleLimitMs: 2000, resyncIntervalMs: 1500, behindConfirmMs: 300, aheadConfirmMs: 300,
   steadyBehindMs: 100, steadyConfirmMs: 2000,
 };
 /** Keep the existing frame-based hold policy at the selected clip cadence. */
@@ -74,6 +76,7 @@ export class VideoAvSync {
   private actionPosition = 0;
   private resyncAt = Number.NEGATIVE_INFINITY;
   private behindSince: number | null = null;
+  private aheadSince: number | null = null;
 
   constructor(private readonly duration: number, private readonly options: VideoAvOptions = VIDEO_AV_DEFAULTS) {
     this.lead = options.seekLeadMs;
@@ -110,6 +113,7 @@ export class VideoAvSync {
     // The lenses refill before the held frame moves again; measure the rate from the first shown anchor instead.
     this.anchorPts = pts; this.anchorAt = at; this.rateFrom = null;
     this.holding = false; this.started = false;
+    this.aheadSince = this.behindSince = null;
   }
 
   /** The estimated picture time on screen now, or null before the first anchor. */
@@ -138,6 +142,7 @@ export class VideoAvSync {
     const target = Math.max(0, Math.min(this.duration, position));
     this.playingSpeed = speed;
     this.actionAt = now; this.actionPosition = target; this.behindSince = null;
+    this.aheadSince = null;
     if (seek) this.resyncAt = now;
     return { kind: "play", position: target, seek, speed, reason, lag };
   }
@@ -158,21 +163,32 @@ export class VideoAvSync {
   decide(now: number, audio: number | null, playing: boolean, paused: boolean): VideoAvAction {
     if (paused) {
       this.holding = false; this.started = false;
+      this.aheadSince = this.behindSince = null;
       return playing ? { kind: "pause", reason: "video paused", lag: null } : { kind: "none" };
     }
     const video = this.video(now);
     if (video === null) return playing ? { kind: "pause", reason: "waiting for the first shown picture", lag: null } : { kind: "none" };
-    if (audio === null) return { kind: "none" };
+    if (audio === null) {
+      this.aheadSince = this.behindSince = null;
+      return { kind: "none" };
+    }
     const lag = audio - video, speed = this.targetSpeed(now);
     const resync = (reason: string): VideoAvAction => {
       this.started = true; this.holding = false;
       return this.play(now, video + this.lead * this.rate, true, this.targetSpeed(now, true), reason, lag);
     };
     if (!playing) {
+      this.aheadSince = null;
       if (!this.started) return resync("start at the shown picture");
       if (!this.holding) return resync("restart at the shown picture");
-      if (lag < -this.options.behindMs && now - this.resyncAt >= this.options.resyncIntervalMs)
-        return resync("picture far ahead of held audio");
+      if (lag < -this.options.behindMs) {
+        this.behindSince ??= now;
+        if (now - this.behindSince >= this.options.behindConfirmMs &&
+            now - this.resyncAt >= this.options.resyncIntervalMs)
+          return resync("picture far ahead of held audio");
+        return { kind: "none" };
+      }
+      this.behindSince = null;
       // Resume early by the start latency so audio begins just behind the picture.
       if (lag <= this.lead * this.rate - this.options.resumeMs) {
         this.holding = false;
@@ -182,9 +198,14 @@ export class VideoAvSync {
     }
     if (!this.settled(now, audio)) return { kind: "none" };
     if (lag > this.options.holdMs) {
+      this.behindSince = null;
+      this.aheadSince ??= now;
+      if (now - this.aheadSince < this.options.aheadConfirmMs) return { kind: "none" };
       this.holding = true; this.behindSince = null;
+      this.aheadSince = null;
       return { kind: "pause", reason: "audio ahead of the picture", lag };
     }
+    this.aheadSince = null;
     if (lag < -this.options.steadyBehindMs) {
       this.behindSince ??= now;
       const confirm = lag < -this.options.behindMs ? this.options.behindConfirmMs : this.options.steadyConfirmMs;

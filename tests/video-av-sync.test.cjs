@@ -32,15 +32,16 @@ test('Audio ahead of the picture holds, then resumes without a seek once the pic
   // The decoder starves: its newest picture caps the estimate one frame behind it.
   av.available(1400);
   assert.equal(av.video(500), 1400 - VIDEO_AV_DEFAULTS.frameMs);
-  const hold = av.decide(500, 1620, true, false);
+  assert.deepEqual(av.decide(500, 1620, true, false), {kind: 'none'});
+  const hold = av.decide(800, 1920, true, false);
   assert.equal(hold.kind, 'pause');
   assert.ok(hold.lag > VIDEO_AV_DEFAULTS.holdMs);
-  assert.deepEqual(av.decide(600, 1620, false, false), {kind: 'none'});
+  assert.deepEqual(av.decide(900, 1920, false, false), {kind: 'none'});
   av.available(5000);
-  const resume = av.decide(700, 1620, false, false);
+  const resume = av.decide(1100, 1920, false, false);
   assert.equal(resume.kind, 'play');
   assert.equal(resume.seek, false);
-  assert.equal(resume.position, 1620);
+  assert.equal(resume.position, 1920);
 });
 
 test('Audio far behind the picture seeks forward; small offsets leave it alone', () => {
@@ -162,4 +163,64 @@ test('A steady small lag from start latency is corrected once the latency is lea
   const run = simulate({rate: 1, staleAfterSeek: 0, startLatency: 200, seconds: 30});
   assert.ok(run.seeks.length <= 3, `seeks ${run.seeks.length}`);
   assert.ok(Math.abs(run.lag) < 100, `final lag ${run.lag}`);
+});
+
+test('A brief ahead-to-behind reversal does not cut playing audio', () => {
+  const av = new VideoAvSync(60_000, videoAvOptions(10));
+  av.anchor(0, 0);
+  av.available(933);
+  // A stale availability cap makes audio appear 167 ms ahead at this turn.
+  assert.deepEqual(av.decide(1000, 1000, true, false), {kind: 'none'});
+  av.available(5000);
+  av.anchor(1353, 1122);
+  // The next report reverses the sign, as in the 122 ms phone sequence.
+  assert.deepEqual(av.decide(1122, 1122, true, false), {kind: 'none'});
+  av.anchor(1250, 1250);
+  assert.deepEqual(av.decide(1250, 1250, true, false), {kind: 'none'});
+});
+
+test('A far-behind sample while audio is held must persist before seeking', () => {
+  const av = new VideoAvSync(60_000, videoAvOptions(10));
+  av.anchor(0, 0);
+  av.decide(0, 0, false, false);
+  av.available(1000);
+  av.decide(2000, 1167, true, false);
+  assert.equal(av.decide(2300, 1467, true, false).kind, 'pause');
+  av.available(5000);
+  av.anchor(1698, 2422);
+  assert.deepEqual(av.decide(2422, 1467, false, false), {kind: 'none'});
+  const correction = av.decide(2722, 1467, false, false);
+  assert.equal(correction.kind, 'play');
+  assert.equal(correction.seek, true);
+});
+
+test('Recovery and a user pause reset pending ahead confirmation at every clip rate', () => {
+  for (const fps of [10, 15, 20]) {
+    const av = new VideoAvSync(60_000, videoAvOptions(fps));
+    av.anchor(0, 0); av.available(1000);
+    assert.equal(av.decide(2000, 2200, true, false).kind, 'none');
+    av.available(5000);
+    assert.equal(av.decide(2200, 2200, true, false).kind, 'none');
+    av.available(1000);
+    assert.equal(av.decide(2300, 2500, true, false).kind, 'none');
+    av.decide(2400, 2600, true, true);
+    assert.equal(av.decide(2500, 2700, true, false).kind, 'none');
+    assert.equal(av.decide(2799, 2999, true, false).kind, 'none');
+    assert.equal(av.decide(2800, 3000, true, false).kind, 'pause');
+    av.restart(1000, 4000);
+    assert.equal(av.decide(4000, 1200, true, false).kind, 'none');
+  }
+});
+
+test('Held audio resumes without seeking when a transient behind estimate recovers', () => {
+  const av = new VideoAvSync(60_000, videoAvOptions(10));
+  av.anchor(0, 0); av.decide(0, 0, false, false); av.available(1000);
+  av.decide(2000, 1167, true, false);
+  assert.equal(av.decide(2300, 1467, true, false).kind, 'pause');
+  av.available(5000); av.anchor(1698, 2422);
+  assert.equal(av.decide(2422, 1467, false, false).kind, 'none');
+  av.anchor(1467, 2522);
+  const resumed = av.decide(2522, 1467, false, false);
+  assert.equal(resumed.kind, 'play');
+  assert.equal(resumed.seek, false);
 });
