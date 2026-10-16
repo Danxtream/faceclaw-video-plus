@@ -1,11 +1,12 @@
 import { isVideoPictureRate, type VideoPictureRate } from "./video-rate";
+import { videoGeometry, type VideoGeometry } from "./video-geometry";
 
 /** Audited conversion metadata; file offsets and pictures remain distinct. */
 export type VideoNal = { offset: number; bytes: number; type: number; sha256: string };
 export type VideoPicture = { pts: number; nal: number; idr: boolean; sps: number; pps: number };
 export type VideoAudit = { bytes: number; sha256: string; nals: VideoNal[] };
-export type VideoClip = {
-  version: 1; width: 320; height: 192; fps: VideoPictureRate; duration: number;
+export type VideoClip = VideoGeometry & {
+  version: 1; fps: VideoPictureRate; duration: number;
   range: "full"; deblocking: boolean; encoder: string; options: string[];
   source: { name: string; bytes: number; sha256: string };
   h264: VideoAudit; pictures: VideoPicture[];
@@ -21,7 +22,7 @@ export function parseVideoClip(value: unknown, audit: VideoAudit): VideoClip {
   const clip = value as VideoClip;
   if (!isVideoPictureRate(clip?.fps))
     throw new Error("Unsupported video picture rate. Re-convert this clip at 10, 15 or 20 fps.");
-  if (!clip || clip.version !== 1 || clip.width !== 320 || clip.height !== 192 ||
+  if (!clip || clip.version !== 1 ||
       clip.range !== "full" || typeof clip.deblocking !== "boolean" || !integer(clip.duration, 1) ||
       typeof clip.encoder !== "string" || !clip.encoder || !Array.isArray(clip.options) ||
       !clip.options.every((option) => typeof option === "string") || !clip.source ||
@@ -62,7 +63,7 @@ export function parseVideoClip(value: unknown, audit: VideoAudit): VideoClip {
   }
   if (audit.nals.slice(lastNal + 1).some((nal) => [1, 5].includes(nal.type)) ||
       clip.duration !== Math.round(clip.pictures.length * 1000 / clip.fps)) throw new Error("Incomplete picture map or duration");
-  return clip;
+  return { ...clip, ...videoGeometry(clip) };
 }
 
 /** Nearest preceding IDR plus its active parameter sets, never a P-frame reset. */

@@ -20,6 +20,10 @@ export const videoConversionRateSetting = new ConfigSettingEnum<"10" | "15" | "2
   id: "video-conversion-rate", label: "Picture rate", storageKey: "video.conversionRate", defaultValue: "15",
   values: ["10", "15", "20"], formatValue: value => value + " fps",
 });
+export const videoConversionHeightSetting = new ConfigSettingEnum<"192" | "176">({
+  id: "video-conversion-height", label: "Frame size", storageKey: "video.conversionHeight", defaultValue: "176",
+  values: ["192", "176"], formatValue: value => "320x" + value,
+});
 export const videoDetailedReportsSetting = new ConfigSettingBoolean({
   id: "video-detailed-reports", label: "Video detailed reports", storageKey: "video.detailedReports", defaultValue: false,
 });

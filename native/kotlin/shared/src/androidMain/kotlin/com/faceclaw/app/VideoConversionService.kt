@@ -39,7 +39,7 @@ class VideoConversionService : Service() {
             wake = (getSystemService(Context.POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "faceclaw:video-conversion")
             wake!!.acquire(6 * 60 * 60 * 1000L)
             val conversion = VideoConversion(File(path), intent.getBooleanExtra("deblocking", false), intent.getBooleanExtra("overwrite", false),
-                intent.getIntExtra("fps", 15)) { stage, progress ->
+                intent.getIntExtra("fps", 15),intent.getIntExtra("landscapeHeight",176)) { stage, progress ->
                 state = JSONObject().put("running", true).put("stage", stage).put("progress", progress).put("source", path).toString()
                 val now = System.currentTimeMillis()
                 if (now - lastNotification >= 500) {
@@ -84,10 +84,11 @@ class VideoConversionService : Service() {
         private const val ID = 4202
         @Volatile private var state = "{\"running\":false,\"stage\":\"idle\",\"progress\":0}"
         @JvmStatic fun snapshotJson(): String = state
-        @JvmStatic fun start(context: Context, source: String, deblocking: Boolean, overwrite: Boolean, fps: Int) {
+        @JvmStatic fun start(context: Context, source: String, deblocking: Boolean, overwrite: Boolean, fps: Int, landscapeHeight: Int) {
             VideoEncodePlan.checkRate(fps)
+            require(landscapeHeight in listOf(176,192))
             val intent = Intent(context, VideoConversionService::class.java).setAction(START).putExtra("source", source)
-                .putExtra("deblocking", deblocking).putExtra("overwrite", overwrite).putExtra("fps", fps)
+                .putExtra("deblocking", deblocking).putExtra("overwrite", overwrite).putExtra("fps", fps).putExtra("landscapeHeight",landscapeHeight)
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else context.startService(intent)
         }
         @JvmStatic fun cancel(context: Context) { context.startService(Intent(context, VideoConversionService::class.java).setAction(CANCEL)) }

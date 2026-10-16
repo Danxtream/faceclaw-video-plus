@@ -5,7 +5,7 @@ const {loader} = require('./helpers/load-typescript.cjs');
 
 function modelFixture(strip = false) {
   const calls = [], values = new Map(); let timer, observer;
-  const settings = key => ({get: () => values.get(key) ?? (key === 'radio' ? 'video' : key === 'scale' ? 'native' : key === 'rate' ? '15' : false),
+  const settings = key => ({get: () => values.get(key) ?? (key === 'radio' ? 'video' : key === 'scale' ? 'native' : key === 'rate' ? '15' : key === 'height' ? '176' : false),
     set: value => {values.set(key, value); calls.push([key, value]);}, displayValue: () => values.get(key) === 'off' ? 'Off' : 'Video-only'});
   const player = {view: {active: true, paused: false, position: 1234, duration: 20000},
     pause: async value => calls.push(['pause', value]), seek: async value => calls.push(['seek', value]),
@@ -23,7 +23,7 @@ function modelFixture(strip = false) {
     '../native/video-converter': {convertVideo: (...args) => calls.push(['convert', ...args]), cancelVideoConversion() {}, videoConversionState: () => ({running: false, stage: 'idle', progress: 0})},
     '../apps/video': {openPhoneVideo: async path => calls.push(['play', path])},
     '../apps/video/video-session': {activeVideoSession: () => session, observeVideoSession: () => () => calls.push(['unsub-video'])},
-    '../apps/video/video-settings': {videoRadioSetting: settings('radio'), videoScaleSetting: settings('scale'), videoDitherSetting: settings('dither'), videoDeblockingSetting: settings('deblock'), videoConversionRateSetting: settings('rate')},
+    '../apps/video/video-settings': {videoRadioSetting: settings('radio'), videoScaleSetting: settings('scale'), videoDitherSetting: settings('dither'), videoDeblockingSetting: settings('deblock'), videoConversionRateSetting: settings('rate'),videoConversionHeightSetting: settings('height')},
   });
   const module = load(strip ? 'app/phone-ui/video-strip.ts' : 'app/phone-ui/video-view-model.ts');
   return {module, calls, values, player, fixture: strip ? new module.VideoStripViewModel() : new module.VideoViewModel(),
@@ -46,6 +46,18 @@ test('Converter rate defaults to 15 and only changes the next conversion setting
   f.fixture.onConversionRateChange({object:{selectedIndex:3}});
   assert.equal(f.values.get('rate'),'20');
   assert.ok(f.calls.every(row=>row[0]==='rate'));
+});
+
+test('Canvas selector has only 192 and 176 with automatic orientation left to the converter',()=>{
+  const f=modelFixture();
+  assert.equal(f.fixture.get('conversionHeightIndex'),1);
+  for(const [i,height] of [[0,'192'],[1,'176']]) {
+    f.fixture.onConversionHeightChange({object:{selectedIndex:i}});
+    assert.equal(f.values.get('height'),height);
+  }
+  f.fixture.onConversionHeightChange({object:{selectedIndex:2}});
+  assert.equal(f.values.get('height'),'176');
+  assert.ok(f.calls.every(row=>row[0]==='height'));
 });
 
 test('Radio/dither settings issue no current-generation command and remote controls use one engine', async () => {

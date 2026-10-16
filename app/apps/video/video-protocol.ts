@@ -1,5 +1,6 @@
 import { type VideoUploadPlan, type VideoUploadPump } from "./video-upload";
 import { isVideoPictureRate, VIDEO_DEFAULT_RATE, type VideoPictureRate } from "./video-rate";
+import { videoGeometry, legacyVideoGeometry, type VideoGeometry } from "./video-geometry";
 
 declare const console: { error(...args: unknown[]): void };
 
@@ -75,6 +76,7 @@ export class VideoProtocol {
   private evidence = false;
   private rateEvidence = false;
   private timed = false;
+  private geometry = false;
   /** Both lenses accept a picture's frame time inside its VCL NAL record. */
   get timedNal(): boolean { return this.timed; }
   constructor(private readonly backend: VideoBackend, private readonly reserve: () => number | Promise<number>) {
@@ -136,12 +138,13 @@ export class VideoProtocol {
     }
     const rows = await this.query(await this.header(VIDEO.playbackCaps, 8), 16);
     if (rows.some((row) => row[0] !== 1 || row[1] !== 13 || row[2] || row[3] !== 255 ||
-      row[4] !== 2 || row[5] !== 7 || row[6] !== 255 || (row[7] & 7) !== 7))
+      (row[4] & 63) !== 2 || (row[4] & 64) !== 0 || row[5] !== 7 || row[6] !== 255 || (row[7] & 7) !== 7))
       throw new Error("Glasses do not support 10/15/20 fps playback; update both lenses.");
     this.evidence = rows.every(row => !!(row[7] & 32));
     this.rateEvidence = rows.every(row => !!(row[7] & 64));
     // Bit 128: timed NAL records and timeline room in flagged credit replies.
     this.timed = rows.every(row => !!(row[7] & 128));
+    this.geometry = rows.every(row => !!(row[4] & 128));
     this.backend.configureEvidence?.(this.evidence);
   }
   measurementSnapshot(): unknown { return this.backend.measurementSnapshot?.() ?? null; }
@@ -195,13 +198,18 @@ export class VideoProtocol {
     raw[8] = 1;
     return this.query(raw, 128);
   }
-  async start(stream: number, native: boolean, dither: boolean, radio: boolean, preroll = 0, paused = false, targets = 3, fps: VideoPictureRate = VIDEO_DEFAULT_RATE): Promise<VideoStatus[]> {
+  async start(stream: number, native: boolean, dither: boolean, radio: boolean, preroll = 0, paused = false, targets = 3, fps: VideoPictureRate = VIDEO_DEFAULT_RATE, geometry: VideoGeometry = {width: 320, height: 192}): Promise<VideoStatus[]> {
     if (!isVideoPictureRate(fps)) throw new Error("Unsupported video picture rate");
     if (![1, 2, 3].includes(targets)) throw new Error("Invalid START lens mask");
-    const raw = await this.header(VIDEO.start, 24);
+    const size = videoGeometry(geometry), extended = !legacyVideoGeometry(size);
+    if (extended && !this.geometry) throw new Error("Update both lenses to play this frame size and its unlit bars.");
+    const raw = await this.header(VIDEO.start, extended ? 32 : 24);
     if (!Number.isInteger(preroll) || preroll < 0 || preroll > 255) throw new Error("Unsupported seek preroll");
     put(raw, 8, stream);
     raw.set([64, 1, 192, 0, 1, 2, 4 | 8 | (native ? 1 : 0) | (dither ? 16 : 0) | (!radio ? 2 : 0) | (paused ? 32 : 0), preroll], 12);
+    const field = (offset: number, value: number) => { raw[offset] = value; raw[offset+1] = value >>> 8; };
+    field(12, size.width); field(14, size.height);
+    if (extended) [size.picture.x, size.picture.y, size.picture.width, size.picture.height].forEach((value, i) => field(24+i*2, value));
     put(raw, 20, Math.ceil(1000 / fps));
     return (await this.query(raw, 128, targets)).map(parseVideoStatus);
   }

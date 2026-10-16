@@ -217,7 +217,7 @@ export class VideoPlayback {
       count: prefix.length + this.source.clip.h264.nals.length - firstNal, metadata: 0,
       paused, reached: false, oldPhy, started: this.clock(), anchor: oldPhy, anchorAt: this.clock(),
       anchorUncertainty: 0, detailedReports: !!selection.detailedReports };
-    const start = await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused, 3, this.source.clip.fps);
+    const start = await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused, 3, this.source.clip.fps, this.source.clip);
     const retryDeadline = this.clock() + 1_000;
     for (let attempt = 0; ; attempt++) {
       if (this.stopping) throw new VideoCancelled();
@@ -237,7 +237,7 @@ export class VideoPlayback {
         this.validateStatus(start, VIDEO.start, stream);
         break;
       }
-      const retry = await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused, mask, this.source.clip.fps);
+      const retry = await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused, mask, this.source.clip.fps, this.source.clip);
       let index = 0;
       for (let i = 0; i < 2; i++) if (mask & 1 << i) start[i] = retry[index++];
     }

@@ -1,7 +1,8 @@
 package com.faceclaw.app
 
 /** Validate fields parsed by FFmpeg trace_headers, not a second H.264 parser. */
-class VideoHeaderAudit(private val deblocking: Boolean, private val fps: Int = 15) {
+class VideoHeaderAudit(private val deblocking: Boolean, private val fps: Int = 15,
+    private val geometry: VideoFrameGeometry = VideoFrameGeometry(320,192)) {
     init { VideoEncodePlan.checkRate(fps) }
     private val fields = HashMap<String, Long>()
     private val sps = HashSet<Long>()
@@ -53,7 +54,8 @@ class VideoHeaderAudit(private val deblocking: Boolean, private val fps: Int = 1
         when (section) {
             "sps" -> {
                 equals("profile_idc", 66); equals("max_num_ref_frames", 1)
-                equals("pic_width_in_mbs_minus1", 19); equals("pic_height_in_map_units_minus1", 11)
+                equals("pic_width_in_mbs_minus1", geometry.width / 16L - 1)
+                equals("pic_height_in_map_units_minus1", geometry.height / 16L - 1)
                 equals("frame_mbs_only_flag", 1); equals("frame_cropping_flag", 0)
                 equals("vui_parameters_present_flag", 1); equals("video_signal_type_present_flag", 1)
                 equals("video_full_range_flag", 1); equals("timing_info_present_flag", 1)

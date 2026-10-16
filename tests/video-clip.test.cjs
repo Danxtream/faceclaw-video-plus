@@ -14,6 +14,22 @@ function fixture(count = 5) {
   return {clip, audit};
 }
 
+test('Picture geometry admits all three canvases and odd edges but never silently loses bars', () => {
+  for(const g of [{width:320,height:192,picture:{x:0,y:6,width:320,height:180}},
+    {width:320,height:176,picture:{x:3,y:0,width:313,height:176}},
+    {width:144,height:240,picture:{x:4,y:0,width:135,height:240}}]) {
+    const {clip,audit}=fixture();Object.assign(clip,g);
+    assert.deepEqual(parseVideoClip(clip,audit).picture,g.picture);
+  }
+  for(const g of [{width:320,height:176},{width:144,height:240},
+    {width:320,height:192,picture:{x:1,y:0,width:320,height:192}},
+    {width:320,height:192,picture:{x:0,y:0,width:0,height:192}}]) {
+    const {clip,audit}=fixture();Object.assign(clip,g);assert.throws(()=>parseVideoClip(clip,audit),/rectangle/);
+  }
+  const {clip,audit}=fixture();
+  assert.deepEqual(parseVideoClip(clip,audit).picture,{x:0,y:0,width:320,height:192});
+});
+
 test('All supported clip rates have exact rounded timestamps and seek boundaries; old rates require reconversion', () => {
   for (const fps of [10,15,20]) {
     const {clip,audit}=fixture(100);

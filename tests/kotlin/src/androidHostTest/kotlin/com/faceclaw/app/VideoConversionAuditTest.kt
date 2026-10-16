@@ -77,12 +77,44 @@ class VideoConversionAuditTest {
     }
 
     @Test fun pictureKeepsItsShapeInsideTheFrameWithUnlitBars() {
-        val filter = VideoEncodePlan.arguments("in.mp4", "out.h264", false, 10).let { it[it.indexOf("-vf") + 1] }.split(',')
+        val geometry = VideoFrameGeometry.fit(1920,1080)
+        assertEquals(VideoFrameGeometry(320,176,3,0,313,176),geometry)
+        val filter = VideoEncodePlan.arguments("in.mp4", "out.h264", false, 10,geometry).let { it[it.indexOf("-vf") + 1] }.split(',')
         assertEquals("fps=10", filter[0])
-        assertTrue(filter[1].startsWith("scale=320:192:force_original_aspect_ratio=decrease:force_divisible_by=2:"))
+        assertTrue(filter[1].startsWith("scale=313:176:"))
         assertTrue(filter[1].contains("out_range=full"))
         // Bars are added after the full-range gray conversion, so black is 0 rather than 16.
-        assertEquals(listOf("format=gray", "pad=320:192:(ow-iw)/2:(oh-ih)/2:color=black", "format=yuvj420p"), filter.drop(2))
+        assertEquals(listOf("format=gray", "setsar=1", "pad=320:176:3:0:color=black", "format=yuvj420p"), filter.drop(2))
+    }
+
+    @Test fun bothLandscapeChoicesDetectPortraitRotationAndSampleAspectAutomatically() {
+        for (height in listOf(176,192)) {
+            assertEquals(VideoFrameGeometry(144,240,4,0,135,240),VideoFrameGeometry.fit(1080,1920,landscapeHeight=height))
+            for (angle in listOf(-270,-90,90,270))
+                assertEquals(VideoFrameGeometry.fit(1080,1920),VideoFrameGeometry.fit(1920,1080,rotation=angle,landscapeHeight=height))
+            val square = VideoFrameGeometry.fit(720,576,"16:15",landscapeHeight=height)
+            assertEquals(height,square.pictureHeight)
+            assertEquals(if (height == 176) 235 else 256,square.pictureWidth)
+        }
+        assertEquals(VideoFrameGeometry(320,192,0,6,320,180),VideoFrameGeometry.fit(1920,1080,landscapeHeight=192))
+        assertFails { VideoFrameGeometry.fit(0,1080) }
+        assertFails { VideoFrameGeometry.fit(1920,1080,"1:0") }
+        assertFails { VideoFrameGeometry.fit(1920,1080,rotation=45) }
+        assertFails { VideoFrameGeometry.fit(1920,1080,landscapeHeight=180) }
+    }
+
+    @Test fun selectedGeometryAuditsRealMacroblockFieldsAndDecodedFrameDimensions() {
+        val nals = listOf(7,8,6,5).mapIndexed { i,t -> VideoFileReader.Nal(i*8L+4,4,t,"a".repeat(64)) }
+        val file = VideoFileReader.Audit(32,"b".repeat(64),nals)
+        for (g in listOf(VideoFrameGeometry(320,192),VideoFrameGeometry(320,176),VideoFrameGeometry(144,240))) {
+            val headers = VideoHeaderAudit(false,15,g)
+            headers.accept(section("Sequence Parameter Set",sps+mapOf("pic_width_in_mbs_minus1" to g.width/16L-1,
+                "pic_height_in_map_units_minus1" to g.height/16L-1))+section("Picture Parameter Set",pps)+section("Slice Header",slice(false)))
+            headers.finish()
+            val frame = VideoDecodedPicture(0,32,true,g.width,g.height,"yuvj420p","I",0,0)
+            assertEquals(1,VideoPictureMap.build(file,listOf(frame),15,g).size)
+            assertFails { VideoPictureMap.build(file,listOf(frame.copy(height=g.height+16)),15,g) }
+        }
     }
 
     @Test fun chunkedFfmpegHeadersAuditAllParameterSetsAndSlices() {

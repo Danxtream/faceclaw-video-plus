@@ -69,9 +69,9 @@ internal fun videoDecodedPictures(frames: BufferedReader, packets: BufferedReade
 
 /** A single native conversion job; no BLE, firmware, repair pass or auto-downrate. */
 class VideoConversion(private val input: File, private val deblocking: Boolean, private val overwrite: Boolean,
-    private val fps: Int = 15,
+    private val fps: Int = 15, private val landscapeHeight: Int = 176,
     private val progress: (String, Double) -> Unit) {
-    init { VideoEncodePlan.checkRate(fps) }
+    init { VideoEncodePlan.checkRate(fps); require(landscapeHeight in listOf(176,192)) }
     private val cancelled = AtomicBoolean(false)
     private val sessionId = AtomicLong(0)
     @Volatile private var thread: Thread? = null
@@ -139,10 +139,18 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
         try {
             progress("verifying source", 0.0)
             val sourceHash = hash(input)
-            val sourceInfo = probe(arrayOf("-v", "error", "-show_entries", "format=duration", "-of", "json", input.path))
+            val sourceInfo = probe(arrayOf("-v", "error", "-select_streams", "v:0", "-show_entries",
+                "format=duration:stream=width,height,sample_aspect_ratio:stream_tags=rotate:stream_side_data=rotation", "-of", "json", input.path))
             val duration = sourceInfo.getJSONObject("format").getDouble("duration") * 1000
             require(duration.isFinite() && duration > 0) { "Invalid MP4 duration" }
-            val args = VideoEncodePlan.arguments(input.path, publication.candidate.path, deblocking, fps)
+            val stream = sourceInfo.getJSONArray("streams").getJSONObject(0)
+            var rotation = stream.optJSONObject("tags")?.optInt("rotate",0) ?: 0
+            val sideData = stream.optJSONArray("side_data_list")
+            if (sideData != null) for (i in 0 until sideData.length())
+                if (sideData.getJSONObject(i).has("rotation")) rotation = sideData.getJSONObject(i).getInt("rotation")
+            val geometry = VideoFrameGeometry.fit(stream.getInt("width"),stream.getInt("height"),
+                stream.optString("sample_aspect_ratio","1:1"),rotation,landscapeHeight)
+            val args = VideoEncodePlan.arguments(input.path, publication.candidate.path, deblocking, fps, geometry)
             progress("encoding", 0.0)
             execute(args, duration)
             progress("auditing headers", 0.99)
@@ -152,7 +160,7 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
                 execute(arrayOf("-nostdin", "-report", "-v", "error", "-f", "h264", "-i", publication.candidate.path,
                     "-map", "0:v:0", "-c:v", "copy", "-bsf:v", "trace_headers", "-f", "null", "-"))
             }
-            val headerAudit = VideoHeaderAudit(deblocking, fps)
+            val headerAudit = VideoHeaderAudit(deblocking, fps, geometry)
             publication.report.bufferedReader().useLines { lines -> lines.forEach { checkActive(); headerAudit.accept(it + "\n") } }
             headerAudit.finish()
             val audit = VideoFileReader.audit(publication.candidate)
@@ -166,11 +174,13 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
             val frames = publication.frames.bufferedReader().use { decoded ->
                 publication.packets.bufferedReader().use { packets -> videoDecodedPictures(decoded, packets, ::checkActive) }
             }
-            val pictures = VideoPictureMap.build(audit, frames, fps)
+            val pictures = VideoPictureMap.build(audit, frames, fps, geometry)
             require(headerAudit.slices == pictures.size) { "Header and decoded picture counts disagree" }
             require(input.length() == bytes && input.lastModified() == modified && hash(input) == sourceHash) { "MP4 changed during conversion" }
             checkActive()
-            val sidecar = JSONObject().put("version", 1).put("width", 320).put("height", 192).put("fps", fps)
+            val sidecar = JSONObject().put("version", 1).put("width", geometry.width).put("height", geometry.height).put("fps", fps)
+                .put("picture",JSONObject().put("x",geometry.x).put("y",geometry.y)
+                    .put("width",geometry.pictureWidth).put("height",geometry.pictureHeight))
                 .put("duration", (pictures.size * 1000L + fps / 2) / fps).put("range", "full").put("deblocking", deblocking)
                 .put("encoder", "${VideoEncodePlan.ENCODER}; FFmpeg ${FFmpegKitConfig.getFFmpegVersion()}")
                 .put("options", JSONArray(args.toList())).put("source", JSONObject().put("name", input.name).put("bytes", bytes).put("sha256", sourceHash))

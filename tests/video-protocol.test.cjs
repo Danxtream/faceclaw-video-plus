@@ -25,6 +25,27 @@ test('Timeline and START carry each supported rate without changing the stream c
   }
 });
 
+test('Geometry START requires paired capability and carries exact odd picture edges on every lens mask',async()=>{
+  for(const depths of [[2,2],[130,2],[130,130]]) {
+    let id=1;const sent=[];
+    const p=new VideoProtocol({epoch:()=>1,exchange:async(raw,length,targets)=>{
+      sent.push(raw.slice());return raw[1]===VIDEO.playbackCaps?
+        depths.map(depth=>Uint8Array.from([1,13,0,255,depth,7,255,247,0,0,0,0,0,0,0,0])):
+        [status().slice(0,length),status().slice(0,length)].slice(0,targets===3?2:1);
+    }},()=>id++);
+    await p.capabilities();
+    const g={width:320,height:176,picture:{x:3,y:0,width:313,height:176}};
+    if(depths.includes(2)) {await assert.rejects(p.start(1,false,false,false,0,false,3,15,g),/Update both lenses/);continue;}
+    for (const mask of [1,2,3]) await p.start(1,false,false,false,2,true,mask,15,g);
+    const raw=sent.at(-1),v=new DataView(raw.buffer);
+    assert.equal(raw.length,32);
+    assert.deepEqual([12,14,24,26,28,30].map(i=>v.getUint16(i,true)),[320,176,3,0,313,176]);
+    assert.equal(raw[19],2);
+    await p.start(2,false,false,false);
+    assert.equal(sent.at(-1).length,24);
+  }
+});
+
 test('New phone refuses the legacy fixed-rate firmware before playback',async()=>{
   let id=1;
   const p=new VideoProtocol({epoch:()=>1,exchange:async(raw,length)=>raw[1]===VIDEO.playbackCaps?
