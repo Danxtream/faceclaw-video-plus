@@ -4,9 +4,11 @@ import android.system.Os
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.FFmpegKitConfig
 import com.arthenica.ffmpegkit.FFmpegSession
+import com.arthenica.ffmpegkit.FFmpegSessionCompleteCallback
 import com.arthenica.ffmpegkit.FFprobeKit
 import com.arthenica.ffmpegkit.FFprobeSession
 import com.arthenica.ffmpegkit.ReturnCode
+import com.arthenica.ffmpegkit.StatisticsCallback
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -14,6 +16,8 @@ import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -93,12 +97,15 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
         }
         return VideoFileReader.hex(hash.digest())
     }
-    private fun execute(args: Array<String>, duration: Double = 0.0): FFmpegSession {
+    private fun execute(args: Array<String>, duration: Double = 0.0, executor: ExecutorService? = null): FFmpegSession {
         checkActive()
         val done = CountDownLatch(1)
-        val session = FFmpegKit.executeWithArgumentsAsync(args, { done.countDown() }, {}, { stat ->
+        val complete = FFmpegSessionCompleteCallback { done.countDown() }
+        val statistics = StatisticsCallback { stat ->
             if (!cancelled.get() && duration > 0) progress("encoding", (stat.time / duration).coerceIn(0.0, 0.99))
-        })
+        }
+        val session = if (executor == null) FFmpegKit.executeWithArgumentsAsync(args, complete, {}, statistics)
+            else FFmpegKit.executeWithArgumentsAsync(args, complete, {}, statistics, executor)
         sessionId.set(session.sessionId)
         try {
             while (!done.await(200, TimeUnit.MILLISECONDS)) checkActive()
@@ -158,10 +165,17 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
             progress("auditing headers", 0.99)
             // FFmpeg's report logs to disk at INFO while stderr remains ERROR;
             // trace output does not accumulate in FFmpegKit's session history.
-            withVideoReport("file=${publication.report.path}:level=32") {
-                execute(arrayOf("-nostdin", "-report", "-v", "error", "-f", "h264", "-i", publication.candidate.path,
-                    "-map", "0:v:0", "-c:v", "copy", "-bsf:v", "trace_headers", "-f", "null", "-"))
-            }
+            // The report file is per thread and never closed: init_report returns
+            // early once a thread has one, so a pooled FFmpegKit thread that wrote
+            // an earlier job's report would never create this one. Run it on a
+            // thread that has never run FFmpeg.
+            val reportThread = Executors.newSingleThreadExecutor { task -> Thread(task, "video-header-report") }
+            try {
+                withVideoReport("file=${publication.report.path}:level=32") {
+                    execute(arrayOf("-nostdin", "-report", "-v", "error", "-f", "h264", "-i", publication.candidate.path,
+                        "-map", "0:v:0", "-c:v", "copy", "-bsf:v", "trace_headers", "-f", "null", "-"), executor = reportThread)
+                }
+            } finally { reportThread.shutdown() }
             val headerAudit = VideoHeaderAudit(deblocking, fps, geometry, keyframes == VideoKeyframes.LARGE)
             publication.report.bufferedReader().useLines { lines -> lines.forEach { checkActive(); headerAudit.accept(it + "\n") } }
             headerAudit.finish()

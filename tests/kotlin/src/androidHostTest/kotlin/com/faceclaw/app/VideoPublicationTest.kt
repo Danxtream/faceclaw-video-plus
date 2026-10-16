@@ -43,4 +43,17 @@ class VideoPublicationTest {
             assertTrue(encoded.isFile)
         } finally { encoded.delete(); metadata.delete(); directory.delete() }
     }
+    @Test fun cleanupEmptiesTheReportFfmpegStillHolds() {
+        val directory = Files.createTempDirectory("video-report").toFile()
+        val held = File(directory, "held-report.txt")
+        try {
+            val job = VideoPublication(File(directory, "video.h264"), File(directory, "video.g2.json"), false)
+            job.report.writeText("trace headers")
+            // A second link stands in for FFmpeg's report handle, which is never closed.
+            Files.createLink(held.toPath(), job.report.toPath())
+            job.cleanup()
+            assertFalse(job.report.exists())
+            assertEquals(0L, held.length())
+        } finally { directory.listFiles().orEmpty().forEach { if (it.isFile) it.delete() }; directory.delete() }
+    }
 }

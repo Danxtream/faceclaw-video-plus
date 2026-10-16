@@ -43,3 +43,12 @@ test('Converter service owns only media processing and never Bluetooth or boot s
   assert.ok(job.includes('VideoPictureMap.build'));
   assert.ok(job.includes('input.lastModified() == modified && hash(input) == sourceHash'));
 });
+
+test('Header report runs on a new thread each conversion, never a pooled FFmpeg thread', () => {
+  // FFmpeg keeps one report file per thread and never closes it, so a reused thread skips the new report.
+  const job = fs.readFileSync('native/kotlin/shared/src/androidMain/kotlin/com/faceclaw/app/VideoConversion.kt', 'utf8');
+  const audit = job.slice(job.indexOf('val reportThread'), job.indexOf('val headerAudit'));
+  assert.ok(audit.includes('Executors.newSingleThreadExecutor'));
+  assert.ok(audit.includes('"trace_headers"') && audit.includes('executor = reportThread'));
+  assert.ok(audit.includes('finally { reportThread.shutdown() }'));
+});

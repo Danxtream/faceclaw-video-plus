@@ -1,6 +1,7 @@
 package com.faceclaw.app
 
 import java.io.File
+import java.io.RandomAccessFile
 
 /** Same-directory publication: sidecar hash is the commit marker for the pair. */
 class VideoPublication(private val encoded: File, private val metadata: File, private val overwrite: Boolean) {
@@ -56,6 +57,9 @@ class VideoPublication(private val encoded: File, private val metadata: File, pr
         for (file in work.listFiles().orEmpty()) {
             if ((file == previousEncoded || file == previousMetadata) && !pairExists) continue
             require(file.canonicalFile.parentFile == work.canonicalFile && file.isFile)
+            // FFmpeg never closes its report, so a deleted report would keep its
+            // space until the app process exits; empty it first.
+            if (file == report) RandomAccessFile(file, "rw").use { it.setLength(0) }
             file.delete()
         }
         if (work.listFiles().isNullOrEmpty()) work.delete()
