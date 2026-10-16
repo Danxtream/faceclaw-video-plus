@@ -32,6 +32,14 @@ test('New phone refuses the legacy fixed-rate firmware before playback',async()=
   await assert.rejects(p.capabilities(),/10\/15\/20 fps.*update both lenses/);
 });
 
+test('Refused capabilities name each lens with its result, error and state', async () => {
+  const left = status(), right = status();
+  right[2] = 3; right[3] = 0; left[24] = 16;
+  const p = new VideoProtocol({epoch: () => 1, exchange: async (raw, length) => [left.slice(0, length), right.slice(0, length)]}, () => 1);
+  await assert.rejects(p.capabilities(), error =>
+    /LEFT result=0 error=16 state=2 .*RIGHT result=3 error=0 state=0/.test(error.message));
+});
+
 test('Read-only queries get exactly one fresh durable ID after unavailable pages', async () => {
   for (const op of [VIDEO.shown, VIDEO.credits, VIDEO.playback]) {
     let id = 40, fail = 1;

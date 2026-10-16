@@ -121,7 +121,12 @@ export class VideoProtocol {
     return (await this.query(raw, op === VIDEO.status ? 192 : 128)).map(parseVideoStatus);
   }
   async capabilities(): Promise<void> {
-    if ((await this.status(VIDEO.caps)).some((row) => row.result || row.error)) throw new Error("Video capabilities refused");
+    const caps = await this.status(VIDEO.caps);
+    if (caps.some((row) => row.result || row.error)) {
+      const lenses = caps.map((row, i) => `${i ? "RIGHT" : "LEFT"} result=${row.result} error=${row.error} state=${row.state} stream=${row.stream} high=${row.high}`).join("; ");
+      console.error(`Video capabilities refused: ${lenses}`);
+      throw new Error(`Video capabilities refused (${lenses})`);
+    }
     const rows = await this.query(await this.header(VIDEO.playbackCaps, 8), 16);
     if (rows.some((row) => row[0] !== 1 || row[1] !== 13 || row[2] || row[3] !== 255 ||
       row[4] !== 2 || row[5] !== 7 || row[6] !== 255 || (row[7] & 7) !== 7))
