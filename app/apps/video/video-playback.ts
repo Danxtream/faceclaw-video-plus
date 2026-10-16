@@ -581,7 +581,9 @@ export class VideoPlayback {
       if (action.seek) this.av.seekTook(this.clock() - began);
       this.audioPlaying = true;
       console.error(`Video audio ${action.seek ? "seek" : "play"}: ${action.reason} lag=${Math.round(action.lag ?? 0)}ms ` +
-        `speed=${action.speed} rate=${this.av.measuredRate.toFixed(3)}`);
+        `speed=${action.speed} rate=${this.av.measuredRate.toFixed(3)}` +
+        (action.seek ? ` target=${Math.round(action.position)} landed=${this.audio.position() ?? "unknown"}` +
+          ` elapsed=${this.clock() - began}ms` : ""));
     }
     // Display only: let the time move between exact SHOWN reports.
     const video = this.view.paused ? null : this.av.video(now);

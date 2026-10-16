@@ -50,8 +50,8 @@ test('Audio far behind the picture seeks forward; small offsets leave it alone',
   assert.deepEqual(av.decide(0, 10_040, true, false), {kind: 'none'});
   assert.deepEqual(av.decide(0, 9_900, true, false), {kind: 'none'});
   // Behind must persist before a corrective seek.
-  assert.deepEqual(av.decide(0, 9_700, true, false), {kind: 'none'});
-  const behind = av.decide(300, 10_000, true, false);
+  assert.deepEqual(av.decide(0, 9_300, true, false), {kind: 'none'});
+  const behind = av.decide(300, 9_600, true, false);
   assert.equal(behind.kind, 'play');
   assert.equal(behind.seek, true);
   assert.equal(behind.position, 10_300 + VIDEO_AV_DEFAULTS.seekLeadMs);
@@ -223,4 +223,25 @@ test('Held audio resumes without seeking when a transient behind estimate recove
   const resumed = av.decide(2522, 1467, false, false);
   assert.equal(resumed.kind, 'play');
   assert.equal(resumed.seek, false);
+});
+
+test('A persistent 230 ms offset recovers without skipping audio, at every clip rate', () => {
+  for (const fps of [10, 15, 20]) {
+    const av = new VideoAvSync(60_000, videoAvOptions(fps));
+    let audio = 0, speed = 1, previous = 1000;
+    const changes = [];
+    for (let now = 1000; now <= 31_000; now += 100) {
+      audio += (now - previous) * speed; previous = now;
+      av.anchor(now - 770, now);
+      const action = av.decide(now, audio, true, false);
+      assert.notEqual(action.kind, 'pause');
+      if (action.kind === 'play') {
+        assert.equal(action.seek, false, 'small lag must never skip speech');
+        speed = action.speed; changes.push(speed);
+      }
+    }
+    assert.ok(changes.some(value => value > 1));
+    assert.ok(changes.every(value => value >= 0.95 && value <= 1.05));
+    assert.ok(Math.abs(audio - (31_000 - 770)) < 100);
+  }
 });
