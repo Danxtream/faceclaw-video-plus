@@ -41,7 +41,7 @@ import { TextViewerLayer } from '../apps/files/text-viewer'
 import { shell, rawInputEventToInputEvent, type ShellWindow } from '../ui/shell/shell'
 import { appViewportRect, SIDEBAR_WIDTH, sidebarStripVisible } from '../ui/shell/geometry'
 import { DISPLAY_MODE_VALUES, displayModeLabel, displayModeSetting, onAnySettingChanged,
-  previewColorSetting, lockScreenEnabledSetting } from '../ui/dashboard-settings'
+  previewColorSetting, lockScreenEnabledSetting, notificationPopupsSetting } from '../ui/dashboard-settings'
 import type { PhoneGesture } from '../phone-ui/phone-gestures'
 import { isWelcomeSoundPending, setWelcomeSoundPending } from '../phone-ui/onboarding-state'
 import { findSoundEffect, playSoundEffect } from '../ui/sound-effects'
@@ -155,7 +155,7 @@ export class IosPreviewController {
     shell.focusWindow(launcher.windowId)
     onIosNotificationPopup(key => {
       const notification = readActiveNotifications(128).find(n => n.key === key)
-      if (this.glassesLocked || !notification || !shouldShowNotificationOnGlasses(notification.packageName)) return
+      if (this.glassesLocked || !notification || !notificationPopupsSetting.get() || !shouldShowNotificationOnGlasses(notification.packageName)) return
       const woke = !shell.isScreenOn() && shell.wake('sidebar')
       shell.openNotificationModal(key, woke)
       this.requestShellRender()

@@ -345,6 +345,16 @@ export const lockScreenEnabledSetting = new ConfigSettingBoolean({
     (global.isIOS ? " On iPhone, this requires a device passcode and follows iOS data-protection notifications, which may be delayed after the screen locks." : ""),
 });
 
+/** Master switch over the per-app notification filter; off never opens a pop-up or wakes the glasses. */
+export const notificationPopupsSetting = new ConfigSettingBoolean({
+  id: "notification-popups",
+  label: "Notification pop-ups",
+  storageKey: "display.notificationPopups",
+  defaultValue: true,
+  description: "Show new phone notifications as a pop-up on the glasses, waking the display if it is off. " +
+    "Off still lists them in the Notifications app.",
+});
+
 // Phone display: the phone app's mirror of the glasses screen and the
 // controls around it on the main page.
 export type PreviewColor = "white" | "green";

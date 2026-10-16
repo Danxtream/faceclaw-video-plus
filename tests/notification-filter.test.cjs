@@ -159,10 +159,11 @@ test('controller filters before waking or opening a popup, and still refreshes t
   const controller = file.statements.find((node) => ts.isClassDeclaration(node) && node.name.text === 'DashboardController');
   const handler = controller.members.find((node) => node.name?.getText(file) === 'handleAndroidNotificationPosted');
   const prefs = store();
-  let wakes = 0, popups = 0, renders = 0;
+  let wakes = 0, popups = 0, renders = 0, popupsOn = true;
   const { Harness } = evaluate(`export class Harness { ${handler.getText(file)} }`, null, {
     ALL_NOTIFICATIONS: 0x7fffffff,
     readActiveNotifications: () => [{ ...mail, key: 'key' }],
+    notificationPopupsSetting: { get: () => popupsOn },
     shouldShowNotificationOnGlasses: prefs.shouldShowNotificationOnGlasses,
     shell: { isScreenOn: () => false, wake: () => { wakes++; return true; }, openNotificationModal: () => popups++ },
   });
@@ -179,4 +180,20 @@ test('controller filters before waking or opening a popup, and still refreshes t
   await instance.handleAndroidNotificationPosted('key');
   assert.equal(wakes, 1);
   assert.equal(popups, 1);
+  // The master switch off overrides an enabled app: no wake, no pop-up, tray still refreshed.
+  popupsOn = false;
+  await instance.handleAndroidNotificationPosted('key');
+  assert.equal(wakes, 1);
+  assert.equal(popups, 1);
+  assert.equal(renders, 4);
+});
+
+test('Notification pop-ups switch defaults on, sits in Display settings and also gates iPhone pop-ups', () => {
+  const settings = source('app/ui/dashboard-settings.ts');
+  const definition = settings.slice(settings.indexOf('export const notificationPopupsSetting'));
+  assert.ok(definition.includes('id: "notification-popups"') && /defaultValue: true,/.test(definition.slice(0, 400)));
+  const ios = source('app/g2/ios-preview-controller.ts');
+  const popup = ios.slice(ios.indexOf('onIosNotificationPopup('));
+  assert.ok(popup.indexOf('!notificationPopupsSetting.get()') > 0 && popup.indexOf('!notificationPopupsSetting.get()') < popup.indexOf('shell.openNotificationModal'));
+  assert.ok(source('app/ui/dashboard/settings-menus.ts').includes('toggleSettingMenuItem(notificationPopupsSetting)'));
 });

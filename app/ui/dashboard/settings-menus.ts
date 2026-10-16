@@ -60,6 +60,7 @@ import {
   enumSettingMenuItem,
   firmwareDebugFlagsSetting,
   lockScreenEnabledSetting,
+  notificationPopupsSetting,
   saveVoiceRecordingsSetting,
   showBleBandwidthSetting,
   suspendEvenHubWhenScreenOffSetting,
@@ -103,6 +104,8 @@ function settingsSections(): SettingsSection[] {
           },
         }),
         toggleSettingMenuItem(lockScreenEnabledSetting),
+        // Master switch over the Notifications app's per-app pop-up filter.
+        toggleSettingMenuItem(notificationPopupsSetting),
         // Where min-height windows (and the sidebar) sit vertically on the
         // screen; the dashboard controller repositions surfaces on change.
         enumSettingMenuItem(verticalPositionSetting),
