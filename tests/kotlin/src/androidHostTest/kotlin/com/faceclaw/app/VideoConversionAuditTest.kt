@@ -132,8 +132,9 @@ class VideoConversionAuditTest {
                 "pict_type" to "P", "interlaced_frame" to 0, "repeat_pict" to 0))
         // FFmpeg 8 provides these in separate probes, not frame pkt_pos/pkt_size.
         fun ffprobe(section: String) = mapOf("packets" to packets, "frames" to frames).getValue(section)
+        fun rows(list: List<Map<String, Any>>) = list.joinToString("\n") { row -> row.entries.joinToString("|") { "${it.key}=${it.value}" } }
         fun decode(f: List<Map<String, Any>>, p: List<Map<String, Any>>) =
-            videoDecodedPictures(f, p, { row, field -> row.getValue(field).toString().toLong() }, { row, field -> row.getValue(field).toString() })
+            videoDecodedPictures(rows(f).reader().buffered(), rows(p).reader().buffered())
         val nals = listOf(7, 8, 6, 5, 1).mapIndexed { index, type -> VideoFileReader.Nal(index * 8L + 4, 4, type, "a".repeat(64)) }
         val audit = VideoFileReader.Audit(40, "b".repeat(64), nals)
         val decoded = decode(ffprobe("frames"), ffprobe("packets"))
@@ -148,5 +149,31 @@ class VideoConversionAuditTest {
         assertFails { VideoPictureMap.build(audit, decode(frames.map { it + ("pict_type" to "B") }, packets)) }
         assertFails { VideoPictureMap.build(audit, decode(frames, packets.map { it + ("pos" to "0") })) }
         assertFails { VideoPictureMap.build(audit, decode(frames.reversed(), packets.reversed())) }
+    }
+
+    @Test fun compactProbeRowsPairOnePictureAtATimeInFfprobeFieldOrder() {
+        // Rows as FFmpeg writes them with -of compact=p=0: its own field order, side data after keyframes.
+        val packets = "size=32|pos=0|flags=K__\nsize=8|pos=32|flags=___\n"
+        val frames = "key_frame=1|width=320|height=192|pix_fmt=yuvj420p|pict_type=I|interlaced_frame=0|repeat_pict=0|" +
+            "side_datum/h_26_45__user_data_unregistered_sei_message:side_data_type=H.26[45] User Data Unregistered SEI message\n" +
+            "\nkey_frame=0|width=320|height=192|pix_fmt=yuvj420p|pict_type=P|interlaced_frame=0|repeat_pict=0\n"
+        fun decode(f: String, p: String) = videoDecodedPictures(f.reader().buffered(), p.reader().buffered())
+        val nals = listOf(7, 8, 6, 5, 1).mapIndexed { index, type -> VideoFileReader.Nal(index * 8L + 4, 4, type, "a".repeat(64)) }
+        val audit = VideoFileReader.Audit(40, "b".repeat(64), nals)
+        val decoded = decode(frames, packets)
+        assertEquals(listOf(0L, 32L), decoded.map { it.offset })
+        assertEquals(listOf(32L, 8L), decoded.map { it.bytes })
+        assertEquals(listOf(true, false), decoded.map { it.key })
+        assertEquals(listOf(3, 4), VideoPictureMap.build(audit, decoded).map { it.nal })
+        assertEquals("H.26[45] User Data Unregistered SEI message",
+            videoCompactRow(frames.lineSequence().first()).getValue("side_datum/h_26_45__user_data_unregistered_sei_message:side_data_type"))
+        assertFails { decode(frames, packets.lines().first()) }
+        assertFails { decode(frames.lines().first(), packets) }
+        assertFails { decode(frames, packets.replace("flags=K__", "flags=___")) }
+        assertFails { decode(frames, packets.replace("pos=32", "position=32")) }
+        assertFails { decode(frames.replace("key_frame=0", "key_frame=2"), packets) }
+        assertFails { decode(frames, packets.replace("size=8", "size=N/A")) }
+        var checks = 0
+        assertFails { videoDecodedPictures(frames.reader().buffered(), packets.reader().buffered()) { if (++checks == 2) error("cancelled") } }
     }
 }

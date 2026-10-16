@@ -9,6 +9,8 @@ class VideoPublication(private val encoded: File, private val metadata: File, pr
     val candidate: File
     val sidecar: File
     val report: File
+    val packets: File
+    val frames: File
     private val previousEncoded: File
     private val previousMetadata: File
     init {
@@ -19,6 +21,8 @@ class VideoPublication(private val encoded: File, private val metadata: File, pr
         candidate = File(work, "video.h264.part")
         sidecar = File(work, "video.g2.json.part")
         report = File(work, "headers.txt")
+        packets = File(work, "packets.txt")
+        frames = File(work, "frames.txt")
         previousEncoded = File(work, "previous.h264")
         previousMetadata = File(work, "previous.g2.json")
     }

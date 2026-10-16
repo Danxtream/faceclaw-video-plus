@@ -5,9 +5,11 @@ import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.FFmpegKitConfig
 import com.arthenica.ffmpegkit.FFmpegSession
 import com.arthenica.ffmpegkit.FFprobeKit
+import com.arthenica.ffmpegkit.FFprobeSession
 import com.arthenica.ffmpegkit.ReturnCode
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedReader
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
@@ -27,19 +29,41 @@ internal fun <T> withVideoReport(report: String, read: () -> String? = { System.
 }
 
 /** Pair no-reordering access units with decoded pictures; FFmpeg 8 omits frame packet fields. */
-internal fun <T> videoDecodedPictures(frames: List<T>, packets: List<T>, number: (T, String) -> Long,
-    text: (T, String) -> String, checkActive: () -> Unit = {}): List<VideoDecodedPicture> {
-    require(frames.size == packets.size) { "Packet and decoded picture counts disagree" }
-    return frames.mapIndexed { index, frame ->
+private fun videoDecodedPicture(index: Int, frame: Map<String, String>, packet: Map<String, String>): VideoDecodedPicture {
+    fun number(row: Map<String, String>, field: String) = row.getValue(field).toLong()
+    val key = number(frame, "key_frame")
+    require(key in 0L..1L && packet.getValue("flags").contains('K') == (key == 1L)) {
+        "Packet and decoded keyframe flags disagree at picture $index"
+    }
+    return VideoDecodedPicture(number(packet, "pos"), number(packet, "size"), key == 1L,
+        number(frame, "width").toInt(), number(frame, "height").toInt(), frame.getValue("pix_fmt"), frame.getValue("pict_type"),
+        number(frame, "interlaced_frame").toInt(), number(frame, "repeat_pict").toInt())
+}
+
+/** One ffprobe `-of compact=p=0` row, `key=value|key=value`, in ffprobe's own field order. Keyframe rows
+ *  append side-data text that may contain an escaped `|`; pieces without a key are skipped, and a
+ *  missing probed field still fails where it is read. */
+internal fun videoCompactRow(line: String): Map<String, String> = line.split('|').mapNotNull { field ->
+    val split = field.indexOf('=')
+    if (split > 0) field.substring(0, split) to field.substring(split + 1) else null
+}.toMap()
+
+/** Pair frame and packet rows one picture at a time, so a long clip's probe output is never held in memory. */
+internal fun videoDecodedPictures(frames: BufferedReader, packets: BufferedReader,
+    checkActive: () -> Unit = {}): List<VideoDecodedPicture> {
+    fun next(rows: BufferedReader): Map<String, String>? {
+        while (true) { val line = rows.readLine() ?: return null; if (line.isNotBlank()) return videoCompactRow(line) }
+    }
+    val result = ArrayList<VideoDecodedPicture>()
+    while (true) {
         checkActive()
-        val packet = packets[index]
-        val key = number(frame, "key_frame")
-        require(key in 0L..1L && text(packet, "flags").contains('K') == (key == 1L)) {
-            "Packet and decoded keyframe flags disagree at picture $index"
+        val frame = next(frames)
+        val packet = next(packets)
+        if (frame == null || packet == null) {
+            require(frame == null && packet == null) { "Packet and decoded picture counts disagree" }
+            return result
         }
-        VideoDecodedPicture(number(packet, "pos"), number(packet, "size"), key == 1L,
-            number(frame, "width").toInt(), number(frame, "height").toInt(), text(frame, "pix_fmt"), text(frame, "pict_type"),
-            number(frame, "interlaced_frame").toInt(), number(frame, "repeat_pict").toInt())
+        result.add(videoDecodedPicture(result.size, frame, packet))
     }
 }
 
@@ -84,7 +108,7 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
             sessionId.set(0)
         }
     }
-    private fun probe(args: Array<String>): JSONObject {
+    private fun runProbe(args: Array<String>): FFprobeSession {
         checkActive()
         val done = CountDownLatch(1)
         val session = FFprobeKit.executeWithArgumentsAsync(args) { done.countDown() }
@@ -93,12 +117,16 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
             while (!done.await(200, TimeUnit.MILLISECONDS)) checkActive()
             checkActive()
             check(ReturnCode.isSuccess(session.returnCode)) { "FFprobe failed: ${session.output.takeLast(1000)}" }
-            return JSONObject(session.output)
+            return session
         } finally {
             if (cancelled.get() || Thread.currentThread().isInterrupted) session.cancel()
             sessionId.set(0)
         }
     }
+    private fun probe(args: Array<String>): JSONObject = JSONObject(runProbe(args).output)
+    /** Printed probe output passes through FFmpegKit's log, which keeps every line in memory
+     *  and copies it to logcat; per-picture rows for a long clip go to a private file instead. */
+    private fun probeRows(args: Array<String>, rows: File) { runProbe(arrayOf("-o", rows.path, *args)) }
     fun run(): File {
         thread = Thread.currentThread()
         require(input.isFile && input.name.endsWith(".mp4", true)) { "Select an MP4 source" }
@@ -129,15 +157,15 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
             headerAudit.finish()
             val audit = VideoFileReader.audit(publication.candidate)
             progress("decoding audit", 0.99)
-            // Keep arrays separate: combined packet/frame probes interleave JSON records.
-            val packets = probe(arrayOf("-v", "error", "-framerate", fps.toString(), "-f", "h264", "-show_packets",
-                "-show_entries", "packet=pos,size,flags", "-of", "json", publication.candidate.path)).getJSONArray("packets")
-            val decoded = probe(arrayOf("-v", "error", "-err_detect", "explode", "-framerate", fps.toString(), "-f", "h264",
+            // Keep probes separate: combined packet/frame probes interleave their rows.
+            probeRows(arrayOf("-v", "error", "-framerate", fps.toString(), "-f", "h264", "-show_packets",
+                "-show_entries", "packet=pos,size,flags", "-of", "compact=p=0", publication.candidate.path), publication.packets)
+            probeRows(arrayOf("-v", "error", "-err_detect", "explode", "-framerate", fps.toString(), "-f", "h264",
                 "-show_frames", "-show_entries", "frame=key_frame,width,height,pix_fmt,pict_type,repeat_pict,interlaced_frame",
-                "-of", "json", publication.candidate.path)).getJSONArray("frames")
-            val frames = videoDecodedPictures((0 until decoded.length()).map(decoded::getJSONObject),
-                (0 until packets.length()).map(packets::getJSONObject),
-                JSONObject::getLong, JSONObject::getString, ::checkActive)
+                "-of", "compact=p=0", publication.candidate.path), publication.frames)
+            val frames = publication.frames.bufferedReader().use { decoded ->
+                publication.packets.bufferedReader().use { packets -> videoDecodedPictures(decoded, packets, ::checkActive) }
+            }
             val pictures = VideoPictureMap.build(audit, frames, fps)
             require(headerAudit.slices == pictures.size) { "Header and decoded picture counts disagree" }
             require(input.length() == bytes && input.lastModified() == modified && hash(input) == sourceHash) { "MP4 changed during conversion" }
