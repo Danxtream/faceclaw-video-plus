@@ -40,6 +40,17 @@ test('Refused capabilities name each lens with its result, error and state', asy
     /LEFT result=0 error=16 state=2 .*RIGHT result=3 error=0 state=0/.test(error.message));
 });
 
+test('An idle lens keeps its last stream error, which no longer blocks the next playback', async () => {
+  const idle = status(); idle[3] = 0; idle[24] = 16; // POWER after the app closed mid-stream
+  const p = new VideoProtocol({epoch: () => 1, exchange: async (raw, length) => raw[1] === VIDEO.playbackCaps ?
+    [1, 2].map(() => Uint8Array.from([1, 13, 0, 255, 2, 7, 255, 247, 0, 0, 0, 0, 0, 0, 0, 0])) :
+    [idle.slice(0, length), idle.slice(0, length)]}, () => 1);
+  await p.capabilities();
+  const live = status(); live[24] = 16;                // the same error on a live owner still refuses
+  const q = new VideoProtocol({epoch: () => 1, exchange: async (raw, length) => [live.slice(0, length), live.slice(0, length)]}, () => 1);
+  await assert.rejects(q.capabilities(), /refused \(LEFT result=0 error=16 state=2/);
+});
+
 test('Read-only queries get exactly one fresh durable ID after unavailable pages', async () => {
   for (const op of [VIDEO.shown, VIDEO.credits, VIDEO.playback]) {
     let id = 40, fail = 1;

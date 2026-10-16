@@ -58,7 +58,8 @@ function fixture(frames = 20, step = 67) {
   const state = {active: false, stream: 0, high: 0, expected: 0, metadata: [], decoded: [],
     paused: false, preview: false, shown: [], native: false, selection: 0, menu: false, serial: 0, target: 0,
     busyMetadata: 0, refusal: false, wrongRestore: false, failedSample: false, concurrent: 0};
-  const status = () => [1, 2].map((lens) => ({result: 0, error: 0, state: state.active ? 2 : 0, stream: state.stream,
+  // An idle lens keeps the error that ended its last stream until a START clears it (state.staleError).
+  const status = () => [1, 2].map((lens) => ({result: 0, error: state.staleError ?? 0, state: state.active ? 2 : 0, stream: state.stream,
     high: state.high, token: state.active ? 100 + lens : 0, expected: state.expected, accepted: state.expected,
     consumed: state.expected, presented: state.shown.length, pictures: state.metadata.length, copyTick: now, credits: 4, capacity: 4}));
   function advance() {
@@ -86,7 +87,7 @@ function fixture(frames = 20, step = 67) {
     timeline: async (stream, duration, pts) => { calls.push(['timeline', stream, pts]); return status(); },
     start: async (stream, native, dither, radio, preroll, paused) => {
       calls.push(['start', stream, native, dither, radio, preroll, paused]);
-      state.active = true; state.stream = state.high = stream; state.expected = 0; state.metadata = [];
+      state.active = true; state.stream = state.high = stream; state.expected = 0; state.metadata = []; state.staleError = 0;
       state.decoded = []; state.shown = []; state.preview = paused; state.paused = false; state.preroll = preroll;
       state.native = native; state.menu = false; state.serial = 0; state.selection = 0;
       return status();
@@ -468,6 +469,15 @@ test('Pause waits actual state; paused seek resets, restores and displays a fres
   assert.ok(reset < start);
   const send = f.calls.find(row => Array.isArray(row) && row[0] === 'send' && row[1] === starts[1][1]);
   assert.equal(send[3][0][0] & 31, 7); assert.equal(send[3][1][0] & 31, 8); assert.equal(send[3][2][0] & 31, 5);
+});
+
+test('An idle POWER error left by an interrupted stream does not block the next playback', async () => {
+  const f = fixture(20);
+  f.state.staleError = 16;
+  await f.player.run();
+  assert.equal(f.player.view.error, null);
+  assert.equal(f.state.shown.length, 20);
+  assert.ok(f.calls.some(row => Array.isArray(row) && row[0] === 'start'));
 });
 
 test('A pause longer than the copy-progress limit resumes without a stall error', async () => {

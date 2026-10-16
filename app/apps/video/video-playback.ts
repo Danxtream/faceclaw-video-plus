@@ -3,7 +3,7 @@ import { type VideoUploadPump, type VideoUploadProgress } from "./video-upload";
 import { VideoAvSync, videoAvOptions, type VideoAvAction } from "./video-av-sync";
 import { VideoMeasurement } from "./video-measurement";
 import { videoMeasurementLogs } from "./video-measurement-log";
-import { VIDEO, VideoProtocol, VideoReportUnavailable, videoU32, type VideoStatus } from "./video-protocol";
+import { VIDEO, VideoProtocol, VideoReportUnavailable, videoStaleError, videoU32, type VideoStatus } from "./video-protocol";
 import { parsePlayback, parseShown, parseVideoPhy, videoRestored, videoLive, videoOwnedSnapshot, videoTickSpan, videoCopyRate, videoPhyDetails,
   type VideoPhy, type VideoShown, type VideoPlaybackState } from "./video-observations";
 
@@ -164,11 +164,13 @@ export class VideoPlayback {
       catch (error) { if (this.stopping) throw new VideoCancelled(); throw this.startPhyError(`${String(error)}; ${waiting.join("; ")}`); }
     }
   }
-  private validateStatus(rows: VideoStatus[], operation: number = VIDEO.status, stream?: number, tokens?: number[]): void {
+  /** `beforeStart`: an idle lens's error from its finished stream is history that START clears. */
+  private validateStatus(rows: VideoStatus[], operation: number = VIDEO.status, stream?: number, tokens?: number[],
+    beforeStart = false): void {
     const name = Object.entries(VIDEO).find(([, value]) => value === operation)?.[0].toUpperCase() ?? "UNKNOWN";
     const failures = rows.length === 2 ? [] : [`operation=${name}(${operation}) expected=2 lenses received=${rows.length}`];
     rows.forEach((row, i) => {
-      if (row.result || row.error || row.state === 4 ||
+      if (row.result || row.error && !(beforeStart && videoStaleError(row)) || row.state === 4 ||
           (stream !== undefined && row.state !== 0 && row.stream !== stream) ||
           (tokens && row.state !== 0 && row.token !== tokens[i]))
         failures.push(`${i === 0 ? "LEFT" : "RIGHT"} operation=${name}(${operation}) result=${row.result}` +
@@ -195,7 +197,7 @@ export class VideoPlayback {
   private async begin(targetMs: number, paused: boolean): Promise<void> {
     this.measurement = null;
     const rows = await this.protocol.status();
-    this.validateStatus(rows);
+    this.validateStatus(rows, VIDEO.status, undefined, undefined, true);
     if (rows.some((row) => row.state !== 0)) throw new Error("Video START requires idle owners");
     const stream = Math.max(...rows.map((row) => row.high)) + 1;
     if (stream >= 0xffffffff) throw new Error("Video stream identity exhausted");
@@ -207,7 +209,8 @@ export class VideoPlayback {
     if (this.stopping) throw new VideoCancelled();
     const selection = this.options();
     await this.protocol.radioSelection(selection.radio);
-    this.validateStatus(await this.protocol.timeline(stream, this.source.clip.duration, this.source.clip.pictures[target].pts, this.source.clip.fps), VIDEO.timeline);
+    this.validateStatus(await this.protocol.timeline(stream, this.source.clip.duration, this.source.clip.pictures[target].pts, this.source.clip.fps),
+      VIDEO.timeline, undefined, undefined, true);
     if (this.stopping) throw new VideoCancelled();
     // Record the attempted stream before START so a partial admission gets STOP.
     this.generation = { stream, tokens: [], idr, target, prefix, firstNal, index: 0,

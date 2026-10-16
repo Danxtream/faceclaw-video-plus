@@ -65,6 +65,10 @@ export function parseVideoStatus(raw: Uint8Array): VideoStatus {
   return row;
 }
 
+/** An idle lens keeps the error that ended its last stream until a START clears it, so before
+ *  START it describes finished history, not a refusal (for example POWER after the app closed). */
+export function videoStaleError(row: VideoStatus): boolean { return row.state === 0 && row.error !== 0; }
+
 /** One serialized caller owns controls and uploads; requests survive exact replay. */
 export class VideoProtocol {
   readonly epoch: number;
@@ -122,7 +126,10 @@ export class VideoProtocol {
   }
   async capabilities(): Promise<void> {
     const caps = await this.status(VIDEO.caps);
-    if (caps.some((row) => row.result || row.error)) {
+    caps.forEach((row, i) => {
+      if (videoStaleError(row)) console.error(`Video ${i ? "RIGHT" : "LEFT"} is idle after stream ${row.stream} ended with error=${row.error}; the next START clears it`);
+    });
+    if (caps.some((row) => row.result || row.error && !videoStaleError(row))) {
       const lenses = caps.map((row, i) => `${i ? "RIGHT" : "LEFT"} result=${row.result} error=${row.error} state=${row.state} stream=${row.stream} high=${row.high}`).join("; ");
       console.error(`Video capabilities refused: ${lenses}`);
       throw new Error(`Video capabilities refused (${lenses})`);
