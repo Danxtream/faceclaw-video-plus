@@ -41,11 +41,11 @@ function playback(op, lens, stream, token, paused = false, shown = 0, position =
   if (raw.length === 48) put(raw, 36, +menu);
   return raw;
 }
-function shown(lens, stream, token, ordinal, pts, tick) {
+function shown(lens, stream, token, ordinal, pts, tick, replyTick = 0) {
   const raw = new Uint8Array(72);
   raw.set([1, VIDEO.shown, ordinal ? 0 : 3, lens]);
   if (ordinal) [stream, token, ordinal, ordinal, pts, tick, (tick - 3) >>> 0, (tick - 10) >>> 0,
-    0, 1, ordinal, 0, 0, 0, 0xffffffff].forEach((v, i) => put(raw, 4 + i * 4, v));
+    0, 1, ordinal, 0, 0, replyTick, 0xffffffff].forEach((v, i) => put(raw, 4 + i * 4, v));
   return raw;
 }
 function fixture(frames = 20, step = 67) {
@@ -62,10 +62,12 @@ function fixture(frames = 20, step = 67) {
   const status = () => [1, 2].map((lens) => ({result: 0, error: state.staleError ?? 0, state: state.active ? 2 : 0, stream: state.stream,
     high: state.high, token: state.active ? 100 + lens : 0, expected: state.expected, accepted: state.expected,
     consumed: state.expected, presented: state.shown.length, pictures: state.metadata.length, copyTick: now, credits: 4, capacity: 4}));
+  // Lens ticks may run at their own rate against the phone clock (state.tickScale).
+  const lensTick = () => Math.round(now * (state.tickScale ?? 1));
   function advance() {
     if (state.paused || !state.decoded.length) return;
     const row = state.decoded.shift();
-    now += step; state.shown.push({...row, tick: now});
+    now += step; state.shown.push({...row, tick: lensTick(), at: now});
     if (state.preview) { state.paused = true; state.preview = false; state.menu = true; }
   }
   const protocol = {
@@ -79,7 +81,7 @@ function fixture(frames = 20, step = 67) {
       calls.push('phy');
       now++;
       if (state.failedSample) { state.failedSample = false; throw new Error('diagnostics unavailable'); }
-      const rows = [1, 2].map(lens => phy(lens, state.active, now));
+      const rows = [1, 2].map(lens => phy(lens, state.active, lensTick()));
       if (state.wrongRestore && !state.active) rows[1][36] = 2;
       return rows;
     },
@@ -135,7 +137,7 @@ function fixture(frames = 20, step = 67) {
       // The firmware's 32-row ring (patches/video/shown.c) answers cursor 0 with its oldest retained row.
       const row = cursor ? state.shown.find(r => r.ordinal === cursor) :
         state.oldestShown ? state.shown[Math.max(0, state.shown.length - 32)] : state.shown.at(-1);
-      return shown(lens, stream, token, row?.ordinal ?? 0, row?.pts ?? 0, row?.tick ?? 0);
+      return shown(lens, stream, token, row?.ordinal ?? 0, row?.pts ?? 0, row?.tick ?? 0, state.replyTicks ? lensTick() : 0);
     },
   };
   let closed = false, copied = 0;
@@ -647,6 +649,25 @@ test('Audio sync anchors on the oldest retained SHOWN row, which is over two sec
     assert.equal(f.player.view.error, null);
     assert.ok(anchors.length >= 3, `anchors=${anchors.join(',')}`);
     assert.ok(anchors.at(-1) > anchors[0]);
+  } finally { sync.anchor = anchor; }
+});
+
+test('Shown anchors stay on phone time when the lens tick runs 2% fast and replies carry their tick', async () => {
+  const sync = require('../.test-build/app/apps/video/video-av-sync').VideoAvSync.prototype, anchor = sync.anchor;
+  const anchors = [];
+  sync.anchor = function (pts, at) { anchors.push({pts, at}); return anchor.call(this, pts, at); };
+  try {
+    const f = fixture(400, 100);
+    f.state.oldestShown = true; f.state.tickScale = 1.02; f.state.replyTicks = true;
+    f.player.audio = {sync: async () => {}, pause: async () => {}, close: async () => {}, position: () => 0};
+    f.onView = () => { if (anchors.length >= 6) f.player.stop(); };
+    await f.player.run();
+    assert.equal(f.player.view.error, null);
+    const shownAt = new Map(f.state.shown.map(row => [row.pts, row.at]));
+    const errors = anchors.map(a => Math.round(Math.abs(a.at - shownAt.get(a.pts))));
+    assert.ok(anchors.length >= 6, `anchors=${anchors.length}`);
+    // The START mapping is off by 2% of the session time; a reply tick only by 2% of a row's age.
+    assert.ok(Math.max(...errors) < 100, `anchor errors ${errors.join(',')} ms`);
   } finally { sync.anchor = anchor; }
 });
 

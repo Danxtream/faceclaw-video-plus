@@ -30,7 +30,8 @@ export function parsePlayback(raw: Uint8Array, lens: number, stream: number, tok
     seekSerial: raw.length === 48 ? videoU32(raw, 40) : 0, seekTarget: raw.length === 48 ? videoU32(raw, 44) : 0 };
 }
 
-export type VideoShown = { serial: number; ordinal: number; pts: number; copyTick: number; triggerTick: number; lost: number; uncertain: boolean };
+/** `replyTick`: the lens tick when it built the reply; 0 from firmware that predates it. */
+export type VideoShown = { serial: number; ordinal: number; pts: number; copyTick: number; triggerTick: number; lost: number; uncertain: boolean; replyTick: number };
 /** Busy has no capture yet; ring loss is retained, not mistaken for an optical frame. */
 export function parseShown(raw: Uint8Array, lens: number, stream: number, token: number): VideoShown | null {
   if (raw.length !== 72 || raw[0] !== 1 || raw[1] !== VIDEO.shown) throw new Error("Invalid SHOWN report");
@@ -40,7 +41,7 @@ export function parseShown(raw: Uint8Array, lens: number, stream: number, token:
       !first || serial < first || serial > high || lost !== first - 1 || !videoU32(raw, 16) || videoU32(raw, 36) & ~63)
     throw new Error("Invalid SHOWN owner or ring capture");
   return { serial, ordinal: videoU32(raw, 16), pts: videoU32(raw, 20), copyTick: videoU32(raw, 24),
-    triggerTick: videoU32(raw, 28), lost, uncertain: videoU32(raw, 60) === 0xffffffff };
+    triggerTick: videoU32(raw, 28), lost, uncertain: videoU32(raw, 60) === 0xffffffff, replyTick: videoU32(raw, 56) };
 }
 
 export type VideoPhyLink = {

@@ -700,16 +700,21 @@ export class VideoPlayback {
         this.updatePlayback(await this.playback());
         await this.clockEvidence(1);
       } else {
-        const left = parseShown(await this.protocol.shown(g.stream, g.tokens[0], 1), 1, g.stream, g.tokens[0]);
+        const leftRaw = await this.protocol.shown(g.stream, g.tokens[0], 1), leftAt = this.clock();
+        const left = parseShown(leftRaw, 1, g.stream, g.tokens[0]);
         if (!left) this.shownDue = began;
         else {
-          const right = parseShown(await this.protocol.shown(g.stream, g.tokens[1], 2, left.serial), 2, g.stream, g.tokens[1]);
+          const rightRaw = await this.protocol.shown(g.stream, g.tokens[1], 2, left.serial), rightAt = this.clock();
+          const right = parseShown(rightRaw, 2, g.stream, g.tokens[1]);
           this.view.lostReports = Math.max(left.lost, right?.lost ?? 0);
           if (right && right.serial === left.serial && right.ordinal === left.ordinal && right.pts === left.pts) {
             // Capture both immediately; never age LEFT by a passive-report interval.
-            const captures = [left, right];
-            const ages = captures.map((row, i) => Math.max(0, this.clock() - g.anchorAt -
-              videoTickSpan(row.copyTick, g.anchor[i].tick)));
+            const captures = [left, right], received = [leftAt, rightAt];
+            // The START mapping drifts with the lens tick (about 2% fast against the phone on
+            // pair 1), so age each copy against its reply tick instead; old firmware sends 0.
+            const ages = captures.map((row, i) => Math.max(0, row.replyTick ?
+              this.clock() - received[i] + videoTickSpan(row.replyTick, row.copyTick) :
+              this.clock() - g.anchorAt - videoTickSpan(row.copyTick, g.anchor[i].tick)));
             await this.applyShown(captures, ages, g.anchorUncertainty + this.clock() - began);
             await this.clockEvidence(1);
           }

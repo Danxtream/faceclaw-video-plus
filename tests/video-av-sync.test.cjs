@@ -59,14 +59,14 @@ test('Audio far behind the picture seeks forward; small offsets leave it alone',
 test('A slow picture rate lowers audio speed within the floor, at most once per interval', () => {
   const av = new VideoAvSync(600_000);
   av.anchor(0, 0);
-  av.anchor(3600, 4000);                      // 0.9x over one window
-  av.anchor(7200, 8000);
+  av.anchor(7200, 8000);                      // 0.9x over one window
+  av.anchor(14_400, 16_000);
   assert.ok(av.measuredRate < 0.95);
-  const first = av.decide(8000, 7200, true, false);
+  const first = av.decide(16_000, 14_400, true, false);
   assert.equal(first.kind, 'play');
   assert.equal(first.seek, false);
   assert.equal(first.speed, VIDEO_AV_DEFAULTS.minSpeed);
-  assert.deepEqual(av.decide(8100, 7300, true, false), {kind: 'none'});
+  assert.deepEqual(av.decide(16_100, 14_500, true, false), {kind: 'none'});
 });
 
 test('Pause stops audio; restart at the held frame starts it again in sync', () => {
@@ -115,7 +115,9 @@ function simulate({rate = 0.83, startLatency = 200, staleAfterSeek = 300, second
       const before = truePos();
       if (action.seek) { seeks.push(now); staleValue = before; staleUntil = now + staleAfterSeek; base = action.position; }
       else base = before;
-      at = now; startedAt = now + startLatency; speed = action.speed; playing = true;
+      // A speed change on playing audio (setPlaybackParams) keeps it running; only a start or seek waits.
+      if (action.seek || !playing) startedAt = now + startLatency;
+      at = now; speed = action.speed; playing = true;
       av.seekTook(action.seek ? 150 : 0);
     }
   }
@@ -132,6 +134,28 @@ test('Real start latency is learned: a steady picture needs a start and at most 
   const run = simulate({rate: 1, staleAfterSeek: 0, startLatency: 200});
   assert.ok(run.seeks.length <= 2, `seeks ${run.seeks.length}`);
   assert.equal(run.holds.length, 0);
+});
+
+test('A picture paced 2-3% fast by the lens tick is matched by audio speed instead of repeated seeks', () => {
+  // Measured on pair 1: the lens tick runs about 2% fast against the phone clock.
+  for (const rate of [1.017, 1.02, 1.023, 1.03]) {
+    // Before: speed stayed at 1 and audio needed a seek every 6-8 s (about 40 in 5 minutes).
+    const run = simulate({rate, staleAfterSeek: 0, startLatency: 200, seconds: 300});
+    const settled = run.seeks.filter(at => at > 120_000);
+    assert.ok(run.seeks.length <= 9 && settled.length === 0, `rate ${rate}: seeks at ${run.seeks.join(',')}`);
+    assert.equal(run.holds.length, 0, `rate ${rate}`);
+    assert.ok(Math.abs(run.lag) < 150, `rate ${rate}: final lag ${run.lag}`);
+  }
+});
+
+test('After a resume the rate is measured from the first moving anchor, not the resume command', () => {
+  const av = new VideoAvSync(600_000);
+  for (let t = 0; t <= 16_000; t += 1000) av.anchor(t, t);
+  av.restart(16_000, 30_000);
+  // The lenses refill for 400 ms before the held frame moves again.
+  // One rate window after the picture moves again; measuring from the command would read 0.95.
+  for (let t = 30_400; t <= 38_400; t += 1000) av.anchor(16_000 + t - 30_400, t);
+  assert.ok(av.measuredRate > 0.99, `rate ${av.measuredRate}`);
 });
 
 test('A steady small lag from start latency is corrected once the latency is learned', () => {

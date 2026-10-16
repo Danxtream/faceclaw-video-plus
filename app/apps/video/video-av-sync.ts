@@ -19,6 +19,8 @@ export type VideoAvOptions = {
   seekLeadMs: number;
   /** Slow steady drift is absorbed by speed, not by audible holds. */
   minSpeed: number;
+  /** The lenses pace pictures by their own tick, which can run slightly fast against the phone. */
+  maxSpeed: number;
   speedStep: number;
   speedIntervalMs: number;
   /** Anchors this far apart measure the long-term picture rate. */
@@ -40,7 +42,9 @@ export type VideoAvOptions = {
 // hold beyond max(80 ms, 1.5 frames), resume at max(50 ms, half a frame) behind.
 export const VIDEO_AV_DEFAULTS: VideoAvOptions = {
   frameMs: 1000 / VIDEO_DEFAULT_RATE, holdMs: Math.max(80, 1500 / VIDEO_DEFAULT_RATE), resumeMs: Math.max(50, 500 / VIDEO_DEFAULT_RATE), behindMs: 200,
-  seekLeadMs: 60, minSpeed: 0.95, speedStep: 0.015, speedIntervalMs: 3000, rateWindowMs: 4000,
+  // A lens tick about 2% fast needs fine speed steps (1.5% stopped short and left a seek every
+  // few seconds), and an 8 s rate window keeps report timing noise from hunting the speed.
+  seekLeadMs: 60, minSpeed: 0.95, maxSpeed: 1.05, speedStep: 0.004, speedIntervalMs: 3000, rateWindowMs: 8000,
   settleMs: 500, settleLimitMs: 2000, resyncIntervalMs: 1500, behindConfirmMs: 300,
   steadyBehindMs: 100, steadyConfirmMs: 2000,
 };
@@ -91,7 +95,7 @@ export class VideoAvSync {
     if (this.anchorPts !== null && at <= this.anchorAt) return;
     if (!this.rateFrom || pts < this.rateFrom.pts) this.rateFrom = { pts, at };
     else if (at - this.rateFrom.at >= this.options.rateWindowMs) {
-      const measured = Math.max(0, Math.min(1, (pts - this.rateFrom.pts) / (at - this.rateFrom.at)));
+      const measured = Math.max(0, Math.min(this.options.maxSpeed, (pts - this.rateFrom.pts) / (at - this.rateFrom.at)));
       this.rate = (this.rate + measured) / 2;
       this.rateFrom = { pts, at };
     }
@@ -103,7 +107,8 @@ export class VideoAvSync {
 
   /** Restart from a known still picture, e.g. at resume. */
   restart(pts: number, at: number): void {
-    this.anchorPts = pts; this.anchorAt = at; this.rateFrom = { pts, at };
+    // The lenses refill before the held frame moves again; measure the rate from the first shown anchor instead.
+    this.anchorPts = pts; this.anchorAt = at; this.rateFrom = null;
     this.holding = false; this.started = false;
   }
 
@@ -118,9 +123,12 @@ export class VideoAvSync {
     return Math.min(estimate, this.duration);
   }
 
-  private targetSpeed(now: number): number {
-    const desired = Math.round(Math.max(this.options.minSpeed, Math.min(1, this.rate)) * 1000) / 1000;
-    if (Math.abs(desired - this.speed) >= this.options.speedStep && now - this.speedAt >= this.options.speedIntervalMs) {
+  /** A seek already interrupts audio, so it takes the exact measured speed; playing audio moves in steps. */
+  private targetSpeed(now: number, seeking = false): number {
+    const desired = Math.round(Math.max(this.options.minSpeed, Math.min(this.options.maxSpeed, this.rate)) * 1000) / 1000;
+    // Speeds are rounded to 0.001, so allow for binary rounding when comparing against the step.
+    if ((seeking || Math.abs(desired - this.speed) >= this.options.speedStep - 1e-9) &&
+        now - this.speedAt >= this.options.speedIntervalMs) {
       this.speed = desired; this.speedAt = now;
     }
     return this.speed;
@@ -158,7 +166,7 @@ export class VideoAvSync {
     const lag = audio - video, speed = this.targetSpeed(now);
     const resync = (reason: string): VideoAvAction => {
       this.started = true; this.holding = false;
-      return this.play(now, video + this.lead * this.rate, true, speed, reason, lag);
+      return this.play(now, video + this.lead * this.rate, true, this.targetSpeed(now, true), reason, lag);
     };
     if (!playing) {
       if (!this.started) return resync("start at the shown picture");
