@@ -13,6 +13,10 @@ export const videoRadioSetting = new ConfigSettingEnum<"off" | "video">({
 export const videoDitherSetting = new ConfigSettingBoolean({
   id: "video-dither", label: "Dithering", storageKey: "video.dithering", defaultValue: false,
 });
+export const videoBlackFloorSetting = new ConfigSettingEnum<"0" | "0.25" | "0.5" | "1">({
+  id: "video-black-floor", label: "Black floor", storageKey: "video.blackFloor", defaultValue: "1",
+  values: ["0", "0.25", "0.5", "1"], formatValue: value => value,
+});
 export const videoDeblockingSetting = new ConfigSettingBoolean({
   id: "video-deblocking", label: "Deblocking filter", storageKey: "video.deblocking", defaultValue: false,
 });
@@ -31,10 +35,10 @@ export const videoDetailedReportsSetting = new ConfigSettingBoolean({
 /** Generation settings are read only at START/seek, never on a settings callback. */
 export function configuredVideoOptions(): VideoOptions {
   return { native: videoScaleSetting.get() === "native", dither: videoDitherSetting.get(), radio: videoRadioSetting.get() === "video",
-    detailedReports: videoDetailedReportsSetting.get() };
+    detailedReports: videoDetailedReportsSetting.get(), blackFloor: Number(videoBlackFloorSetting.get()) as 0 | 0.25 | 0.5 | 1 };
 }
 /** These are Video settings, not entries in the firmware's playback pause menu. */
 export function videoSettingsMenuItems() {
   return [enumSettingMenuItem(videoScaleSetting), enumSettingMenuItem(videoRadioSetting),
-    toggleSettingMenuItem(videoDitherSetting), toggleSettingMenuItem(videoDeblockingSetting)];
+    toggleSettingMenuItem(videoDitherSetting), enumSettingMenuItem(videoBlackFloorSetting), toggleSettingMenuItem(videoDeblockingSetting)];
 }

@@ -5,7 +5,7 @@ const {loader} = require('./helpers/load-typescript.cjs');
 
 function modelFixture(strip = false) {
   const calls = [], values = new Map(); let timer, observer;
-  const settings = key => ({get: () => values.get(key) ?? (key === 'radio' ? 'video' : key === 'scale' ? 'native' : key === 'rate' ? '15' : key === 'height' ? '176' : false),
+  const settings = key => ({get: () => values.get(key) ?? (key === 'radio' ? 'video' : key === 'scale' ? 'native' : key === 'rate' ? '15' : key === 'height' ? '176' : key === 'floor' ? '1' : false),
     set: value => {values.set(key, value); calls.push([key, value]);}, displayValue: () => values.get(key) === 'off' ? 'Off' : 'Video-only'});
   const player = {view: {active: true, paused: false, position: 1234, duration: 20000},
     pause: async value => calls.push(['pause', value]), seek: async value => calls.push(['seek', value]),
@@ -23,7 +23,7 @@ function modelFixture(strip = false) {
     '../native/video-converter': {convertVideo: (...args) => calls.push(['convert', ...args]), cancelVideoConversion() {}, videoConversionState: () => ({running: false, stage: 'idle', progress: 0})},
     '../apps/video': {openPhoneVideo: async path => calls.push(['play', path])},
     '../apps/video/video-session': {activeVideoSession: () => session, observeVideoSession: () => () => calls.push(['unsub-video'])},
-    '../apps/video/video-settings': {videoRadioSetting: settings('radio'), videoScaleSetting: settings('scale'), videoDitherSetting: settings('dither'), videoDeblockingSetting: settings('deblock'), videoConversionRateSetting: settings('rate'),videoConversionHeightSetting: settings('height')},
+    '../apps/video/video-settings': {videoRadioSetting: settings('radio'), videoScaleSetting: settings('scale'), videoDitherSetting: settings('dither'), videoBlackFloorSetting: settings('floor'), videoDeblockingSetting: settings('deblock'), videoConversionRateSetting: settings('rate'),videoConversionHeightSetting: settings('height')},
   });
   const module = load(strip ? 'app/phone-ui/video-strip.ts' : 'app/phone-ui/video-view-model.ts');
   return {module, calls, values, player, fixture: strip ? new module.VideoStripViewModel() : new module.VideoViewModel(),
@@ -58,6 +58,21 @@ test('Canvas selector has only 192 and 176 with automatic orientation left to th
   f.fixture.onConversionHeightChange({object:{selectedIndex:2}});
   assert.equal(f.values.get('height'),'176');
   assert.ok(f.calls.every(row=>row[0]==='height'));
+});
+
+test('Dither remains On/Off with an independent four-choice default-one floor for next START',()=>{
+  const f=modelFixture();
+  assert.equal(f.fixture.get('blackFloorIndex'),3);
+  for (const [i,value] of ['0','0.25','0.5','1'].entries()) {
+    f.fixture.onBlackFloorChange({object:{selectedIndex:i}});
+    assert.equal(f.values.get('floor'),value);
+  }
+  f.fixture.onBlackFloorChange({object:{selectedIndex:4}});
+  f.fixture.onDitherChange({object:{checked:true}});
+  assert.ok(f.calls.every(row=>['floor','dither'].includes(row[0])));
+  const xml=fs.readFileSync('app/phone-ui/video-page.xml','utf8');
+  assert.ok(xml.includes('checkedChange="{{ onDitherChange }}"'));
+  assert.ok(xml.includes('onBlackFloorChange') && !xml.includes('Half-step'));
 });
 
 test('Radio/dither settings issue no current-generation command and remote controls use one engine', async () => {

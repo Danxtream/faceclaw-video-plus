@@ -39,6 +39,7 @@
           <Label text="2M radio" /><SegmentedBar selectedIndex="{{ radioIndex }}" selectedIndexChanged="{{ onRadioChange }}"><SegmentedBarItem title="Off" /><SegmentedBarItem title="Video-only" /></SegmentedBar>
           <Label text="{{ radioLabel }}" textWrap="true" />
           <GridLayout rows="auto" columns="*,auto"><Label col="0" text="Dithering" verticalAlignment="center" /><Switch col="1" checked="{{ dither }}" checkedChange="{{ onDitherChange }}" /></GridLayout>
+          <GridLayout columns="auto,*"><Label text="Black floor" verticalAlignment="center" /><SegmentedBar col="1" isEnabled="{{ dither }}" selectedIndex="{{ blackFloorIndex }}" selectedIndexChanged="{{ onBlackFloorChange }}"><SegmentedBarItem title="0" /><SegmentedBarItem title="0.25" /><SegmentedBarItem title="0.5" /><SegmentedBarItem title="1" /></SegmentedBar></GridLayout>
           <Label text="{{ fpsLabel }}" textWrap="true" /><Label text="{{ audioLabel }}" />
         </StackLayout></ScrollView>
       </TabViewItem>

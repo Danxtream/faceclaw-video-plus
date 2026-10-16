@@ -46,6 +46,36 @@ test('Geometry START requires paired capability and carries exact odd picture ed
   }
 });
 
+test('Four black floors keep Off and default unchanged and require both lenses for tuned START',async()=>{
+  for(const depths of [[130,130],[194,130],[194,194]]) {
+    let id=1;const sent=[];
+    const p=new VideoProtocol({epoch:()=>1,exchange:async(raw,length,targets)=>{
+      sent.push(raw.slice());return raw[1]===VIDEO.playbackCaps?
+        depths.map(depth=>Uint8Array.from([1,13,0,255,depth,7,255,247,0,0,0,0,0,0,0,0])):
+        [status().slice(0,length),status().slice(0,length)].slice(0,targets===3?2:1);
+    }},()=>id++);
+    await p.capabilities();
+    for (const floor of [1,0,0.25,0.5]) {
+      await p.start(1,false,false,false,0,false,3,15,undefined,floor);
+      assert.equal(sent.at(-1).length,24);
+      if(floor!==1 && depths.includes(130)) {
+        await assert.rejects(p.start(1,false,true,false,0,false,3,15,undefined,floor),/Update both lenses.*black floor/);
+      } else {
+        for(const mask of [1,2,3]) {
+          await p.start(1,false,true,false,0,true,mask,15,undefined,floor);
+          const raw=sent.at(-1);
+          assert.equal(raw.length,floor===1?24:36);
+          if(floor!==1) {
+            assert.equal(raw[32],[1,0,0.25,0.5].indexOf(floor));
+            assert.deepEqual([...raw.slice(24,32)],[0,0,0,0,64,1,192,0]);
+            assert.deepEqual([...raw.slice(33)],[0,0,0]);
+          }
+        }
+      }
+    }
+  }
+});
+
 test('New phone refuses the legacy fixed-rate firmware before playback',async()=>{
   let id=1;
   const p=new VideoProtocol({epoch:()=>1,exchange:async(raw,length)=>raw[1]===VIDEO.playbackCaps?
