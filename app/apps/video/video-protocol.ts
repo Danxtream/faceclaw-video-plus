@@ -25,7 +25,7 @@ export interface VideoBackend {
 export const VIDEO = {
   caps: 0, start: 1, stop: 2, reset: 3, status: 4, nal: 6,
   credits: 10, timeline: 11, playbackCaps: 13, metadata: 14, shown: 15,
-  pause: 16, resume: 17, playback: 18, menu: 19, scale: 20, radio: 21,
+  pause: 16, resume: 17, playback: 18, menu: 19, scale: 20, radio: 21, pace: 25,
 } as const;
 
 // Donor clock paths top out at 250 MHz; allow two ticks for endpoint quantization.
@@ -237,6 +237,18 @@ export class VideoProtocol {
     put(raw, 8, stream); put(raw, 12, tokens[0]); put(raw, 16, tokens[1]);
     if (value !== undefined) put(raw, 20, value);
     return this.query(raw, length, 3, op === VIDEO.credits ? 5 : 2);
+  }
+  /**
+   * Put the timing coordinator's picture schedule on the phone's audio clock:
+   * picture `ordinal` is due at `ticks` (LEFT, RIGHT lens clocks). Firmware
+   * without PACE answers with a generic status reply instead of echoing op 25.
+   */
+  async pace(stream: number, tokens: readonly number[], ordinal: number, ticks: readonly number[]): Promise<Uint8Array[]> {
+    if (tokens.length !== 2 || tokens.some((value) => !value) || ticks.length !== 2) throw new Error("Video owner token missing");
+    const raw = await this.header(VIDEO.pace, 32);
+    put(raw, 8, stream); put(raw, 12, tokens[0]); put(raw, 16, tokens[1]);
+    put(raw, 20, ordinal); put(raw, 24, ticks[0]); put(raw, 28, ticks[1]);
+    return this.query(raw, 36, 3, 2);
   }
   async metadata(stream: number, ordinal: number, nal: number, pts: number): Promise<boolean> {
     const raw = await this.header(VIDEO.metadata, 24);

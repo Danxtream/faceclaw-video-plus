@@ -750,3 +750,100 @@ test('The audio timing setting moves the start seek that far ahead of the shown 
   }
   assert.equal(starts[1] - starts[0], 300);
 });
+
+function clockedAudio(f) {
+  const clock = {playing: false, base: 0, at: 0, speed: 1}, events = [];
+  const now = () => f.player.clock();
+  const position = () => clock.playing ? clock.base + (now() - clock.at) * clock.speed : clock.base;
+  f.player.audio = {
+    sync: async (target, playing, speed, tolerance) => {
+      const current = position();
+      clock.base = Math.abs(current - target) > tolerance ? target : current; clock.at = now();
+      clock.playing = playing; clock.speed = speed; events.push({kind: 'sync', target, speed, tolerance, at: now()});
+    },
+    pause: async () => { clock.base = position(); clock.at = now(); clock.playing = false; events.push({kind: 'pause', at: now()}); },
+    close: async () => {},
+    position,
+  };
+  return {events, position};
+}
+
+function paceRecorder(f, position) {
+  const paces = [];
+  f.protocol.pace = async (stream, tokens, ordinal, ticks) => {
+    paces.push({ordinal, ticks: [...ticks], at: f.player.clock(), heard: position()});
+    return [1, 2].map(() => { const row = new Uint8Array(36); row.set([1, VIDEO.pace, 0]); return row; });
+  };
+  return paces;
+}
+
+test('Audio master: a stalled picture restarts ahead at the audio once, never pausing or seeking the audio', async () => {
+  const f = fixture(150); f.state.tickScale = 1.014; f.state.replyTicks = true;
+  const {events} = clockedAudio(f);
+  const paces = paceRecorder(f, () => 0);
+  // After the second PACE the lenses stall: no pictures shown and no decoder room,
+  // as when decoding or delivery stops. A new START (the skip) clears it.
+  const owned = f.protocol.owned, start = f.protocol.start, pace = f.protocol.pace;
+  f.protocol.pace = async (...args) => { const rows = await pace(...args); if (paces.length === 3) f.state.stall = true; return rows; };
+  f.protocol.owned = async (op, stream, tokens, length, value) => {
+    if (op !== VIDEO.credits) return owned(op, stream, tokens, length, value);
+    // Like the firmware's decoded queue, decoding runs at most six pictures past the
+    // screen (three parameter NALs precede the pictures); a stall shows nothing new.
+    const rows = f.state.stall ? [1, 2].map(() => { const raw = new Uint8Array(6); put(raw, 0, f.state.expected); return raw; }) :
+      await owned(op, stream, tokens, length, value);
+    const free = Math.max(0, Math.min(4, 3 + f.state.shown.length + 6 - f.state.expected));
+    for (const raw of rows) raw[4] = 32 | free;
+    return rows;
+  };
+  f.protocol.start = async (...args) => { f.state.stall = false; return start(...args); };
+  await f.player.run();
+  assert.equal(f.player.view.error, null);
+  const starts = f.calls.filter((row) => Array.isArray(row) && row[0] === 'start');
+  assert.ok(starts.length >= 2 && starts.length <= 4, `starts ${starts.length}`);
+  const syncs = events.filter((e) => e.kind === 'sync');
+  assert.equal(syncs.length, 1, JSON.stringify(events)); // the first shown picture only
+  assert.ok(!events.some((e) => e.kind === 'pause' && e.at < f.player.clock() - 1000));
+  assert.ok(paces.length > 1);
+});
+
+test('Audio master: PACE firmware gets the pictures paced while audio plays untouched at normal speed', async () => {
+  // Pictures here come slightly faster than real time, so only the pacing arithmetic is under test.
+  const f = fixture(150, 50); f.state.tickScale = 1.014; f.state.replyTicks = true;
+  const {events, position} = clockedAudio(f);
+  const paces = [];
+  f.protocol.pace = async (stream, tokens, ordinal, ticks) => {
+    paces.push({ordinal, ticks: [...ticks], at: f.player.clock(), heard: position()});
+    return [1, 2].map(() => { const row = new Uint8Array(36); row.set([1, VIDEO.pace, 0]); return row; });
+  };
+  await f.player.run();
+  assert.equal(f.player.view.error, null);
+  // The probe asks for a picture 20 s out, which firmware ignores.
+  assert.equal(paces[0].ordinal, 1);
+  assert.ok(paces[0].ticks.every((tick) => tick > Math.round(paces[0].at * 1.014) + 19_000));
+  const real = paces.slice(1);
+  assert.ok(real.length >= 2, `paces ${real.length}`);
+  // Audio starts once on the shown picture at normal speed, then is never nudged, paused or re-seeked.
+  const syncs = events.filter((e) => e.kind === 'sync');
+  assert.ok(syncs.length >= 1 && syncs.every((e) => e.speed === 1), JSON.stringify(syncs));
+  const started = syncs[0].at;
+  assert.ok(!events.some((e) => e.at > started && (e.kind === 'pause' && e.at < real.at(-1).at || e.kind === 'sync' && e !== syncs[0])),
+    JSON.stringify(events));
+  const pts = f.clip.pictures.map((picture) => picture.pts);
+  for (const pace of real) {
+    // Picture N is due when the audio heard reaches its time, in each lens's 1.4%-fast clock.
+    const due = pace.at + pts[pace.ordinal - 1] - pace.heard;
+    assert.ok(due >= pace.at + 400 - 70, `due ${due} at ${pace.at}`);
+    for (const tick of pace.ticks) assert.ok(Math.abs((tick - Math.round(due * 1.014)) | 0) <= 100, `tick ${tick} due ${due}`);
+  }
+  assert.ok(real.every((pace, i) => !i || pace.ordinal > real[i - 1].ordinal));
+});
+
+test('Firmware without PACE keeps picture-led audio sync', async () => {
+  const f = fixture(40);
+  clockedAudio(f);
+  let calls = 0;
+  f.protocol.pace = async () => { calls++; return [1, 2].map(() => { const row = new Uint8Array(36); row.set([1, 7, 1]); return row; }); };
+  await f.player.run();
+  assert.equal(f.player.view.error, null);
+  assert.equal(calls, 1); // only the probe
+});

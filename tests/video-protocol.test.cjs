@@ -293,3 +293,18 @@ test('Admitted data and future metadata share a bounded window without inventing
   epoch++;
   await assert.rejects(protocol.sendNalsWithMetadata(50, 3, Uint8Array.of(0x65), next), /generation/);
 });
+
+test('PACE carries stream, both owner tokens, the picture and each lens tick, and needs both tokens', async () => {
+  let id = 40; const sent = [];
+  const protocol = new VideoProtocol({epoch: () => 1, exchange: async (raw, length, targets) => {
+    sent.push({raw, length, targets});
+    return [1, 2].map(() => { const row = new Uint8Array(length); row.set([1, VIDEO.pace, 0]); return row; });
+  }}, () => id++);
+  const rows = await protocol.pace(9, [101, 102], 25, [7, 0xffffffff]);
+  assert.equal(rows.length, 2);
+  const {raw, length, targets} = sent[0];
+  assert.equal(raw.length, 32); assert.equal(raw[1], 25); assert.equal(length, 36); assert.equal(targets, 3);
+  assert.deepEqual([8, 12, 16, 20, 24, 28].map((offset) => videoU32(raw, offset)), [9, 101, 102, 25, 7, 0xffffffff]);
+  await assert.rejects(protocol.pace(9, [101, 0], 25, [7, 8]), /token/);
+  await assert.rejects(protocol.pace(9, [101, 102], 25, [7]), /token/);
+});

@@ -1,6 +1,7 @@
 import { videoSeekPoint, type VideoSource } from "./video-clip";
 import { type VideoUploadPump, type VideoUploadProgress } from "./video-upload";
 import { VideoAvSync, videoAvOptions, type VideoAvAction } from "./video-av-sync";
+import { VideoAudioClock, VideoLensClock, videoPacePlan, videoPaceSpan, videoSkipTarget } from "./video-pacing";
 import { VideoMeasurement } from "./video-measurement";
 import { videoMeasurementLogs } from "./video-measurement-log";
 import { VIDEO, VideoProtocol, VideoReportUnavailable, videoStaleError, videoU32, type VideoStatus } from "./video-protocol";
@@ -8,6 +9,9 @@ import { parsePlayback, parseShown, parseVideoPhy, videoRestored, videoLive, vid
   type VideoPhy, type VideoShown, type VideoPlaybackState } from "./video-observations";
 
 declare const console: { error(message: string): void };
+
+/** Audio master: a picture this far behind the audio for a second restarts at the audio instead of catching up. */
+const VIDEO_STALL_SKIP_MS = 1500;
 
 /** Audio stays on the phone's existing media route; all methods are asynchronous. */
 export interface VideoAudio {
@@ -28,8 +32,8 @@ export type VideoPlaybackView = {
   cleanupFailed: boolean;
   hostPhy: string;
 };
-type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement" | "timedNal" | "slices">>;
-type Intent = { kind: "pause" | "seek" | "scale" | "menu"; value: number | boolean; resolve: () => void; reject: (error: unknown) => void };
+type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement" | "timedNal" | "slices" | "pace">>;
+type Intent = { kind: "pause" | "seek" | "scale" | "menu" | "skip"; value: number | boolean; resolve: () => void; reject: (error: unknown) => void };
 type Generation = { stream: number; tokens: number[]; idr: number; target: number; prefix: number[]; firstNal: number; index: number; count: number; metadata: number; paused: boolean; reached: boolean; oldPhy: VideoPhy[]; started: number; anchor: VideoPhy[]; anchorAt: number; anchorUncertainty: number; detailedReports: boolean; pump?: VideoUploadPump };
 
 class VideoCancelled extends Error { constructor() { super("Video cancelled"); } }
@@ -59,6 +63,17 @@ export class VideoPlayback {
   private audioOffsetMs = 0;
   private audioOffsetAt = Number.NEGATIVE_INFINITY;
   private audioPlaying = false;
+  // Audio-master pacing: firmware with PACE shows pictures on the audio clock;
+  // without it the picture leads and audio follows (VideoAvSync).
+  private paceMode: "unknown" | "on" | "off" = "unknown";
+  private masterStarted = false;
+  private readonly lensClocks = [new VideoLensClock(), new VideoLensClock()];
+  private readonly audioClock = new VideoAudioClock();
+  private paces: { ordinal: number; ticks: [number, number]; applied: number }[] = [];
+  private paceLatency: number[] = [];
+  private lastShownOrdinal = 0;
+  private stallSince: number | null = null;
+  private skippedAt = Number.NEGATIVE_INFINITY;
   private positionShownAt = 0;
   private rate = { at: 0, sent: 0, consumed: 0, sentPictures: 0, consumedPictures: 0, drops: 0 };
   private measurement: VideoMeasurement | null = null;
@@ -90,7 +105,11 @@ export class VideoPlayback {
   stop(): void { this.stopping = true; this.generation?.pump?.pause(); }
   private async phy(): Promise<VideoPhy[]> {
     await this.suspendUpload();
-    return (await this.protocol.phy()).map((raw, i) => parseVideoPhy(raw, i + 1));
+    const sent = this.clock();
+    const rows = (await this.protocol.phy()).map((raw, i) => parseVideoPhy(raw, i + 1));
+    const received = this.clock();
+    rows.forEach((row, i) => this.lensClocks[i].add(sent, received, row.tick));
+    return rows;
   }
   private uploadProgress(): VideoUploadProgress {
     const g = this.generation!, row = g.pump!.snapshot();
@@ -258,6 +277,7 @@ export class VideoPlayback {
     this.generation.anchor = ownedPhy;
     this.generation.anchorAt = (anchorBegin + this.clock()) / 2;
     this.generation.anchorUncertainty = (this.clock() - anchorBegin) / 2;
+    if (this.paceMode === "unknown") this.paceMode = await this.probePace(stream, this.generation.tokens, ownedPhy);
     this.updateHostPhy(ownedPhy);
     this.view.native = selection.native;
     this.view.paused = paused;
@@ -270,6 +290,7 @@ export class VideoPlayback {
     this.progressAt = this.clock(); this.progress = -1;
     this.lastSeek = 0;
     this.av = this.audio.position ? new VideoAvSync(this.source.clip.duration, videoAvOptions(this.source.clip.fps)) : null;
+    this.paces = []; this.lastShownOrdinal = 0; this.stallSince = null;
     this.rate = { at: this.clock(), sent: 0, consumed: Math.max(0, this.consumed), sentPictures: 0, consumedPictures: 0, drops: 0 };
     this.measurement = new VideoMeasurement(stream, this.generation.tokens, this.source.clip.fps);
     this.nativeMeasurement = null;
@@ -354,6 +375,13 @@ export class VideoPlayback {
     if (this.stopping) throw new VideoCancelled();
     await this.suspendUpload();
     if (!this.generation!.reached) await this.preview();
+    if (request.kind === "skip") {
+      // Audio keeps playing; the restarted picture is paced onto it.
+      await this.retire(true);
+      await this.begin(Number(request.value), false);
+      await this.preview();
+      return;
+    }
     if (request.kind === "seek") {
       await this.pauseAudio();
       await this.retire(true);
@@ -558,6 +586,7 @@ export class VideoPlayback {
   private async pauseAudio(): Promise<void> {
     await this.audio.pause();
     this.audioPlaying = false;
+    this.masterStarted = false;
   }
   /** Presentation time of the newest picture either decoder has taken, if shown. */
   private consumedPts(): number | null {
@@ -579,6 +608,10 @@ export class VideoPlayback {
     const now = this.clock();
     // The offset is tuned by ear during playback; a few reads a second is enough.
     if (now - this.audioOffsetAt >= 250) { this.audioOffsetMs = this.options().audioOffsetMs ?? 0; this.audioOffsetAt = now; }
+    if (this.paceMode === "on" && this.masterStarted && this.audioPlaying && !this.view.paused) {
+      await this.followAudio(now);
+      return;
+    }
     const action: VideoAvAction = this.av.decide(now, this.audio.position(), this.audioPlaying, this.view.paused, this.audioOffsetMs);
     if (action.kind === "pause") {
       await this.pauseAudio();
@@ -586,9 +619,12 @@ export class VideoPlayback {
     } else if (action.kind === "play") {
       // A huge tolerance keeps MediaPlayer's position when no seek is wanted.
       const began = this.clock();
+      // Audio-master audio plays at normal speed: the pictures follow it via PACE.
+      if (this.paceMode === "on") action.speed = 1;
       await this.audio.sync(action.position, true, action.speed, action.seek ? 0 : 1_000_000_000);
       if (action.seek) this.av.seekTook(this.clock() - began);
       this.audioPlaying = true;
+      if (this.paceMode === "on") { this.masterStarted = true; this.audioClock.reset(this.clock()); this.stallSince = null; }
       console.error(`Video audio ${action.seek ? "seek" : "play"}: ${action.reason} lag=${Math.round(action.lag ?? 0)}ms ` +
         `speed=${action.speed} rate=${this.av.measuredRate.toFixed(3)}` +
         (action.seek ? ` target=${Math.round(action.position)} landed=${this.audio.position() ?? "unknown"}` +
@@ -596,6 +632,72 @@ export class VideoPlayback {
     }
     // Display only: let the time move between exact SHOWN reports.
     const video = this.view.paused ? null : this.av.video(now);
+    if (video !== null && now - this.positionShownAt >= 1000) {
+      this.view.position = Math.round(video); this.positionShownAt = now; this.notify();
+    }
+  }
+  /** Firmware with PACE echoes operation 25; older firmware refuses it with a generic status reply. */
+  private async probePace(stream: number, tokens: readonly number[], phy: VideoPhy[]): Promise<"on" | "off"> {
+    if (!this.protocol.pace || !this.audio.position) return "off";
+    try {
+      // Due 20 s from now: firmware ignores anything over 10 s away, so the probe changes nothing.
+      const rows = await this.protocol.pace(stream, tokens, 1, phy.map((row) => (row.tick + 20_000) >>> 0));
+      const on = rows.every((row) => row[1] === VIDEO.pace);
+      console.error(`Video sync: ${on ? "audio master (PACE)" : "picture-led (firmware without PACE)"}`);
+      return on ? "on" : "off";
+    } catch (error) {
+      console.error(`Video sync: picture-led, PACE probe failed: ${error}`);
+      return "off";
+    }
+  }
+  /** Re-anchor the lenses' picture schedule on the audio being heard, a picture or two ahead. */
+  private async pace(): Promise<void> {
+    const g = this.generation!;
+    if (this.paceMode !== "on" || !this.masterStarted || !g.reached || this.view.paused || !this.protocol.pace) return;
+    const now = this.clock(), heard = this.audioClock.heard(now);
+    if (heard === null) return;
+    const latency = this.paceLatency.length ? [...this.paceLatency].sort((a, b) => a - b)[this.paceLatency.length >> 1] : 0;
+    const plan = videoPacePlan({ now, heard, offset: this.audioOffsetMs, first: this.lastShownOrdinal + 1, lead: 400,
+      pts: this.source.clip.pictures.slice(g.idr).map((picture) => picture.pts), clocks: this.lensClocks, latency });
+    if (!plan) return;
+    const rows = await this.protocol.pace(g.stream, g.tokens, plan.ordinal, plan.ticks);
+    // STALE is a race with STOP or seek; FORMAT means a malformed command.
+    if (rows.some((row) => row[1] !== VIDEO.pace || (row[2] && row[2] !== 2))) throw new Error("Video PACE refused");
+    // The coordinator applies it on its next loop pass; age copies from slightly after the reply.
+    this.paces.push({ ordinal: plan.ordinal, ticks: plan.ticks, applied: this.lensClocks[1].tickAt(this.clock() + 50) ?? 0 });
+    if (this.paces.length > 4) this.paces.shift();
+    console.error(`Video pace ordinal=${plan.ordinal} dueIn=${Math.round(plan.due - now)}ms heard=${Math.round(heard)} ` +
+      `rate=${this.lensClocks[1].rate.toFixed(4)} latency=${latency}`);
+  }
+  /** RIGHT copy minus commanded due tick for an on-time picture: the steady display-path delay. */
+  private learnPaceLatency(row: VideoShown): void {
+    const pace = [...this.paces].reverse().find((entry) => ((row.copyTick - entry.applied) | 0) >= 0);
+    if (!pace) return;
+    const period = 1000 / this.source.clip.fps;
+    const due = (pace.ticks[1] + videoPaceSpan(this.source.clip.fps, row.ordinal - pace.ordinal)) >>> 0;
+    const late = (row.copyTick - due) | 0;
+    // Catch-up pictures are late by design; only on-time copies measure the path.
+    if (late <= -period || late >= period) return;
+    this.paceLatency.push(late);
+    if (this.paceLatency.length > 9) this.paceLatency.shift();
+  }
+  /** Audio master: audio plays untouched; a picture stalled far behind restarts at the audio. */
+  private async followAudio(now: number): Promise<void> {
+    this.audioClock.add(now, this.audio.position!());
+    const heard = this.audioClock.heard(now), video = this.av!.video(now);
+    if (heard !== null && video !== null && heard - this.audioOffsetMs - video > VIDEO_STALL_SKIP_MS) {
+      this.stallSince ??= now;
+      // Restarting takes about two seconds; land the new picture just ahead of the audio.
+      const target = videoSkipTarget(this.source.clip, heard - this.audioOffsetMs + 2000, 2 * this.source.clip.fps);
+      // Skip only toward pictures still ahead, at most once per few seconds; near
+      // the end there is nothing to land on, so the picture catches up instead.
+      if (now - this.stallSince >= 1000 && now - this.skippedAt >= 4000 && target > video + 1000 &&
+          target < this.source.clip.duration - 500 && !this.intents.some((intent) => intent.kind === "skip")) {
+        this.skippedAt = now;
+        console.error(`Video skip: picture ${Math.round(heard - this.audioOffsetMs - video)}ms behind audio, restart at ${target}`);
+        this.intents.push({ kind: "skip", value: target, resolve: () => {}, reject: () => {} });
+      }
+    } else this.stallSince = null;
     if (video !== null && now - this.positionShownAt >= 1000) {
       this.view.position = Math.round(video); this.positionShownAt = now; this.notify();
     }
@@ -632,6 +734,7 @@ export class VideoPlayback {
     if (!picture || picture.pts !== left.pts || left.ordinal !== right.ordinal || left.pts !== right.pts ||
         g.idr + left.ordinal - 1 < g.target) throw new Error("Shown picture does not match audited seek timeline");
     g.reached = true;
+    this.lastShownOrdinal = left.ordinal;
     this.view.position = left.pts;
     this.view.lostReports = Math.max(left.lost, right.lost);
     this.view.audioUncertainty = captures.some((row) => row.uncertain) ? null : uncertainty;
@@ -711,12 +814,16 @@ export class VideoPlayback {
         this.updatePlayback(await this.playback());
         await this.clockEvidence(1);
       } else {
+        const leftSent = this.clock();
         const leftRaw = await this.protocol.shown(g.stream, g.tokens[0], 1), leftAt = this.clock();
         const left = parseShown(leftRaw, 1, g.stream, g.tokens[0]);
         if (!left) this.shownDue = began;
         else {
           const rightRaw = await this.protocol.shown(g.stream, g.tokens[1], 2, left.serial), rightAt = this.clock();
           const right = parseShown(rightRaw, 2, g.stream, g.tokens[1]);
+          // Each reply carries its lens tick at reply time: a free clock reading for pacing.
+          if (left.replyTick) this.lensClocks[0].add(leftSent, leftAt, left.replyTick);
+          if (right?.replyTick) this.lensClocks[1].add(leftAt, rightAt, right.replyTick);
           this.view.lostReports = Math.max(left.lost, right?.lost ?? 0);
           if (right && right.serial === left.serial && right.ordinal === left.ordinal && right.pts === left.pts) {
             // Capture both immediately; never age LEFT by a passive-report interval.
@@ -727,12 +834,14 @@ export class VideoPlayback {
               this.clock() - received[i] + videoTickSpan(row.replyTick, row.copyTick) :
               this.clock() - g.anchorAt - videoTickSpan(row.copyTick, g.anchor[i].tick)));
             await this.applyShown(captures, ages, g.anchorUncertainty + this.clock() - began);
+            this.learnPaceLatency(right);
             await this.clockEvidence(1);
           }
         }
       }
     } else if (g.index === g.count) this.updatePlayback(await this.playback());
     else await this.credits();
+    if (!this.view.paused) await this.pace();
     await this.collectMeasurement();
     if (this.view.paused) await this.pauseAudio();
     this.notify();
