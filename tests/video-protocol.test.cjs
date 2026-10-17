@@ -346,7 +346,7 @@ test('Measuring firmware breakdown logs both reports raw and stops for good on o
     await protocol.decodeBreakdown();
   } finally { console.error = original; }
   assert.deepEqual(kinds, ['7/0', '7/1', '3/0', '3/1']);
-  assert.ok(output.some(line => /^Video decode-detail side=1 generation=9 sliceSetup=4294967298 mbLoop=3 input=4 benchDone=1 ccr=196608 .* windowBytes=16128$/.test(line)));
+  assert.ok(output.some(line => /^Video decode-detail side=1 generation=9 sliceSetup=4294967298 mbLoop=3 input=4 deblock=0 benchDone=1 ccr=196608 .* windowBytes=16128 counterBefore=0 counterAfter=0$/.test(line)));
   const left = output.find(line => line.startsWith('Video decode-sections side=1'));
   assert.match(left, /decodeCycles=4294967301 maxPictureCycles=777 sectionPictures=40 intraI=100 interP=101/);
   assert.match(left, /intra=107 motionCalls=10 .* timerCost=15 headerCycles=16$/);

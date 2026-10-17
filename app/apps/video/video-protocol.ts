@@ -240,10 +240,10 @@ export class VideoProtocol {
     (await this.query(detailRaw, 128)).forEach((row, i) => {
       if (row[2] || row[3] !== 7 || row[4] !== 1) { console.error(`Video decode-detail side=${i + 1} result=${row[2]}`); return; }
       const bench = ["benchDone", "ccr", "mpuCtrl", "frameAddress", "stride", "width", "height", "aluCycles",
-        "frameReadCycles", "frameBytes", "blockColdCycles", "blockHotCycles", "blockBytes", "windowCycles", "windowBytes"]
+        "frameReadCycles", "frameBytes", "blockColdCycles", "blockHotCycles", "blockBytes", "windowCycles", "windowBytes", "counterBefore", "counterAfter"]
         .map((name, j) => `${name}=${videoU32(row, 36 + j * 4)}`).join(" ");
       console.error(`Video decode-detail side=${i + 1} generation=${videoU32(row, 8)} sliceSetup=${u64(row, 12)} ` +
-        `mbLoop=${u64(row, 20)} input=${u64(row, 28)} ${bench}`);
+        `mbLoop=${u64(row, 20)} input=${u64(row, 28)} deblock=${u64(row, 104)} ${bench}`);
     });
     const stages = ["decode", "queueWait", "queueCopy", "pack", "display", "bridge", "sync", "ingress"];
     for (const page of [0, 1]) {
