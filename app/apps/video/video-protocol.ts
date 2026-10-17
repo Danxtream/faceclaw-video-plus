@@ -80,6 +80,7 @@ export class VideoProtocol {
   private pictureStyle = false;
   private multiSlice = false;
   private breakdownOff = false;
+  private breakdownRefusals = 0;
   /** Both lenses accept a picture's frame time inside its VCL NAL record. */
   get timedNal(): boolean { return this.timed; }
   /** Both lenses decode pictures split into several slices (large-keyframe clips). */
@@ -194,8 +195,9 @@ export class VideoProtocol {
   }
   /**
    * Measuring firmware only: log both lenses' cumulative decoder sections (diagnostics kind 7)
-   * and per-stage profile (kind 3) as raw counters; differences are taken offline. The first
-   * reply that isn't a kind-7 page means firmware without it, and stops the polling for good.
+   * and per-stage profile (kind 3) as raw counters; differences are taken offline. A reply that
+   * isn't a diagnostics page, or five refused reads in a row, mean firmware without it and stop
+   * the polling for good.
    */
   async decodeBreakdown(): Promise<void> {
     if (this.breakdownOff) return;
@@ -208,10 +210,23 @@ export class VideoProtocol {
       console.error(`Video decode-sections unavailable: ${error}`);
       return;
     }
-    if (sections.some((row) => row[0] !== 1 || row[1] !== 7 || row[3] !== 7)) { this.breakdownOff = true; return; }
+    if (sections.some((row) => row[0] !== 1 || row[1] !== 7)) {
+      this.breakdownOff = true;
+      console.error(`Video decode-sections stopped: unexpected reply ${sections.map((row) => Array.from(row.subarray(0, 8)).join(",")).join(" | ")}`);
+      return;
+    }
+    // A lens refuses (for example STALE around a START) before it fills the page, so a refusal
+    // carries no kind byte. Skip that read; only a run of refusals means no measuring firmware.
+    if (sections.every((row) => row[2] || row[3] !== 7)) {
+      if (++this.breakdownRefusals >= 5) this.breakdownOff = true;
+      console.error(`Video decode-sections refused results=${sections.map((row) => row[2]).join(",")}` +
+        `${this.breakdownOff ? " stopped after 5 refusals" : ""}`);
+      return;
+    }
+    this.breakdownRefusals = 0;
     const u64 = (row: Uint8Array, at: number) => videoU32(row, at) + videoU32(row, at + 4) * 2 ** 32;
     sections.forEach((row, i) => {
-      if (row[2] || row[6] !== i + 1) { console.error(`Video decode-sections side=${i + 1} result=${row[2]}`); return; }
+      if (row[2] || row[3] !== 7 || row[6] !== i + 1) { console.error(`Video decode-sections side=${i + 1} result=${row[2]}`); return; }
       const names = ["intraI", "interP", "intraP", "completion", "motion", "residual", "transform", "intra"];
       const cycles = names.map((name, j) => `${name}=${u64(row, 32 + j * 8)}`).join(" ");
       const counts = ["motionCalls", "residualCalls", "transformCalls", "intraCalls", "zeroTransforms", "timerCost", "headerCycles"]

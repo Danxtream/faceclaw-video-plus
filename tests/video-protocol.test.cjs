@@ -356,3 +356,29 @@ test('Measuring firmware breakdown logs both reports raw and stops for good on o
     assert.equal(logged.some(line => line.includes('decode-sections unavailable')), reply === 'throws');
   }
 });
+
+test('A refused breakdown read is skipped, not taken for older firmware', async () => {
+  const original = console.error;
+  let id = 500, sends = 0, refuseBoth = false;
+  const page = (side, kind, result) => {
+    const row = new Uint8Array(128); row.set([1, 7, result, result ? 0 : kind, 0, 1, side]); return row;
+  };
+  const protocol = new VideoProtocol({epoch: () => 1, exchange: async (raw) => {
+    if (raw[8] === 7) sends++;
+    // The right lens refuses STALE before filling the page: no kind byte, as on the glasses.
+    return [1, 2].map(side => page(side, raw[8], refuseBoth || (raw[8] === 7 && side === 2 && sends === 1) ? 2 : 0));
+  }}, () => id++);
+  const logged = [];
+  try {
+    console.error = line => logged.push(line);
+    await protocol.decodeBreakdown();
+    await protocol.decodeBreakdown();
+    assert.equal(sends, 2);
+    assert.ok(logged.some(line => line === 'Video decode-sections side=2 result=2'));
+    assert.equal(logged.filter(line => line.startsWith('Video decode-sections side=1 generation=')).length, 2);
+    refuseBoth = true;
+    for (let i = 0; i < 6; i++) await protocol.decodeBreakdown();
+  } finally { console.error = original; }
+  assert.equal(sends, 7);
+  assert.ok(logged.some(line => line.endsWith('stopped after 5 refusals')));
+});
