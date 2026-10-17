@@ -22,9 +22,7 @@ export interface VideoAudio {
   position?(): number | null;
 }
 export const silentVideoAudio: VideoAudio = { sync: async () => {}, pause: async () => {}, close: async () => {} };
-export type VideoOptions = { native: boolean; dither: boolean; radio: boolean; detailedReports?: boolean; blackFloor?: 0 | 0.25 | 0.5 | 1;
-  /** Phone-side only and read while playing: audio plays this many ms ahead of the picture. */
-  audioOffsetMs?: number };
+export type VideoOptions = { native: boolean; dither: boolean; radio: boolean; detailedReports?: boolean; blackFloor?: 0 | 0.25 | 0.5 | 1 };
 export type VideoPlaybackView = {
   active: boolean; paused: boolean; menuOpen: boolean; selection: number; native: boolean;
   position: number; duration: number; fps: number | null; intervals: number;
@@ -60,8 +58,6 @@ export class VideoPlayback {
   private creditBudget = 0;
   private metadataStaged = false;
   private av: VideoAvSync | null = null;
-  private audioOffsetMs = 0;
-  private audioOffsetAt = Number.NEGATIVE_INFINITY;
   private audioPlaying = false;
   // Audio-master pacing: firmware with PACE shows pictures on the audio clock;
   // without it the picture leads and audio follows (VideoAvSync).
@@ -613,12 +609,11 @@ export class VideoPlayback {
     this.av.available(this.consumedPts());
     const now = this.clock();
     // The offset is tuned by ear during playback; a few reads a second is enough.
-    if (now - this.audioOffsetAt >= 250) { this.audioOffsetMs = this.options().audioOffsetMs ?? 0; this.audioOffsetAt = now; }
     if (this.paceMode === "on" && this.masterStarted && this.audioPlaying && !this.view.paused) {
       await this.followAudio(now);
       return;
     }
-    const action: VideoAvAction = this.av.decide(now, this.audio.position(), this.audioPlaying, this.view.paused, this.audioOffsetMs);
+    const action: VideoAvAction = this.av.decide(now, this.audio.position(), this.audioPlaying, this.view.paused);
     if (action.kind === "pause") {
       await this.pauseAudio();
       console.error(`Video audio hold: ${action.reason}${action.lag === null ? "" : ` lag=${Math.round(action.lag)}ms`}`);
@@ -663,7 +658,7 @@ export class VideoPlayback {
     const now = this.clock(), heard = this.audioClock.heard(now);
     if (heard === null) return;
     const latency = this.paceLatency.length ? [...this.paceLatency].sort((a, b) => a - b)[this.paceLatency.length >> 1] : 0;
-    const plan = videoPacePlan({ now, heard, offset: this.audioOffsetMs, first: this.lastShownOrdinal + 1, lead: 400,
+    const plan = videoPacePlan({ now, heard, offset: 0, first: this.lastShownOrdinal + 1, lead: 400,
       pts: this.source.clip.pictures.slice(g.idr).map((picture) => picture.pts), clocks: this.lensClocks, latency });
     if (!plan) return;
     const rows = await this.protocol.pace(g.stream, g.tokens, plan.ordinal, plan.ticks);
@@ -691,16 +686,16 @@ export class VideoPlayback {
   private async followAudio(now: number): Promise<void> {
     this.audioClock.add(now, this.audio.position!());
     const heard = this.audioClock.heard(now), video = this.av!.video(now);
-    if (heard !== null && video !== null && heard - this.audioOffsetMs - video > VIDEO_STALL_SKIP_MS) {
+    if (heard !== null && video !== null && heard - video > VIDEO_STALL_SKIP_MS) {
       this.stallSince ??= now;
       // Restarting takes about two seconds; land the new picture just ahead of the audio.
-      const target = videoSkipTarget(this.source.clip, heard - this.audioOffsetMs + 2000, 2 * this.source.clip.fps);
+      const target = videoSkipTarget(this.source.clip, heard + 2000, 2 * this.source.clip.fps);
       // Skip only toward pictures still ahead, at most once per few seconds; near
       // the end there is nothing to land on, so the picture catches up instead.
       if (now - this.stallSince >= 1000 && now - this.skippedAt >= 4000 && target > video + 1000 &&
           target < this.source.clip.duration - 500 && !this.intents.some((intent) => intent.kind === "skip")) {
         this.skippedAt = now;
-        console.error(`Video skip: picture ${Math.round(heard - this.audioOffsetMs - video)}ms behind audio, restart at ${target}`);
+        console.error(`Video skip: picture ${Math.round(heard - video)}ms behind audio, restart at ${target}`);
         this.intents.push({ kind: "skip", value: target, resolve: () => {}, reject: () => {} });
       }
     } else this.stallSince = null;

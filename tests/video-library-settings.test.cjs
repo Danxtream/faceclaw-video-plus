@@ -13,21 +13,18 @@ test('Video settings retain old scale/radio keys with new defaults and generatio
   const load = loader({}, {'../../ui/dashboard-settings': {ConfigSettingEnum: Enum, ConfigSettingBoolean: Bool,
     enumSettingMenuItem: setting => ({label: setting.options.label}), toggleSettingMenuItem: setting => ({label: setting.options.label})}});
   const settings = load('app/apps/video/video-settings.ts');
-  assert.deepEqual({...settings.configuredVideoOptions()}, {native: true, dither: false, radio: true, detailedReports: false,blackFloor:1, audioOffsetMs: 0});
+  assert.deepEqual({...settings.configuredVideoOptions()}, {native: true, dither: false, radio: true, detailedReports: false,blackFloor:1});
   for(const value of ['0','0.25','0.5','1']) {
     saved.set('video.blackFloor',value);assert.equal(settings.configuredVideoOptions().blackFloor,Number(value));
   }
   saved.set('video.blackFloor','bad');assert.equal(settings.configuredVideoOptions().blackFloor,1);
   saved.set('video.detailedReports', true); assert.equal(settings.configuredVideoOptions().detailedReports, true);
-  saved.set('video.audioOffsetMs', '175'); assert.equal(settings.configuredVideoOptions().audioOffsetMs, 175);
-  for (const kept of ['400', '1000']) { saved.set('video.audioOffsetMs', kept); assert.equal(settings.configuredVideoOptions().audioOffsetMs, Number(kept)); }
-  saved.set('video.audioOffsetMs', '170'); assert.equal(settings.configuredVideoOptions().audioOffsetMs, 0);
   saved.set('video.blePhy', '1m'); assert.equal(settings.configuredVideoOptions().radio, false);
   saved.set('video.blePhy', '2m'); assert.equal(settings.configuredVideoOptions().radio, true);
   saved.set('video.blePhy', 'broken'); assert.equal(settings.configuredVideoOptions().radio, true);
   saved.set('video.scale', '2x'); assert.equal(settings.configuredVideoOptions().native, false);
   assert.equal(settings.videoDeblockingSetting.get(), false);
-  assert.deepEqual(Array.from(settings.videoSettingsMenuItems(), item => item.label), ['Video size', '2M radio', 'Dithering', 'Black floor', 'Deblocking filter']);
+  assert.deepEqual(Array.from(settings.videoSettingsMenuItems(), item => item.label), ['Video size', '2M radio', 'Dithering', 'Black floor']);
 });
 
 test('Library de-duplicates paired movies, retains silent streams and keeps one resume key', () => {

@@ -5,7 +5,7 @@ const {loader} = require('./helpers/load-typescript.cjs');
 
 function modelFixture(strip = false) {
   const calls = [], values = new Map(); let timer, observer, replace = false;
-  const settings = key => ({get: () => values.get(key) ?? (key === 'radio' ? 'video' : key === 'scale' ? 'native' : key === 'rate' ? '15' : key === 'height' ? '176' : key === 'floor' ? '1' : key === 'contrast' ? 'default' : key === 'keyframes' ? 'default' : key === 'audioOffset' ? '0' : false),
+  const settings = key => ({get: () => values.get(key) ?? (key === 'radio' ? 'video' : key === 'scale' ? 'native' : key === 'rate' ? '15' : key === 'height' ? '176' : key === 'floor' ? '1' : key === 'contrast' ? 'default' : key === 'keyframes' ? 'default' : false),
     set: value => {values.set(key, value); calls.push([key, value]);}, displayValue: () => values.get(key) === 'off' ? 'Off' : 'Video-only'});
   const player = {view: {active: true, paused: false, position: 1234, duration: 20000},
     pause: async value => calls.push(['pause', value]), seek: async value => calls.push(['seek', value]),
@@ -24,8 +24,7 @@ function modelFixture(strip = false) {
     '../apps/video': {openPhoneVideo: async path => calls.push(['play', path])},
     '../apps/video/video-session': {activeVideoSession: () => session, observeVideoSession: () => () => calls.push(['unsub-video'])},
     '../apps/video/video-settings': {videoRadioSetting: settings('radio'), videoScaleSetting: settings('scale'), videoDitherSetting: settings('dither'), videoBlackFloorSetting: settings('floor'), videoDeblockingSetting: settings('deblock'), videoConversionRateSetting: settings('rate'),videoConversionHeightSetting: settings('height'),
-      videoConversionContrastSetting: settings('contrast'), videoConversionKeyframesSetting: settings('keyframes'),
-      videoAudioOffsetSetting: settings('audioOffset'), VIDEO_AUDIO_OFFSETS: Array.from({length: 45}, (_, i) => String(i * 25 - 100))},
+      videoConversionContrastSetting: settings('contrast'), videoConversionKeyframesSetting: settings('keyframes')},
   });
   const module = load(strip ? 'app/phone-ui/video-strip.ts' : 'app/phone-ui/video-view-model.ts');
   return {module, calls, values, player, fixture: strip ? new module.VideoStripViewModel() : new module.VideoViewModel(),
@@ -84,20 +83,6 @@ test('Contrast and keyframes default to Default and the chosen levels go to the 
   const xml=fs.readFileSync('app/phone-ui/video-page.xml','utf8');
   assert.ok(xml.includes('selectedIndexChanged="{{ onConversionContrastChange }}"') && xml.includes('title="Very high"'));
   assert.ok(xml.includes('selectedIndexChanged="{{ onConversionKeyframesChange }}"'));
-  f.fixture.dispose();
-});
-
-test('Audio timing moves 25 ms per tap, stops at both ends and sends no player command', () => {
-  const f = modelFixture(); f.fixture.attach();
-  assert.equal(f.fixture.get('canAudioEarlier'), true);
-  f.fixture.onAudioEarlierTap(); assert.equal(f.values.get('audioOffset'), '25');
-  for (let i = 0; i < 10; i++) f.fixture.onAudioLaterTap();
-  assert.equal(f.values.get('audioOffset'), '-100'); assert.equal(f.fixture.get('canAudioLater'), false);
-  for (let i = 0; i < 60; i++) f.fixture.onAudioEarlierTap();
-  assert.equal(f.values.get('audioOffset'), '1000'); assert.equal(f.fixture.get('canAudioEarlier'), false);
-  assert.ok(f.calls.every(row => row[0] === 'audioOffset' || row[0].startsWith('unsub')));
-  const xml = fs.readFileSync('app/phone-ui/video-page.xml', 'utf8');
-  assert.ok(xml.includes('tap="{{ onAudioEarlierTap }}"') && xml.includes('tap="{{ onAudioLaterTap }}"'));
   f.fixture.dispose();
 });
 
