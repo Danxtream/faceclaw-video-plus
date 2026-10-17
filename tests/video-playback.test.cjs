@@ -144,7 +144,7 @@ function fixture(frames = 20, step = 67) {
   const source = {clip, readNal: async index => { assert.ok(index >= 0 && index < nals.length); return Uint8Array.of(nals[index].type | 0x60, index); }, close: () => { closed = true; calls.push('close'); }};
   const player = new VideoPlayback(protocol, source, {sync: async (...args) => audio.push(['sync', ...args]),
     pause: async () => audio.push(['pause']), close: async () => audio.push(['close'])},
-    () => ({native: state.native, dither: false, radio: true, detailedReports: !!state.detailedReports}), v => { view.push(v); f.onView?.(v); },
+    () => ({native: state.native, dither: false, radio: true, detailedReports: !!state.detailedReports, audioOffsetMs: state.audioOffsetMs}), v => { view.push(v); f.onView?.(v); },
     count => copied += count, () => now, async ms => { now += ms; });
   const f = {player, state, calls, audio, view, clip, protocol, onView: null,
     closed: () => closed, copied: () => copied};
@@ -725,6 +725,30 @@ test('Picture-led audio starts at the first shown frame with a seek, then plays 
   assert.ok(first >= 0 && events[first].tolerance === 0, 'starts with a seek to the shown picture');
   assert.ok(events.every(e => e.kind !== 'sync' || e.tolerance === 0 || e.tolerance === 1_000_000_000));
   assert.ok(f.player.view.position > 0);
+});
+
+test('The audio timing setting moves the start seek that far ahead of the shown picture', async () => {
+  const starts = [];
+  for (const offset of [0, 300]) {
+    const f = fixture(40); f.state.audioOffsetMs = offset;
+    const clock = {playing: false, base: 0, at: 0, speed: 1}, targets = [];
+    const now = () => f.player.clock();
+    const position = () => clock.playing ? clock.base + (now() - clock.at) * clock.speed : clock.base;
+    f.player.audio = {
+      sync: async (target, playing, speed, tolerance) => {
+        const current = position();
+        clock.base = Math.abs(current - target) > tolerance ? target : current; clock.at = now();
+        clock.playing = playing; clock.speed = speed; if (tolerance === 0) targets.push(target);
+      },
+      pause: async () => { clock.base = position(); clock.at = now(); clock.playing = false; },
+      close: async () => {},
+      position,
+    };
+    await f.player.run();
+    assert.equal(f.player.view.error, null);
+    starts.push(targets[0]);
+  }
+  assert.equal(starts[1] - starts[0], 300);
 });
 
 function clockedAudio(f) {
