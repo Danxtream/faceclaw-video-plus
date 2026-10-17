@@ -329,15 +329,24 @@ test('Measuring firmware breakdown logs both reports raw and stops for good on o
     for (let j = 0; j < 4; j++) for (let k = 0; k < 6; k++) view.setUint32(32 + j * 24 + k * 4, page * 100 + j * 10 + k, true);
     return row;
   };
+  const detail = (side) => {
+    const row = new Uint8Array(128); row.set([1, 7, 0, 7, 1, 1, side]);
+    const view = new DataView(row.buffer);
+    view.setUint32(8, 9, true); view.setUint32(12, 2, true); view.setUint32(16, 1, true); // slice setup 2^32 + 2
+    view.setUint32(20, 3, true); view.setUint32(28, 4, true);
+    view.setUint32(36, 1, true); view.setUint32(40, 0x30000, true); view.setUint32(92, 16128, true);
+    return row;
+  };
   const protocol = new VideoProtocol({epoch: () => 1, exchange: async (raw, length) => {
     assert.equal(raw[1], 7); assert.equal(length, 128); kinds.push(`${raw[8]}/${raw[9]}`);
-    return [1, 2].map(side => raw[8] === 7 ? sections(side) : stage(side, raw[9]));
+    return [1, 2].map(side => raw[8] === 7 ? (raw[9] ? detail(side) : sections(side)) : stage(side, raw[9]));
   }}, () => id++);
   try {
     console.error = line => output.push(line);
     await protocol.decodeBreakdown();
   } finally { console.error = original; }
-  assert.deepEqual(kinds, ['7/0', '3/0', '3/1']);
+  assert.deepEqual(kinds, ['7/0', '7/1', '3/0', '3/1']);
+  assert.ok(output.some(line => /^Video decode-detail side=1 generation=9 sliceSetup=4294967298 mbLoop=3 input=4 benchDone=1 ccr=196608 .* windowBytes=16128$/.test(line)));
   const left = output.find(line => line.startsWith('Video decode-sections side=1'));
   assert.match(left, /decodeCycles=4294967301 maxPictureCycles=777 sectionPictures=40 intraI=100 interP=101/);
   assert.match(left, /intra=107 motionCalls=10 .* timerCost=15 headerCycles=16$/);
@@ -364,7 +373,7 @@ test('A refused breakdown read is skipped, not taken for older firmware', async 
     const row = new Uint8Array(128); row.set([1, 7, result, result ? 0 : kind, 0, 1, side]); return row;
   };
   const protocol = new VideoProtocol({epoch: () => 1, exchange: async (raw) => {
-    if (raw[8] === 7) sends++;
+    if (raw[8] === 7 && raw[9] === 0) sends++;
     // The right lens refuses STALE before filling the page: no kind byte, as on the glasses.
     return [1, 2].map(side => page(side, raw[8], refuseBoth || (raw[8] === 7 && side === 2 && sends === 1) ? 2 : 0));
   }}, () => id++);

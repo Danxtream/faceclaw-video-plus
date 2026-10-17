@@ -234,6 +234,17 @@ export class VideoProtocol {
       console.error(`Video decode-sections side=${i + 1} generation=${videoU32(row, 8)} pictures=${videoU32(row, 12)} ` +
         `decodeCycles=${u64(row, 16)} maxPictureCycles=${videoU32(row, 24)} sectionPictures=${videoU32(row, 28)} ${cycles} ${counts}`);
     });
+    // Page 1: time outside the macroblock totals and the stream's one-time memory/CPU check.
+    // Firmware with only page 0 refuses it; the line says so and the reads carry on.
+    const detailRaw = await this.header(7, 12); detailRaw[8] = 7; detailRaw[9] = 1;
+    (await this.query(detailRaw, 128)).forEach((row, i) => {
+      if (row[2] || row[3] !== 7 || row[4] !== 1) { console.error(`Video decode-detail side=${i + 1} result=${row[2]}`); return; }
+      const bench = ["benchDone", "ccr", "mpuCtrl", "frameAddress", "stride", "width", "height", "aluCycles",
+        "frameReadCycles", "frameBytes", "blockColdCycles", "blockHotCycles", "blockBytes", "windowCycles", "windowBytes"]
+        .map((name, j) => `${name}=${videoU32(row, 36 + j * 4)}`).join(" ");
+      console.error(`Video decode-detail side=${i + 1} generation=${videoU32(row, 8)} sliceSetup=${u64(row, 12)} ` +
+        `mbLoop=${u64(row, 20)} input=${u64(row, 28)} ${bench}`);
+    });
     const stages = ["decode", "queueWait", "queueCopy", "pack", "display", "bridge", "sync", "ingress"];
     for (const page of [0, 1]) {
       const raw = await this.header(7, 12); raw[8] = 3; raw[9] = page;
