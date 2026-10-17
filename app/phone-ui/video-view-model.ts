@@ -7,7 +7,7 @@ import { openPhoneVideo } from "../apps/video";
 import { activeVideoSession, observeVideoSession, type VideoSession } from "../apps/video/video-session";
 import { VideoSeekControls } from "./video-seek-controls";
 export { formatVideoTime } from "./video-seek-controls";
-import { videoRadioSetting, videoScaleSetting, videoDitherSetting, videoBlackFloorSetting, videoDeblockingSetting, videoConversionRateSetting, videoConversionHeightSetting, videoConversionContrastSetting, videoConversionKeyframesSetting, videoAudioOffsetSetting, VIDEO_AUDIO_OFFSETS } from "../apps/video/video-settings";
+import { videoRadioSetting, videoScaleSetting, videoDitherSetting, videoBlackFloorSetting, videoDeblockingSetting, videoConversionRateSetting, videoConversionHeightSetting, videoConversionContrastSetting, videoConversionKeyframesSetting } from "../apps/video/video-settings";
 
 /** Strict remote time input, with no changes to the source's fixed frame cadence. */
 export function parseVideoTime(text: string): number {
@@ -68,9 +68,6 @@ export class VideoViewModel extends Observable {
       this.set("scaleIndex", videoScaleSetting.get() === "native" ? 0 : 1);
       this.set("dither", videoDitherSetting.get()); this.set("deblocking", videoDeblockingSetting.get());
       this.set("blackFloorIndex", ["0", "0.25", "0.5", "1"].indexOf(videoBlackFloorSetting.get()));
-      const offset = VIDEO_AUDIO_OFFSETS.indexOf(videoAudioOffsetSetting.get());
-      this.set("audioOffsetLabel", `Audio timing: ${videoAudioOffsetSetting.displayValue()}`);
-      this.set("canAudioLater", offset > 0); this.set("canAudioEarlier", offset < VIDEO_AUDIO_OFFSETS.length - 1);
       this.set("conversionRateIndex", ["10", "15", "20"].indexOf(videoConversionRateSetting.get()));
       this.set("conversionHeightIndex", ["192", "176"].indexOf(videoConversionHeightSetting.get()));
       this.set("conversionContrastIndex", ["default", "medium", "high", "veryhigh"].indexOf(videoConversionContrastSetting.get()));
@@ -160,13 +157,6 @@ export class VideoViewModel extends Observable {
     if (this.refreshing) return;
     const floor = (["0", "0.25", "0.5", "1"] as const)[args.object?.selectedIndex ?? -1];
     if (floor !== undefined && videoBlackFloorSetting.get() !== floor) videoBlackFloorSetting.set(floor);
-  }
-  /** Applies to the playing video within a quarter second, so it can be tuned by ear. */
-  onAudioEarlierTap(): void { this.stepAudioOffset(1); }
-  onAudioLaterTap(): void { this.stepAudioOffset(-1); }
-  private stepAudioOffset(step: 1 | -1): void {
-    const next = VIDEO_AUDIO_OFFSETS[VIDEO_AUDIO_OFFSETS.indexOf(videoAudioOffsetSetting.get()) + step];
-    if (next !== undefined) { videoAudioOffsetSetting.set(next); this.refresh(); }
   }
   onDeblockingChange(args: {object?: {checked?: boolean}}): void {
     if (!this.refreshing && videoDeblockingSetting.get() !== !!args.object?.checked) videoDeblockingSetting.set(!!args.object?.checked);

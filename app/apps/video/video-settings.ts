@@ -17,17 +17,7 @@ export const videoBlackFloorSetting = new ConfigSettingEnum<"0" | "0.25" | "0.5"
   id: "video-black-floor", label: "Black floor", storageKey: "video.blackFloor", defaultValue: "1",
   values: ["0", "0.25", "0.5", "1"], formatValue: value => value,
 });
-/** Positive values play sound earlier than the picture, for headphones whose delay the phone
- *  does not report: 25 ms steps from 100 ms later to 1000 ms earlier. */
-export const VIDEO_AUDIO_OFFSETS: readonly string[] = Array.from({length: 45}, (_, i) => String(i * 25 - 100));
-export function formatVideoAudioOffset(value: string): string {
-  const ms = Number(value);
-  return ms === 0 ? "0 ms" : ms > 0 ? `Sound ${ms} ms earlier` : `Sound ${-ms} ms later`;
-}
-export const videoAudioOffsetSetting = new ConfigSettingEnum<string>({
-  id: "video-audio-offset", label: "Audio timing", storageKey: "video.audioOffsetMs", defaultValue: "0",
-  values: [...VIDEO_AUDIO_OFFSETS], formatValue: formatVideoAudioOffset,
-});
+/** Applies to the next conversion only, so the phone's Convert tab owns it, not the glasses. */
 export const videoDeblockingSetting = new ConfigSettingBoolean({
   id: "video-deblocking", label: "Deblocking filter", storageKey: "video.deblocking", defaultValue: false,
 });
@@ -54,15 +44,13 @@ export const videoDetailedReportsSetting = new ConfigSettingBoolean({
   id: "video-detailed-reports", label: "Video detailed reports", storageKey: "video.detailedReports", defaultValue: false,
 });
 
-/** Generation settings are read only at START/seek, never on a settings callback;
- *  the phone-side audio offset is also read while playing. */
+/** Generation settings are read only at START/seek, never on a settings callback. */
 export function configuredVideoOptions(): VideoOptions {
   return { native: videoScaleSetting.get() === "native", dither: videoDitherSetting.get(), radio: videoRadioSetting.get() === "video",
-    detailedReports: videoDetailedReportsSetting.get(), blackFloor: Number(videoBlackFloorSetting.get()) as 0 | 0.25 | 0.5 | 1,
-    audioOffsetMs: Number(videoAudioOffsetSetting.get()) };
+    detailedReports: videoDetailedReportsSetting.get(), blackFloor: Number(videoBlackFloorSetting.get()) as 0 | 0.25 | 0.5 | 1 };
 }
 /** These are Video settings, not entries in the firmware's playback pause menu. */
 export function videoSettingsMenuItems() {
   return [enumSettingMenuItem(videoScaleSetting), enumSettingMenuItem(videoRadioSetting),
-    toggleSettingMenuItem(videoDitherSetting), enumSettingMenuItem(videoBlackFloorSetting), toggleSettingMenuItem(videoDeblockingSetting)];
+    toggleSettingMenuItem(videoDitherSetting), enumSettingMenuItem(videoBlackFloorSetting)];
 }
