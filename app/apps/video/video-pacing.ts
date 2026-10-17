@@ -92,8 +92,8 @@ export type VideoPacePlan = { ordinal: number; due: number; ticks: [number, numb
 
 /**
  * The picture to re-anchor and its due tick on each lens. Picture N with time P
- * should appear when the audio heard reaches P + offset (positive plays sound
- * earlier; playback passes 0); `latency` (copy minus due, in ticks) is subtracted so
+ * should appear when the audio heard reaches P + offset (Audio timing: positive
+ * plays sound earlier); `latency` (copy minus due, in ticks) is subtracted so
  * the copy, not the deadline, lands on time. The chosen picture is the first
  * one due at least `lead` ms from now, so the command arrives before it.
  */
