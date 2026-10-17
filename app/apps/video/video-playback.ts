@@ -32,7 +32,7 @@ export type VideoPlaybackView = {
   cleanupFailed: boolean;
   hostPhy: string;
 };
-type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement" | "timedNal" | "slices" | "pace">>;
+type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement" | "timedNal" | "slices" | "pace" | "decodeBreakdown">>;
 type Intent = { kind: "pause" | "seek" | "scale" | "menu" | "skip"; value: number | boolean; resolve: () => void; reject: (error: unknown) => void };
 type Generation = { stream: number; tokens: number[]; idr: number; target: number; prefix: number[]; firstNal: number; index: number; count: number; metadata: number; paused: boolean; reached: boolean; oldPhy: VideoPhy[]; started: number; anchor: VideoPhy[]; anchorAt: number; anchorUncertainty: number; detailedReports: boolean; pump?: VideoUploadPump };
 
@@ -356,6 +356,12 @@ export class VideoPlayback {
     if (!this.protocol.clockEvidence) return;
     try { await this.protocol.clockEvidence(phase); }
     catch (error) { console.error(`Video clock evidence unavailable phase=${phase}: ${error}`); }
+  }
+  /** Measuring firmware's decoder breakdown, read with each shown report; never fails playback. */
+  private async decodeBreakdown(): Promise<void> {
+    if (!this.protocol.decodeBreakdown) return;
+    try { await this.protocol.decodeBreakdown(); }
+    catch (error) { console.error(`Video decode breakdown unavailable: ${error}`); }
   }
   private async settle(paused?: boolean): Promise<VideoPlaybackState[]> {
     const deadline = this.clock() + 30_000;
@@ -813,6 +819,7 @@ export class VideoPlayback {
         if (!await this.observe()) this.shownDue = began;
         this.updatePlayback(await this.playback());
         await this.clockEvidence(1);
+        await this.decodeBreakdown();
       } else {
         const leftSent = this.clock();
         const leftRaw = await this.protocol.shown(g.stream, g.tokens[0], 1), leftAt = this.clock();
@@ -836,6 +843,7 @@ export class VideoPlayback {
             await this.applyShown(captures, ages, g.anchorUncertainty + this.clock() - began);
             this.learnPaceLatency(right);
             await this.clockEvidence(1);
+            await this.decodeBreakdown();
           }
         }
       }

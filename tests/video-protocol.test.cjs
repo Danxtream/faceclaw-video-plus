@@ -308,3 +308,51 @@ test('PACE carries stream, both owner tokens, the picture and each lens tick, an
   await assert.rejects(protocol.pace(9, [101, 0], 25, [7, 8]), /token/);
   await assert.rejects(protocol.pace(9, [101, 102], 25, [7]), /token/);
 });
+
+test('Measuring firmware breakdown logs both reports raw and stops for good on older firmware', async () => {
+  const output = [], original = console.error;
+  let id = 300, kinds = [];
+  const sections = (side) => {
+    const row = new Uint8Array(128); row.set([1, 7, 0, 7, 0, 1, side]);
+    const view = new DataView(row.buffer);
+    view.setUint32(8, 9, true); view.setUint32(12, 40, true);
+    view.setUint32(16, 5, true); view.setUint32(20, 1, true); // decode cycles 2^32 + 5
+    view.setUint32(24, 777, true); view.setUint32(28, 40, true);
+    for (let j = 0; j < 8; j++) view.setUint32(32 + j * 8, 100 + j, true);
+    for (let j = 0; j < 7; j++) view.setUint32(96 + j * 4, 10 + j, true);
+    return row;
+  };
+  const stage = (side, page) => {
+    const row = new Uint8Array(128); row.set([1, 7, 0, 3, page, 1, side]);
+    const view = new DataView(row.buffer);
+    view.setUint32(8, 9, true); view.setUint32(12, 4, true);
+    for (let j = 0; j < 4; j++) for (let k = 0; k < 6; k++) view.setUint32(32 + j * 24 + k * 4, page * 100 + j * 10 + k, true);
+    return row;
+  };
+  const protocol = new VideoProtocol({epoch: () => 1, exchange: async (raw, length) => {
+    assert.equal(raw[1], 7); assert.equal(length, 128); kinds.push(`${raw[8]}/${raw[9]}`);
+    return [1, 2].map(side => raw[8] === 7 ? sections(side) : stage(side, raw[9]));
+  }}, () => id++);
+  try {
+    console.error = line => output.push(line);
+    await protocol.decodeBreakdown();
+  } finally { console.error = original; }
+  assert.deepEqual(kinds, ['7/0', '3/0', '3/1']);
+  const left = output.find(line => line.startsWith('Video decode-sections side=1'));
+  assert.match(left, /decodeCycles=4294967301 maxPictureCycles=777 sectionPictures=40 intraI=100 interP=101/);
+  assert.match(left, /intra=107 motionCalls=10 .* timerCost=15 headerCycles=16$/);
+  assert.ok(output.some(line => /^Video stage-profile side=2 page=1 .* display:count=100,bytes=101,ticks=102,cycles=446676598887,maxTicks=105/.test(line)));
+  for (const reply of ['old', 'throws']) {
+    let sends = 0;
+    const older = new VideoProtocol({epoch: () => 1, exchange: async (raw, length) => {
+      sends++;
+      if (reply === 'throws') throw new Error('Missing lens video reply');
+      return [1, 2].map(() => new Uint8Array(length));
+    }}, () => id++);
+    const logged = [];
+    try { console.error = line => logged.push(line); await older.decodeBreakdown(); await older.decodeBreakdown(); }
+    finally { console.error = original; }
+    assert.equal(sends, 1);
+    assert.equal(logged.some(line => line.includes('decode-sections unavailable')), reply === 'throws');
+  }
+});

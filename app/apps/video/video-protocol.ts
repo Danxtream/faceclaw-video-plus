@@ -79,6 +79,7 @@ export class VideoProtocol {
   private geometry = false;
   private pictureStyle = false;
   private multiSlice = false;
+  private breakdownOff = false;
   /** Both lenses accept a picture's frame time inside its VCL NAL record. */
   get timedNal(): boolean { return this.timed; }
   /** Both lenses decode pictures split into several slices (large-keyframe clips). */
@@ -190,6 +191,47 @@ export class VideoProtocol {
         `pllControl=${words[12]} pllFraction=${words[13]} pllDividers=${words[14]} ` +
         `pllStatus=${words[20]} pllMux=${words[21]} raw=${JSON.stringify(words)}`);
     });
+  }
+  /**
+   * Measuring firmware only: log both lenses' cumulative decoder sections (diagnostics kind 7)
+   * and per-stage profile (kind 3) as raw counters; differences are taken offline. The first
+   * reply that isn't a kind-7 page means firmware without it, and stops the polling for good.
+   */
+  async decodeBreakdown(): Promise<void> {
+    if (this.breakdownOff) return;
+    let sections: Uint8Array[];
+    try {
+      const raw = await this.header(7, 12); raw[8] = 7;
+      sections = await this.query(raw, 128);
+    } catch (error) {
+      this.breakdownOff = true;
+      console.error(`Video decode-sections unavailable: ${error}`);
+      return;
+    }
+    if (sections.some((row) => row[0] !== 1 || row[1] !== 7 || row[3] !== 7)) { this.breakdownOff = true; return; }
+    const u64 = (row: Uint8Array, at: number) => videoU32(row, at) + videoU32(row, at + 4) * 2 ** 32;
+    sections.forEach((row, i) => {
+      if (row[2] || row[6] !== i + 1) { console.error(`Video decode-sections side=${i + 1} result=${row[2]}`); return; }
+      const names = ["intraI", "interP", "intraP", "completion", "motion", "residual", "transform", "intra"];
+      const cycles = names.map((name, j) => `${name}=${u64(row, 32 + j * 8)}`).join(" ");
+      const counts = ["motionCalls", "residualCalls", "transformCalls", "intraCalls", "zeroTransforms", "timerCost", "headerCycles"]
+        .map((name, j) => `${name}=${videoU32(row, 96 + j * 4)}`).join(" ");
+      console.error(`Video decode-sections side=${i + 1} generation=${videoU32(row, 8)} pictures=${videoU32(row, 12)} ` +
+        `decodeCycles=${u64(row, 16)} maxPictureCycles=${videoU32(row, 24)} sectionPictures=${videoU32(row, 28)} ${cycles} ${counts}`);
+    });
+    const stages = ["decode", "queueWait", "queueCopy", "pack", "display", "bridge", "sync", "ingress"];
+    for (const page of [0, 1]) {
+      const raw = await this.header(7, 12); raw[8] = 3; raw[9] = page;
+      (await this.query(raw, 128)).forEach((row, i) => {
+        if (row[2] || row[3] !== 3 || row[4] !== page) { console.error(`Video stage-profile side=${i + 1} page=${page} result=${row[2]}`); return; }
+        const rows = [0, 1, 2, 3].map((j) => {
+          const at = 32 + j * 24, word = (k: number) => videoU32(row, at + k * 4);
+          return `${stages[page * 4 + j]}:count=${word(0)},bytes=${word(1)},ticks=${word(2)},cycles=${word(3) + word(4) * 2 ** 32},maxTicks=${word(5)}`;
+        });
+        console.error(`Video stage-profile side=${i + 1} page=${page} generation=${videoU32(row, 8)} stream=${videoU32(row, 12)} ` +
+          `dropped=${videoU32(row, 20)} flags=${videoU32(row, 24)} ${rows.join(" ")}`);
+      });
+    }
   }
   async radioSelection(enabled: boolean): Promise<void> {
     const raw = await this.header(VIDEO.radio, 12);
