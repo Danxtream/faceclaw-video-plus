@@ -48,6 +48,7 @@ export type VideoStatus = {
   error: number; expected: number; accepted: number; consumed: number;
   pictures: number; presented: number; copyTick: number; credits: number; capacity: number;
   powerStep: number;
+  flow?: boolean;
 };
 
 /** Accept only the fixed decoder contract and coherent active-owner counts. */
@@ -56,12 +57,13 @@ export function parseVideoStatus(raw: Uint8Array): VideoStatus {
       videoU32(raw, 32) !== 4096 || videoU32(raw, 36) !== 4086 ||
       raw[40] !== 64 || raw[41] !== 1 || raw[42] !== 192 || raw[43] !== 0 ||
       raw[44] !== 1 || raw[45] !== 2 || raw[46] !== 1 || raw[47] !== 1 ||
-      raw[48] !== 4 || raw[49] !== 6 || ![0, 4, 6].includes(raw[50]) || raw[51] > raw[50])
+      raw[48] !== 4 || raw[49] !== 6 || ![0, 4, 6, ...((raw[71] & 64) ? [12] : [])].includes(raw[50]) || raw[51] > raw[50])
     throw new Error("Unsupported video decoder contract");
   const row = { result: raw[2], state: raw[3], stream: videoU32(raw, 4), token: videoU32(raw, 8),
     high: videoU32(raw, 20), error: videoU32(raw, 24), expected: videoU32(raw, 52),
     accepted: videoU32(raw, 56), consumed: videoU32(raw, 60), pictures: videoU32(raw, 64),
-    presented: videoU32(raw, 80), copyTick: videoU32(raw, 88), credits: raw[51], capacity: raw[50], powerStep: raw[69] >>> 3 };
+    presented: videoU32(raw, 80), copyTick: videoU32(raw, 88), credits: raw[51], capacity: raw[50], powerStep: raw[69] >>> 3,
+    flow: !!(raw[71] & 64) };
   if (row.consumed > row.accepted || (row.state === 2 && row.presented > row.pictures))
     throw new Error("Inconsistent video counts");
   return row;
@@ -77,6 +79,7 @@ export class VideoProtocol {
   private evidence = false;
   private rateEvidence = false;
   private timed = false;
+  private flow = false;
   private geometry = false;
   private pictureStyle = false;
   private multiSlice = false;
@@ -92,7 +95,7 @@ export class VideoProtocol {
   }
   createUploadPump(reader: unknown, plan: VideoUploadPlan): VideoUploadPump | undefined {
     this.check();
-    return reader === undefined ? undefined : this.backend.createUploadPump?.(reader, {...plan, timed: this.timed});
+    return reader === undefined ? undefined : this.backend.createUploadPump?.(reader, {...plan, timed: this.timed, flow: this.flow && this.timed});
   }
   private async header(op: number, bytes: number): Promise<Uint8Array> {
     this.check();
@@ -133,6 +136,7 @@ export class VideoProtocol {
   }
   async capabilities(): Promise<void> {
     const caps = await this.status(VIDEO.caps);
+    this.flow = caps.every(row => row.flow === true);
     caps.forEach((row, i) => {
       if (videoStaleError(row)) console.error(`Video ${i ? "RIGHT" : "LEFT"} is idle after stream ${row.stream} ended with error=${row.error}; retained history, next START must pass readiness again (powerStep=${row.powerStep})`);
     });
@@ -153,6 +157,7 @@ export class VideoProtocol {
     this.pictureStyle = rows.every(row => !!(row[4] & 64));
     // Bit 8 of byte 7 was reserved before multi-slice pictures; older firmware leaves it clear.
     this.multiSlice = rows.every(row => !!(row[7] & 8));
+    console.error(`Video delivery mode=${this.flow && this.timed ? "continuous" : "legacy"} windowLimit=${this.flow && this.timed ? 6 : 3} nalSlotsMax=${this.flow && this.timed ? 12 : 6}`);
     this.backend.configureEvidence?.(this.evidence);
   }
   measurementSnapshot(): unknown { return this.backend.measurementSnapshot?.() ?? null; }
@@ -230,6 +235,7 @@ export class VideoProtocol {
     if (!Number.isInteger(preroll) || preroll < 0 || preroll > 255) throw new Error("Unsupported seek preroll");
     put(raw, 8, stream);
     raw.set([64, 1, 192, 0, 1, 2, 4 | 8 | (native ? 1 : 0) | (dither ? 16 : 0) | (!radio ? 2 : 0) | (paused ? 32 : 0), preroll], 12);
+    if (this.flow && this.timed) raw[18] |= 64;
     const field = (offset: number, value: number) => { raw[offset] = value; raw[offset+1] = value >>> 8; };
     field(12, size.width); field(14, size.height);
     if (extended || tuned) [size.picture.x, size.picture.y, size.picture.width, size.picture.height].forEach((value, i) => field(24+i*2, value));
@@ -244,6 +250,7 @@ export class VideoProtocol {
     return (await this.query(raw, 128)).map(parseVideoStatus);
   }
   async owned(op: number, stream: number, tokens: readonly number[], length: number, value?: number): Promise<Uint8Array[]> {
+    if (op === VIDEO.credits && value === 1 && this.flow && this.timed) { value = 3; length = 16; }
     if (tokens.length !== 2 || tokens.some((value) => !value)) throw new Error("Video owner token missing");
     const raw = await this.header(op, value === undefined ? 20 : 24);
     put(raw, 8, stream); put(raw, 12, tokens[0]); put(raw, 16, tokens[1]);

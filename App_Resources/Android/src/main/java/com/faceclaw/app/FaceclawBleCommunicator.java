@@ -2490,7 +2490,8 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
                     boolean windowHasRoom = videoTextureCacheGate.preparing()
                             ? inFlightMessages.isEmpty()
                             : inFlightMessages.size() < Math.max(1,
-                                benchmarkActive ? benchmarkWindowSize : connectionOptions.WINDOW_SIZE);
+                                benchmarkActive ? benchmarkWindowSize :
+                                    Math.max(connectionOptions.WINDOW_SIZE, videoTransport.windowSize()));
                     // A frame ready to send right now: don't inject a fresh
                     // heartbeat in front of it (the image's own ack resets the
                     // firmware heartbeat timer, so the heartbeat is redundant).

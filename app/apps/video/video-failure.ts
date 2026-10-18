@@ -36,10 +36,13 @@ export function videoFailureLines(side: number, stream: number, detail: Uint8Arr
     ` runtimeAllocationTag=${word(detail, 96)} runtimeAllocationSize=${word(detail, 100)}` +
     ` powerStep=${word(detail, 104)} peerGeneration=${word(detail, 108)} peerStream=${word(detail, 112)} peerClosed=${word(detail, 116)}` +
     ` inputPinned=${word(detail, 120)} decoderPresent=${word(detail, 124)}` +
-    // History bytes 20-31: presenter faults record their call site and state.
-    ` task=${history[29] ? "presenter" : "worker"} site=0x${word(history, 20).toString(16)}` +
-    ` presenterStackUsed=${word(history, 24)} presenterGuards=${history[28]}` +
-    ` presenterQueue=${history[30] | history[31] << 8}`];
+    // A nonzero call site distinguishes the presenter layout from worker heaps.
+    ` task=${word(history, 20) ? "presenter" : "worker"} site=0x${word(history, 20).toString(16)}` +
+    (word(history, 20) ?
+      ` presenterStackUsed=${word(history, 24)} presenterGuards=${history[28]} presenterQueue=${history[30] | history[31] << 8}` :
+      ` storageRule=${history[24]} storageLive=${history[25]}` +
+      ` cachedFree=${history[26] | history[27] << 8 | history[28] << 16}` +
+      ` cachedLargest=${history[29] | history[30] << 8 | history[31] << 16}`)];
   const compare = (sequence: number, type: number, length: number, checksum: number, current: boolean): void => {
     const sent = savedStream === stream ? recent.find(row => row.sequence === sequence) : undefined;
     const verdict = savedStream !== stream ? "STALE STREAM" : !sent ? "NO PHONE EVIDENCE" :

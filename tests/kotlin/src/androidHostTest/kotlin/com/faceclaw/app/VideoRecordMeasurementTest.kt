@@ -7,7 +7,7 @@ import kotlin.test.assertTrue
 class VideoRecordMeasurementTest {
     private fun command(op: Int, stream: Long = 50) = ByteArray(24).also {
         it[0] = 31; it[1] = op.toByte()
-        VideoUploadEngine.put(it, if (op == 6) 2 else 8, stream)
+        VideoUploadEngine.put(it, if (op in listOf(6,24,26,27)) 2 else 8, stream)
     }
     @Test fun generationAndRecordKindsDoNotMixPumpLifetimeOrOtherStreams() {
         var now = 0L
@@ -46,5 +46,15 @@ class VideoRecordMeasurementTest {
         m.begin(51, 8); val before = m.snapshot()
         m.written(page); m.acknowledged(page); m.finished(page)
         assertEquals(before, m.snapshot())
+    }
+    @Test fun legacyTimedAndContinuousNalsKeepTheSameStreamBoundCounters() {
+        val m = VideoRecordMeasurement { 0L }; m.begin(50, 1)
+        for (op in listOf(6,24,26,27)) {
+            val ticket = m.queued(command(op),1,0)
+            m.written(ticket); m.acknowledged(ticket); m.finished(ticket)
+            assertEquals(null,m.queued(command(op,49),1,0))
+        }
+        assertTrue(m.snapshot().contains("\"nal\":{\"records\":4,\"queueToWrite\":{\"count\":4"))
+        assertTrue(m.snapshot().contains("\"other\":{\"records\":0"))
     }
 }

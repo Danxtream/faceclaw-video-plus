@@ -7,7 +7,8 @@ internal data class VideoUploadPicture(val source: Int, val pts: Long)
 internal data class VideoNalEvidence(val sequence: Int, val source: Int, val type: Int,
     val length: Int, val checksum: Long)
 internal data class VideoUploadPlan(val stream: Long, val tokens: LongArray, val prefix: IntArray,
-    val firstNal: Int, val count: Int, val pictures: List<VideoUploadPicture>, val timed: Boolean = false)
+    val firstNal: Int, val count: Int, val pictures: List<VideoUploadPicture>, val timed: Boolean = false,
+    val flow: Boolean = false)
 
 /** Credit-bounded state; the report handoff may stage a grant only while fenced. */
 internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: Int,
@@ -15,7 +16,8 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
     private val checkEpoch: () -> Unit, private val exchange: (ByteArray) -> Array<ByteArray>,
     private val pipeline: (Array<ByteArray>, Array<ByteArray?>) -> IntArray,
     val measurement: VideoMeasurement = VideoMeasurement(),
-    private val canReuse: () -> Boolean = { true }) {
+    private val canReuse: () -> Boolean = { true },
+    private val continuous: (((() -> ByteArray?), (VideoFlowCredit) -> Int, () -> Boolean) -> Unit)? = null) {
     var index = 0; private set
     var metadata = 0; private set
     var consumed = -1L; private set
@@ -30,6 +32,7 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
     private data class Grant(val index: Int, val rows: Array<ByteArray>, val at: Long)
     private var offered: Grant? = null
     private val recentNals = ArrayDeque<VideoNalEvidence>()
+    private var flowBudget = VideoFlowBudget(plan.stream, plan.tokens)
     /** Payload attempts, including a batch whose acknowledgement later failed. */
     @Synchronized private fun recordNal(sequence: Int, bytes: ByteArray) {
         var checksum = 2166136261L.toInt()
@@ -53,10 +56,11 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
                 (i == 0 || p.source > plan.pictures[i - 1].source && p.pts > plan.pictures[i - 1].pts)
         })
     }
-    fun invalidateCredits() { offered = null }
+    fun invalidateCredits() { offered = null; flowBudget = VideoFlowBudget(plan.stream, plan.tokens) }
     /** A report grant is single-use, exact-position and at most 500 ms old. */
     fun offerCredits(stream: Long, tokens: LongArray, sent: Int, rows: Array<ByteArray>, ageMs: Long): Boolean {
         checkEpoch(); offered = null
+        if (plan.flow) return false
         if (!canReuse() || stream != plan.stream || !tokens.contentEquals(plan.tokens) || sent != index || ageMs !in 0..500) return false
         try { creditBudget(rows) } catch (_: IllegalStateException) { return false }
         offered = Grant(index, rows.map { it.copyOf() }.toTypedArray(), measurement.now() - ageMs * 1_000_000)
@@ -90,6 +94,18 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
     }
     private val resultMask = if (plan.timed) TIMELINE_RESULT_MASK else 255
     private fun acceptCredits(credit: Array<ByteArray>) {
+        if (plan.flow) {
+            check(credit.size == 2 && credit.all { it.size == 16 }) { "Missing lens flow reply" }
+            flowBudget = VideoFlowBudget(plan.stream, plan.tokens)
+            credit.forEachIndexed { side, raw ->
+                flowBudget.accept(VideoFlowCredit(side + 1, index - 1, raw), index, metadata)?.let { (nals, frames) ->
+                    budget = nals; pictureBudget = frames
+                }
+            }
+            leftConsumed = flowBudget.expected(1); rightConsumed = flowBudget.expected(2)
+            consumed = minOf(leftConsumed, rightConsumed); creditAt = measurement.now(); blocked = false
+            return
+        }
         budget = creditBudget(credit)
         pictureBudget = if (plan.timed) credit.minOf { u(it[5]) shr TIMELINE_ROOM_SHIFT } else 0
         consumed = credit.minOf { word(it, 0) }
@@ -121,7 +137,7 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
         for (attempt in 1..2) {
             val command = query(10, if (plan.timed) 24 else 20)
             put(command, 12, plan.tokens[0]); put(command, 16, plan.tokens[1])
-            if (plan.timed) put(command, 20, 1) // Ask for timeline room in the result byte.
+            if (plan.timed) put(command, 20, if (plan.flow) 3 else 1) // Include wide credits only after negotiated START.
             try { rows = measurement.time(VideoMeasurement.CREDITS) { exchange(command) }; break }
             catch (error: VideoQueryUnavailable) {
                 checkEpoch()
@@ -197,6 +213,7 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
     fun step(shouldContinue: () -> Boolean = { true }): Boolean {
         checkEpoch(); blocked = false; waitKind = VideoMeasurement.ZERO_CREDIT
         if (done) return false
+        if (plan.flow && continuous != null) return stepContinuous(shouldContinue)
         if (plan.timed) return stepTimed(shouldContinue)
         if (budget == 0 && !credits(shouldContinue)) return false
         val first = plan.pictures.getOrNull(metadata)
@@ -233,6 +250,47 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
         measurement.add(VideoMeasurement.NALS, count = sent.toLong())
         measurement.add(VideoMeasurement.BYTES, count = records.take(sent).sumOf { it.size - 10 }.toLong())
         return true
+    }
+
+    private fun stepContinuous(shouldContinue: () -> Boolean): Boolean {
+        if ((budget == 0 || pictureBudget == 0) && !credits(shouldContinue)) return false
+        val before = index
+        measurement.time(VideoMeasurement.PIPELINE) {
+            continuous!!.invoke({
+                checkEpoch()
+                val starts = !done && plan.pictures.getOrNull(metadata)?.source == source(index)
+                if (done || budget == 0 || starts && pictureBudget == 0) null
+                else {
+                    val bytes = measurement.time(VideoMeasurement.READ) { read(source(index)) }
+                    require(bytes.size in 1..4086) { "Complete NAL exceeds advertised limit" }
+                    // Oversized timed records use the fenced legacy metadata path.
+                    if (starts && bytes.size + TIMED_HEADER > 4096) null
+                    else {
+                        val record = if (starts) timedRecord(index, ++metadata, bytes) else nalRecord(index, bytes)
+                        record[1] = (if (starts) 27 else 26).toByte()
+                        index++; budget--; if (starts) pictureBudget--
+                        measurement.add(VideoMeasurement.NALS)
+                        measurement.add(VideoMeasurement.BYTES, count = bytes.size.toLong())
+                        record
+                    }
+                }
+            }, { grant ->
+                flowBudget.accept(grant, index, metadata)?.let { (nals, frames) ->
+                    budget = nals; pictureBudget = frames
+                    leftConsumed = flowBudget.expected(1); rightConsumed = flowBudget.expected(2)
+                    consumed = minOf(leftConsumed, rightConsumed); creditAt = measurement.now()
+                }
+                flowBudget.capacity
+            }, shouldContinue)
+        }
+        checkEpoch()
+        if (index == before && !done && budget > 0 && pictureBudget > 0) {
+            // The writer is fenced here, so old metadata admission cannot overtake a NAL.
+            val bytes = read(source(index))
+            if (bytes.size + TIMED_HEADER > 4096) return stepTimed(shouldContinue)
+        }
+        blocked = index == before
+        return index != before
     }
     companion object {
         /** Firmware op for a VCL NAL with its ordinal and pts, and its 18-byte header. */
@@ -271,12 +329,15 @@ class VideoUploadPump internal constructor(create: () -> VideoUploadEngine) {
         val config = VideoUploadPlan(json.getLong("stream"), longArrayOf(json.getJSONArray("tokens").getLong(0), json.getJSONArray("tokens").getLong(1)),
             IntArray(prefix.length()) { prefix.getInt(it) }, json.getInt("firstNal"), json.getInt("count"),
             (0 until pictures.length()).map { i -> pictures.getJSONObject(i).let { VideoUploadPicture(it.getInt("nal"), it.getLong("pts")) } },
-            json.optBoolean("timed", false))
+            json.optBoolean("timed", false), json.optBoolean("flow", false))
         VideoUploadEngine(config, reader.nalCount(), reader::readNalBytes, identities::reserveNow,
             { check(transport.epoch == epoch) { "Video connection generation changed; restart at IDR" } },
-            { transport.exchange(it, 6, 3, ingressLeft, 5, epoch) },
+            { transport.exchange(it, if (it[1].toInt() == 10 && config.flow) 16 else 6, 3, ingressLeft, 5, epoch) },
             { records, following -> transport.pipeline(records, following, 3, ingressLeft, epoch) },
-            canReuse = { transport.creditReuseSafe(epoch) })
+            canReuse = { transport.creditReuseSafe(epoch) },
+            continuous = if (config.flow && config.timed) { next, grant, keep ->
+                transport.continuous(next, grant, keep, 3, ingressLeft, epoch)
+            } else null)
     })
 
     init {

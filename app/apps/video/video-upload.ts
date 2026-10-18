@@ -6,6 +6,8 @@ export type VideoUploadPlan = {
   pictures: {nal: number; pts: number}[];
   /** Send each picture's VCL NAL with its frame time (firmware capability). */
   timed?: boolean;
+  /** Opt in only when both lenses advertise live NAL credit snapshots. */
+  flow?: boolean;
 };
 export type VideoUploadProgress = {
   index: number; metadata: number; consumed: number; budget: number;

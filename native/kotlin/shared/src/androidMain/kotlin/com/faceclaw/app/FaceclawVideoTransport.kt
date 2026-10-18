@@ -29,6 +29,7 @@ class VideoSubmission internal constructor(
     internal var listed = false
     internal var delivered = false
     internal var failure: String? = null
+    internal val flowCredits = arrayOfNulls<VideoFlowCredit>(2)
     internal val queuedAt = System.nanoTime()
     internal var writtenAt = 0L
     internal val timing = transport.recordMeasurement.queued(payload, epoch, transport.queryTimingOp)
@@ -90,6 +91,10 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
     }
     @Volatile var epoch = 1L
         private set
+    @Volatile private var flowWindow = 3
+
+    /** Only the fenced, negotiated video writer may enlarge jim's queue window. */
+    fun windowSize(): Int = flowWindow
 
     /** Enable only after both lenses advertise receive/clock diagnostics. */
     fun configureEvidence(identities: VideoIdentityAllocator, enabled: Boolean) {
@@ -149,6 +154,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
     fun retire(reason: String) = synchronized(monitor) {
         check(epoch != Long.MAX_VALUE) { "Video connection epoch exhausted" }
         epoch++
+        flowWindow = 3
         uncertainContexts = 0
         evidenceReserve = null
         refusalEvidenceTargets = 0
@@ -295,6 +301,72 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         }
     }
 
+    /** Refill on individual completions; pause drains the exact outstanding set. */
+    internal fun continuous(next: () -> ByteArray?, credit: (VideoFlowCredit) -> Int,
+        keepSending: () -> Boolean, targets: Int, ingressLeft: Boolean, generation: Long) = writer.withLock {
+        require(targets in 1..3)
+        synchronized(monitor) {
+            check(epoch == generation && pending.isEmpty() && request == 0L) { "Video flow writer is not fenced" }
+            flowWindow = 6
+        }
+        var replayCapacity = 4
+        var nextSequence: Long? = null
+        var stream: Long? = null
+        try {
+            while (true) {
+                val grants = mutableListOf<VideoFlowCredit>()
+                synchronized(monitor) {
+                    check(epoch == generation) { "Video generation retired" }
+                    pending.forEach { record ->
+                        record.failure?.let { error(it) }
+                        if (record.delivered) check(record.accepted == targets) { "Paired NAL transport refused" }
+                        for (side in 0..1) record.flowCredits[side]?.let {
+                            grants.add(it); record.flowCredits[side] = null
+                        }
+                    }
+                    val complete = pending.filter { it.delivered }
+                    complete.forEach { recordMeasurement.finished(it.timing) }
+                    pending.removeAll(complete.toSet())
+                }
+                for (grant in grants.sortedBy { it.sequence }) {
+                    replayCapacity = credit(grant)
+                    check(replayCapacity in listOf(4,6,12)) { "Invalid video replay capacity" }
+                }
+                // Keep a lost early ACK inside each lens's exact retry cache;
+                // pending count alone would let later completions run past it.
+                val room = synchronized(monitor) { pending.size < flowWindow &&
+                    (pending.isEmpty() || nextSequence!! - pending.minOf { u32(it.payload, 6) } < replayCapacity) }
+                val payload = if (room && keepSending()) next() else null
+                if (payload != null) {
+                    require(payload.size in 11..4096 && unsigned(payload[0]) == MESSAGE && unsigned(payload[1]) in 26..27)
+                    val sequence = u32(payload, 6)
+                    require((nextSequence == null || sequence == nextSequence) &&
+                        (stream == null || stream == u32(payload, 2))) { "Video flow sequence changed" }
+                    stream = u32(payload, 2); nextSequence = sequence + 1
+                    val record = VideoSubmission(payload, targets, ingressLeft, generation, this)
+                    synchronized(monitor) {
+                        check(epoch == generation) { "Video generation retired before enqueue" }
+                        pending.add(record)
+                    }
+                    if (!queue.enqueue(record)) failed(record, "Video session is not ready")
+                    continue
+                }
+                if (synchronized(monitor) { pending.isEmpty() }) break
+                val deadline = synchronized(monitor) { pending.minOf { it.queuedAt } + 15_000_000_000L }
+                await(generation, deadline) {
+                    pending.any { it.delivered || it.flowCredits.any { row -> row != null } }
+                }
+            }
+        } finally {
+            synchronized(monitor) {
+                flowWindow = 3
+                pending.forEach { recordMeasurement.finished(it.timing) }
+                pending.clear()
+            }
+            flushRefusalEvidence(ingressLeft, generation)
+        }
+    }
+
     private fun begin(work: (Long) -> String): Long {
         val id: Long
         val operation: Operation
@@ -350,6 +422,19 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         if (unsigned(packet[8]) == MESSAGE) {
             val body = packet.copyOfRange(8, packet.size - 2)
             if (body.size !in 9..VIDEO_REPLY_MAX_BYTES || CfwTransport.crc(body) != u16(packet, packet.size - 2)) return true
+            if (body.size == 29 && unsigned(body[8]) == 0xd1 && body[6].toInt() == 0 && body[7].toInt() == 1) {
+                val side = unsigned(body[1]); val sequence = u32(body, 2)
+                synchronized(monitor) {
+                    val record = pending.firstOrNull { it.epoch == epoch && it.ingressLeft == ingressLeft &&
+                        it.targets and side != 0 && unsigned(it.payload[1]) in 26..27 &&
+                        u32(it.payload, 6) == sequence && u32(it.payload, 2) == u32(body, 25) }
+                    if (side in 1..2 && record != null) {
+                        record.flowCredits[side - 1] = VideoFlowCredit(side, sequence.toInt(), body.copyOfRange(9, 25))
+                        monitor.notifyAll()
+                    }
+                }
+                return true
+            }
             val side = unsigned(body[1])
             val id = u32(body, 2)
             val page = unsigned(body[6])

@@ -47,3 +47,14 @@ test('Queries fetch lenses separately with explicit kind and row selectors', asy
     [[7, 7, 0, 128, 1], [7, 7, 1, 128, 1], [7, 7, 0, 128, 2], [7, 7, 1, 128, 2]]);
   await assert.rejects(p.failureDiagnostics(3, 0));
 });
+
+test('Worker heap bytes cannot be mistaken for a presenter fault', () => {
+  const {rows, sent} = evidence();
+  rows[1].set([7, 64, 0x45, 0x23, 1, 0, 0, 1], 24);
+  assert.match(videoFailureLines(1, 7, ...rows, sent)[0],
+    /task=worker.*storageRule=7 storageLive=64 cachedFree=74565 cachedLargest=65536/);
+  put(rows[1], 20, 0x7f0225); put(rows[1], 24, 640);
+  rows[1][28] = 1; rows[1][29] = 1; rows[1][30] = 2; rows[1][31] = 0;
+  assert.match(videoFailureLines(1, 7, ...rows, sent)[0],
+    /task=presenter.*presenterStackUsed=640 presenterGuards=1 presenterQueue=2/);
+});

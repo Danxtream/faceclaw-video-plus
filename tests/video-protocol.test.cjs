@@ -2,6 +2,30 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { VideoProtocol, VideoReportUnavailable, VIDEO, parseVideoStatus, videoU32 } = require('../.test-build/app/apps/video/video-protocol');
 
+test('Continuous delivery opts in only with both capabilities and otherwise keeps old firmware path', async () => {
+  for (const flags of [[false,false], [true,false], [true,true]]) {
+    let id=1; const sent=[]; let plan;
+    const protocol = new VideoProtocol({epoch:()=>1, createUploadPump:(_,p)=>{plan=p;return {};},
+      exchange:async(raw,length)=>{
+        sent.push(raw.slice());
+        if (raw[1]===VIDEO.playbackCaps) return flags.map(()=>Uint8Array.from([1,13,0,255,194,7,255,255,0,64,0,0,0,32,0,0]));
+        if (raw[1]===VIDEO.credits) return flags.map(()=>new Uint8Array(length));
+        return flags.map(flag=>{const row=status().slice(0,length);row[71]=flag?64:0;return row;});
+      }},()=>id++);
+    await protocol.capabilities();
+    await protocol.start(1,false,false,false);
+    assert.equal(!!(sent.at(-1)[18]&64),flags.every(Boolean));
+    protocol.createUploadPump({}, {stream:1,tokens:[101,102],prefix:[],firstNal:0,count:1,pictures:[{nal:0,pts:0}]});
+    assert.equal(plan.flow,flags.every(Boolean));
+    const credits=await protocol.owned(VIDEO.credits,1,[101,102],6,1);
+    assert.equal(videoU32(sent.at(-1),20),flags.every(Boolean)?3:1);
+    assert.equal(credits[0].length,flags.every(Boolean)?16:6);
+  }
+  const row=status();row[50]=12;row[51]=12;
+  assert.throws(()=>parseVideoStatus(row));row[71]|=64;
+  assert.equal(parseVideoStatus(row).capacity,12);
+});
+
 test('Independent metadata room accepts six but never seven on either send path', async () => {
   let room = 6;
   const rows = () => [1, 2].map(() => Uint8Array.from([2, 0, 0, 0, room, 0]));
@@ -176,7 +200,9 @@ test('Paired capability gates refusal evidence and raw read-only clock logging',
     assert.equal(configured, !!(flags & 32)); assert.equal(clocks, flags & 32 ? 1 : 0);
     assert.equal(protocol.timedNal, !!(flags & 128));
     assert.equal(protocol.slices, !!(flags & 8));
-    if (flags & 32) assert.ok(output.length === 2 && output.every(line => line.includes('cyclesPerMs=250000')));
+    assert.equal(output.filter(line => line.startsWith('Video delivery mode=')).length, 1);
+    const samples = output.filter(line => !line.startsWith('Video delivery mode='));
+    if (flags & 32) assert.ok(samples.length === 2 && samples.every(line => line.includes('cyclesPerMs=250000')));
   }
 });
 

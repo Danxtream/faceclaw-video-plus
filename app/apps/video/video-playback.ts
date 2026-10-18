@@ -498,18 +498,20 @@ export class VideoPlayback {
     const timed = this.protocol.timedNal === true && !!g.pump;
     const credit = timed ? await this.protocol.owned(VIDEO.credits, g.stream, g.tokens, 6, 1) :
       await this.protocol.owned(VIDEO.credits, g.stream, g.tokens, 6);
-    if (credit.length !== 2 || credit.some(row => row.length !== 6)) throw new Error("Missing lens video reply");
+    if (credit.length !== 2 || credit.some(row => ![6, 16].includes(row.length))) throw new Error("Missing lens video reply");
     const expected = credit.map((raw) => videoU32(raw, 0));
     let budget = 6;
     for (let side = 0; side < 2; side++) {
-      const packed = credit[side][4], state = packed >>> 4 & 7, capacity = packed & 8 ? 6 : 4, free = packed & 7;
+      const packed = credit[side][4], state = packed >>> 4 & 7;
+      const capacity = credit[side].length === 16 ? credit[side][7] : packed & 8 ? 6 : 4;
+      const free = credit[side].length === 16 ? credit[side][6] : packed & 7;
       if (credit[side][5] & (timed ? 31 : 255) || (timed && (credit[side][5] >>> 5) > 6) ||
-          packed & 128 || state !== 2 || free > capacity || expected[side] > g.index || g.index - expected[side] > capacity)
+          packed & 128 || state !== 2 || ![4, 6, 12].includes(capacity) || free > capacity || expected[side] > g.index || g.index - expected[side] > capacity)
         throw new Error("Video owner credit window failed");
       budget = Math.min(budget, free, capacity + expected[side] - g.index);
     }
     this.creditBudget = budget;
-    g.pump?.offerCredits?.(g.stream, g.tokens, g.index, credit, this.clock() - began);
+    if (credit.every(row => row.length === 6)) g.pump?.offerCredits?.(g.stream, g.tokens, g.index, credit, this.clock() - began);
     const consumed = Math.min(...expected);
     if (consumed !== this.consumed) { this.consumed = consumed; this.progressAt = this.clock(); }
   }
