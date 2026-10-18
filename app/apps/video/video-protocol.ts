@@ -162,6 +162,11 @@ export class VideoProtocol {
     const raw = await this.header(7, 12); raw[8] = 7; raw[9] = mode;
     return (await this.query(raw, 128, side))[0];
   }
+  /** The lens's base diagnostics page: per-heap free and largest block, read while idle or playing. */
+  async heapDiagnostics(side: number): Promise<Uint8Array> {
+    if (![1, 2].includes(side)) throw new Error("Invalid heap diagnostic side");
+    return (await this.query(await this.header(7, 8), 128, side))[0];
+  }
   beginMeasurement(stream: number): void { this.check(); this.backend.beginMeasurement?.(stream); }
   /** One bounded paired snapshot per normal report turn; no per-frame polling. */
   async rateEvidenceRows(stream: number, cursors: readonly number[], mode = 0): Promise<Uint8Array[] | null> {

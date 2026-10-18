@@ -33,7 +33,7 @@ export type VideoPlaybackView = {
   cleanupFailed: boolean;
   hostPhy: string;
 };
-type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement" | "timedNal" | "slices" | "pace" | "failureDiagnostics">>;
+type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement" | "timedNal" | "slices" | "pace" | "failureDiagnostics" | "heapDiagnostics">>;
 type Intent = { kind: "pause" | "seek" | "scale" | "menu" | "skip"; value: number | boolean; resolve: () => void; reject: (error: unknown) => void };
 type Generation = { stream: number; tokens: number[]; idr: number; target: number; prefix: number[]; firstNal: number; index: number; count: number; metadata: number; paused: boolean; reached: boolean; oldPhy: VideoPhy[]; started: number; anchor: VideoPhy[]; anchorAt: number; anchorUncertainty: number; detailedReports: boolean; pump?: VideoUploadPump };
 
@@ -64,6 +64,20 @@ export class VideoPlayback {
         const history = await this.protocol.failureDiagnostics(side, 1);
         for (const line of videoFailureLines(side, g.stream, detail, history, recent)) console.error(line);
       } catch (error) { console.error(`Video failure evidence unavailable side=${side}: ${error}`); }
+    }
+    await this.logHeaps(g.stream, "after-failure");
+  }
+  /** Log each lens's heaps, to see whether free memory shrinks stream by stream. */
+  private async logHeaps(stream: number, when: string): Promise<void> {
+    if (!this.protocol.heapDiagnostics) return;
+    for (const side of [1, 2]) {
+      try {
+        const raw = await this.protocol.heapDiagnostics(side);
+        const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+        const heap = (i: number) => `${view.getUint32(16 + i * 12, true)}/${view.getUint32(20 + i * 12, true)}`;
+        console.error(`Video heap side=${side} stream=${stream} when=${when} cached=${heap(0)}` +
+          ` display=${heap(1)} other=${heap(2)} valid=${raw[3] & 7}`);
+      } catch (error) { console.error(`Video heap unavailable side=${side} when=${when}: ${error}`); }
     }
   }
   readonly view: VideoPlaybackView;
@@ -273,6 +287,7 @@ export class VideoPlayback {
       paused, reached: false, oldPhy, started: this.clock(), anchor: oldPhy, anchorAt: this.clock(),
       anchorUncertainty: 0, detailedReports: !!selection.detailedReports };
     this.recentNals = [];
+    await this.logHeaps(stream, "before-start");
     const start = await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused, 3, this.source.clip.fps, this.source.clip, selection.blackFloor);
     const retryDeadline = this.clock() + 1_000;
     for (let attempt = 0; ; attempt++) {
