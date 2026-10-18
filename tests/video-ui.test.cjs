@@ -25,7 +25,7 @@ function modelFixture(strip = false) {
     '../apps/video/video-session': {activeVideoSession: () => session, observeVideoSession: () => () => calls.push(['unsub-video'])},
     '../apps/video/video-settings': {videoRadioSetting: settings('radio'), videoScaleSetting: settings('scale'), videoDitherSetting: settings('dither'), videoBlackFloorSetting: settings('floor'), videoDeblockingSetting: settings('deblock'), videoConversionRateSetting: settings('rate'),videoConversionHeightSetting: settings('height'),
       videoConversionContrastSetting: settings('contrast'), videoConversionKeyframesSetting: settings('keyframes'), videoConversionBitrateSetting: settings('bitrate'),
-      videoAudioOffsetSetting: settings('audioOffset'), VIDEO_AUDIO_OFFSETS: Array.from({length: 45}, (_, i) => String(i * 25 - 100))},
+      videoAudioOffsetSetting: settings('audioOffset'), VIDEO_AUDIO_OFFSETS: Array.from({length: 81}, (_, i) => String(i * 25 - 1000))},
   });
   const module = load(strip ? 'app/phone-ui/video-strip.ts' : 'app/phone-ui/video-view-model.ts');
   return {module, calls, values, player, fixture: strip ? new module.VideoStripViewModel() : new module.VideoViewModel(),
@@ -113,9 +113,9 @@ test('Audio timing moves 25 ms per tap, stops at both ends and sends no player c
   const f = modelFixture(); f.fixture.attach();
   assert.equal(f.fixture.get('canAudioEarlier'), true);
   f.fixture.onAudioEarlierTap(); assert.equal(f.values.get('audioOffset'), '25');
-  for (let i = 0; i < 10; i++) f.fixture.onAudioLaterTap();
-  assert.equal(f.values.get('audioOffset'), '-100'); assert.equal(f.fixture.get('canAudioLater'), false);
-  for (let i = 0; i < 60; i++) f.fixture.onAudioEarlierTap();
+  for (let i = 0; i < 50; i++) f.fixture.onAudioLaterTap();
+  assert.equal(f.values.get('audioOffset'), '-1000'); assert.equal(f.fixture.get('canAudioLater'), false);
+  for (let i = 0; i < 90; i++) f.fixture.onAudioEarlierTap();
   assert.equal(f.values.get('audioOffset'), '1000'); assert.equal(f.fixture.get('canAudioEarlier'), false);
   assert.ok(f.calls.every(row => row[0] === 'audioOffset' || row[0].startsWith('unsub')));
   const xml = fs.readFileSync('app/phone-ui/video-page.xml', 'utf8');
