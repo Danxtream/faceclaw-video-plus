@@ -28,14 +28,18 @@ export function videoFailureLines(side: number, stream: number, detail: Uint8Arr
       word(detail, 92) !== word(history, 16)) throw new Error(`Inconsistent decode failure evidence side=${side}`);
   const savedStream = word(detail, 8), sequence = word(detail, 20);
   const lines = [`Video failure side=${side} stream=${savedStream} attemptedStream=${stream} token=${word(detail, 12)}` +
-    ` fault=${word(detail, 16)} sequence=${sequence} reject=${word(detail, 40)} stage=${word(detail, 44)}` +
+    ` fault=0x${word(detail, 16).toString(16)} sequence=${sequence} reject=${word(detail, 40)} stage=${word(detail, 44)}` +
     ` mbEntered=${word(detail, 48)} mbCompleted=${word(detail, 52)} bitOffset=${word(detail, 56)}` +
     ` firstMb=${word(detail, 60)} frameNum=${word(detail, 64)} priorOpen=${word(detail, 68)}` +
     ` priorNextMb=${word(detail, 72)} priorFrameNum=${word(detail, 76)}` +
     ` allocationTag=${word(detail, 80)} allocationSize=${word(detail, 84)}` +
     ` runtimeAllocationTag=${word(detail, 96)} runtimeAllocationSize=${word(detail, 100)}` +
     ` powerStep=${word(detail, 104)} peerGeneration=${word(detail, 108)} peerStream=${word(detail, 112)} peerClosed=${word(detail, 116)}` +
-    ` inputPinned=${word(detail, 120)} decoderPresent=${word(detail, 124)}`];
+    ` inputPinned=${word(detail, 120)} decoderPresent=${word(detail, 124)}` +
+    // History bytes 20-31: presenter faults record their call site and state.
+    ` task=${history[29] ? "presenter" : "worker"} site=0x${word(history, 20).toString(16)}` +
+    ` presenterStackUsed=${word(history, 24)} presenterGuards=${history[28]}` +
+    ` presenterQueue=${history[30] | history[31] << 8}`];
   const compare = (sequence: number, type: number, length: number, checksum: number, current: boolean): void => {
     const sent = savedStream === stream ? recent.find(row => row.sequence === sequence) : undefined;
     const verdict = savedStream !== stream ? "STALE STREAM" : !sent ? "NO PHONE EVIDENCE" :
