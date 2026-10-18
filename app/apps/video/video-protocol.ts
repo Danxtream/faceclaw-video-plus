@@ -80,6 +80,8 @@ export class VideoProtocol {
   private rateEvidence = false;
   private timed = false;
   private flow = false;
+  private continuous = true;
+  private hopSupport: boolean | null = null;
   private geometry = false;
   private pictureStyle = false;
   private multiSlice = false;
@@ -87,6 +89,12 @@ export class VideoProtocol {
   get timedNal(): boolean { return this.timed; }
   /** Both lenses decode pictures split into several slices (large-keyframe clips). */
   get slices(): boolean { return this.multiSlice; }
+  private get useFlow(): boolean { return this.flow && this.timed && this.continuous; }
+  /** Read once per START/seek; this does not switch an admitted stream's policy. */
+  continuousDelivery(enabled: boolean): void {
+    this.continuous = enabled;
+    console.error(`Video delivery selected=${this.useFlow ? "continuous" : "legacy"} windowLimit=${this.useFlow ? 6 : 3}`);
+  }
   constructor(private readonly backend: VideoBackend, private readonly reserve: () => number | Promise<number>) {
     this.epoch = backend.epoch();
   }
@@ -95,7 +103,7 @@ export class VideoProtocol {
   }
   createUploadPump(reader: unknown, plan: VideoUploadPlan): VideoUploadPump | undefined {
     this.check();
-    return reader === undefined ? undefined : this.backend.createUploadPump?.(reader, {...plan, timed: this.timed, flow: this.flow && this.timed});
+    return reader === undefined ? undefined : this.backend.createUploadPump?.(reader, {...plan, timed: this.timed, flow: this.useFlow});
   }
   private async header(op: number, bytes: number): Promise<Uint8Array> {
     this.check();
@@ -172,6 +180,18 @@ export class VideoProtocol {
     if (![1, 2].includes(side)) throw new Error("Invalid heap diagnostic side");
     return (await this.query(await this.header(7, 8), 128, side))[0];
   }
+  /** One frozen body per lens; discover its size before asking older firmware for it. */
+  async hopEvidence(stream: number): Promise<Uint8Array[] | null> {
+    if (this.hopSupport === null) {
+      const probe = await this.header(7, 12); probe[8] = 8;
+      const rows = await this.query(probe, 128);
+      this.hopSupport = rows.every(row => row[0] === 1 && row[1] === 7 && !row[2] && row[3] === 8 && row[5] === 1 && row[8] === 172);
+      if (!this.hopSupport) console.error("Video hop evidence unsupported; playback unchanged");
+    }
+    if (!this.hopSupport) return null;
+    const raw = await this.header(7, 16); raw[8] = 8; put(raw, 12, stream);
+    return this.query(raw, 172);
+  }
   beginMeasurement(stream: number): void { this.check(); this.backend.beginMeasurement?.(stream); }
   /** One bounded paired snapshot per normal report turn; no per-frame polling. */
   async rateEvidenceRows(stream: number, cursors: readonly number[], mode = 0): Promise<Uint8Array[] | null> {
@@ -235,7 +255,7 @@ export class VideoProtocol {
     if (!Number.isInteger(preroll) || preroll < 0 || preroll > 255) throw new Error("Unsupported seek preroll");
     put(raw, 8, stream);
     raw.set([64, 1, 192, 0, 1, 2, 4 | 8 | (native ? 1 : 0) | (dither ? 16 : 0) | (!radio ? 2 : 0) | (paused ? 32 : 0), preroll], 12);
-    if (this.flow && this.timed) raw[18] |= 64;
+    if (this.useFlow) raw[18] |= 64;
     const field = (offset: number, value: number) => { raw[offset] = value; raw[offset+1] = value >>> 8; };
     field(12, size.width); field(14, size.height);
     if (extended || tuned) [size.picture.x, size.picture.y, size.picture.width, size.picture.height].forEach((value, i) => field(24+i*2, value));
@@ -250,7 +270,7 @@ export class VideoProtocol {
     return (await this.query(raw, 128)).map(parseVideoStatus);
   }
   async owned(op: number, stream: number, tokens: readonly number[], length: number, value?: number): Promise<Uint8Array[]> {
-    if (op === VIDEO.credits && value === 1 && this.flow && this.timed) { value = 3; length = 16; }
+    if (op === VIDEO.credits && value === 1 && this.useFlow) { value = 3; length = 16; }
     if (tokens.length !== 2 || tokens.some((value) => !value)) throw new Error("Video owner token missing");
     const raw = await this.header(op, value === undefined ? 20 : 24);
     put(raw, 8, stream); put(raw, 12, tokens[0]); put(raw, 16, tokens[1]);

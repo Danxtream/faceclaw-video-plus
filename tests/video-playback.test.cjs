@@ -182,12 +182,39 @@ function fixture(frames = 20, step = 67) {
   const source = {clip, readNal: async index => { assert.ok(index >= 0 && index < nals.length); return Uint8Array.of(nals[index].type | 0x60, index); }, close: () => { closed = true; calls.push('close'); }};
   const player = new VideoPlayback(protocol, source, {sync: async (...args) => audio.push(['sync', ...args]),
     pause: async () => audio.push(['pause']), close: async () => audio.push(['close'])},
-    () => ({native: state.native, dither: false, radio: true, detailedReports: !!state.detailedReports, audioOffsetMs: state.audioOffsetMs}), v => { view.push(v); f.onView?.(v); },
+    () => ({native: state.native, dither: false, radio: true, detailedReports: !!state.detailedReports, continuousDelivery: state.continuousDelivery, audioOffsetMs: state.audioOffsetMs}), v => { view.push(v); f.onView?.(v); },
     count => copied += count, () => now, async ms => { now += ms; });
   const f = {player, state, calls, audio, view, clip, protocol, onView: null,
     closed: () => closed, copied: () => copied};
   return f;
 }
+
+test('Hop observations run at report turns and stream end, while unavailable evidence stays non-fatal', async () => {
+  const original = console.error, logs = [];
+  console.error = message => logs.push(message);
+  try {
+    for (const mode of ['available', 'old', 'missing']) {
+      const f = fixture(5), selected = [];
+      f.state.continuousDelivery = false;
+      f.protocol.continuousDelivery = value => selected.push(value);
+      f.protocol.hopEvidence = async stream => {
+        if (mode === 'old') return null;
+        if (mode === 'missing') throw new Error('query unavailable');
+        return [1, 2].map(side => {
+          const r = new Uint8Array(172); r.set([1, 7, 0, 8, 0, 1, side, 1]);
+          put(r, 8, stream); put(r, 12, 100 + side); return r;
+        });
+      };
+      await f.player.run();
+      assert.deepEqual(selected, [false]);
+      assert.equal(f.player.view.cleanupFailed, false);
+    }
+    assert.ok(logs.some(s => /Video hop stream=.*side=1 phase=report/.test(s)));
+    assert.ok(logs.some(s => /Video hop stream=.*side=2 phase=end/.test(s)));
+    assert.ok(logs.some(s => s.includes('receiveToConfirmationEnqueue')));
+    assert.ok(logs.some(s => s.includes('Video hop evidence unavailable')));
+  } finally { console.error = original; }
+});
 
 test('Observation parsers preserve zero ticks, wraps and source/owner failures', () => {
   assert.equal(videoTickSpan(0, 0xffffffff), 1);

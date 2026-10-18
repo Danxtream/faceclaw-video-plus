@@ -4,6 +4,7 @@ import { VideoAvSync, videoAvOptions, type VideoAvAction } from "./video-av-sync
 import { VideoAudioClock, VideoLensClock, videoPacePlan, videoPaceSpan, videoSkipTarget } from "./video-pacing";
 import { VideoMeasurement } from "./video-measurement";
 import { videoMeasurementLogs } from "./video-measurement-log";
+import { parseVideoHop } from "./video-hop";
 import { videoFailureLines, videoNalChecksum, type VideoNalEvidence } from "./video-failure";
 import { VIDEO, VideoProtocol, VideoReportUnavailable, videoStaleError, videoU32, type VideoStatus } from "./video-protocol";
 import { parsePlayback, parseShown, parseVideoPhy, videoRestored, videoLive, videoOwnedSnapshot, videoTickSpan, videoCopyRate, videoPhyDetails,
@@ -23,7 +24,7 @@ export interface VideoAudio {
   position?(): number | null;
 }
 export const silentVideoAudio: VideoAudio = { sync: async () => {}, pause: async () => {}, close: async () => {} };
-export type VideoOptions = { native: boolean; dither: boolean; radio: boolean; detailedReports?: boolean; blackFloor?: 0 | 0.25 | 0.5 | 1;
+export type VideoOptions = { native: boolean; dither: boolean; radio: boolean; detailedReports?: boolean; continuousDelivery?: boolean; blackFloor?: 0 | 0.25 | 0.5 | 1;
   /** Phone-side only and read while playing: audio plays this many ms ahead of the picture. */
   audioOffsetMs?: number };
 export type VideoPlaybackView = {
@@ -33,7 +34,7 @@ export type VideoPlaybackView = {
   cleanupFailed: boolean;
   hostPhy: string;
 };
-type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement" | "timedNal" | "slices" | "pace" | "failureDiagnostics" | "heapDiagnostics">>;
+type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement" | "timedNal" | "slices" | "pace" | "failureDiagnostics" | "heapDiagnostics" | "continuousDelivery" | "hopEvidence">>;
 type Intent = { kind: "pause" | "seek" | "scale" | "menu" | "skip"; value: number | boolean; resolve: () => void; reject: (error: unknown) => void };
 type Generation = { stream: number; tokens: number[]; idr: number; target: number; prefix: number[]; firstNal: number; index: number; count: number; metadata: number; paused: boolean; reached: boolean; oldPhy: VideoPhy[]; started: number; anchor: VideoPhy[]; anchorAt: number; anchorUncertainty: number; detailedReports: boolean; pump?: VideoUploadPump };
 
@@ -277,6 +278,7 @@ export class VideoPlayback {
     const oldPhy = await this.cleanStartPhy();
     if (this.stopping) throw new VideoCancelled();
     const selection = this.options();
+    this.protocol.continuousDelivery?.(selection.continuousDelivery !== false);
     await this.protocol.radioSelection(selection.radio);
     this.validateStatus(await this.protocol.timeline(stream, this.source.clip.duration, this.source.clip.pictures[target].pts, this.source.clip.fps),
       VIDEO.timeline, undefined, undefined, true);
@@ -391,6 +393,7 @@ export class VideoPlayback {
     } catch (error) { this.measurement?.unavailableSample(error); }
     this.logMeasurement("final", {shown: this.measurement?.summary(true) ?? null,
       pump: this.nativeMeasurement, transport: this.readMeasurement()});
+    await this.logHopEvidence("end");
     this.generation = null;
     await this.clockEvidence(2);
     if (sampleFailure) throw sampleFailure;
@@ -627,6 +630,29 @@ export class VideoPlayback {
     if (g) for (const line of videoMeasurementLogs({stream: g.stream, tokens: g.tokens},
       this.measurementSample++, phase, groups)) console.error(line);
   }
+  private async logHopEvidence(phase: "report" | "end"): Promise<void> {
+    const g = this.generation;
+    if (!g || g.tokens.length !== 2 || !this.protocol.hopEvidence || (this.stopping && phase === "report")) return;
+    const began = this.clock();
+    try {
+      const rows = await this.protocol.hopEvidence(g.stream);
+      if (!rows) return;
+      if (rows.length !== 2) throw new Error("Missing paired hop evidence");
+      rows.forEach((raw, i) => {
+        const hop = parseVideoHop(raw, g.stream, g.tokens[i], i + 1);
+        const complete = hop.stages.find(row => row.stage === "forwardToPeerAck");
+        console.error(`Video hop stream=${g.stream} side=${i + 1} phase=${phase} origin=${hop.origin} ` +
+          `pending=${hop.pending} maxPending=${hop.maxPending} elapsedTicks=${hop.elapsedTicks} flags=${hop.flags}` +
+          (complete && hop.elapsedTicks ? ` meanForwards=${(complete.sumTicks + hop.liveForwardTicks) / hop.elapsedTicks}` : ""));
+        for (const row of hop.stages) console.error(`Video hop stage stream=${g.stream} side=${i + 1} phase=${phase} ${JSON.stringify(row)}`);
+      });
+      this.logMeasurement(`hop-${phase}`, {transport: this.readMeasurement()});
+    } catch (error) { console.error(`Video hop evidence unavailable stream=${g.stream} phase=${phase}: ${error}`); }
+    finally {
+      console.error(`Video hop query stream=${g.stream} phase=${phase} elapsedMs=${this.clock() - began}`);
+      this.measurement?.span(began, this.clock(), "report");
+    }
+  }
   private async collectMeasurement(dips = false): Promise<void> {
     const g = this.generation, measurement = this.measurement;
     if (!g || !measurement || !this.protocol.rateEvidenceRows) return;
@@ -857,7 +883,10 @@ export class VideoPlayback {
     const began = this.clock();
     try { await this.reportStep(); }
     catch (error) { if (required || !this.deferReport(error, began)) throw error; }
-    finally { this.measurement?.span(began, this.clock(), "report"); }
+    finally {
+      await this.logHopEvidence("report");
+      this.measurement?.span(began, this.clock(), "report");
+    }
   }
   /** One passive step per blocked or stale turn; recheck input before the next. */
   private async reportStep(): Promise<void> {

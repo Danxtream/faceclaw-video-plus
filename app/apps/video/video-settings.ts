@@ -59,12 +59,15 @@ export const videoConversionBitrateSetting = new ConfigSettingEnum<"110" | "150"
 export const videoDetailedReportsSetting = new ConfigSettingBoolean({
   id: "video-detailed-reports", label: "Video detailed reports", storageKey: "video.detailedReports", defaultValue: false,
 });
+export const videoContinuousDeliverySetting = new ConfigSettingBoolean({
+  id: "video-continuous-delivery", label: "Video continuous delivery", storageKey: "video.continuousDelivery", defaultValue: true,
+});
 
 /** Generation settings are read only at START/seek, never on a settings callback;
  *  the phone-side audio offset is also read while playing. */
 export function configuredVideoOptions(): VideoOptions {
   return { native: videoScaleSetting.get() === "native", dither: videoDitherSetting.get(), radio: videoRadioSetting.get() === "video",
-    detailedReports: videoDetailedReportsSetting.get(), blackFloor: Number(videoBlackFloorSetting.get()) as 0 | 0.25 | 0.5 | 1,
+    detailedReports: videoDetailedReportsSetting.get(), continuousDelivery: videoContinuousDeliverySetting.get(), blackFloor: Number(videoBlackFloorSetting.get()) as 0 | 0.25 | 0.5 | 1,
     audioOffsetMs: Number(videoAudioOffsetSetting.get()) };
 }
 /** These are Video settings, not entries in the firmware's playback pause menu. */
