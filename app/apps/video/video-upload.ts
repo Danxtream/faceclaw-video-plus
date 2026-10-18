@@ -1,3 +1,5 @@
+import { type VideoNalEvidence } from "./video-failure";
+
 /** One generation's already-audited seek map, transferred once to the native writer. */
 export type VideoUploadPlan = {
   stream: number; tokens: number[]; prefix: number[]; firstNal: number; count: number;
@@ -17,6 +19,8 @@ export interface VideoUploadPump {
   pause(): void;
   snapshot(): VideoUploadProgress;
   close(): void;
+  /** Recently attempted payloads; a failed pipeline need not have ACKed them. */
+  evidence?(): VideoNalEvidence[];
   offerCredits?(stream: number, tokens: readonly number[], sent: number,
     rows: readonly Uint8Array[], ageMs: number): boolean;
 }

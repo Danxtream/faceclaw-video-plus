@@ -6,6 +6,44 @@ const { parseVideoPhy, videoRestored, videoLive, parsePlayback, parseShown, vide
 
 function put(raw, offset, value) { new DataView(raw.buffer).setUint32(offset, value, true); }
 
+test('Failure evidence fences the native writer and continues after an unavailable lens', async () => {
+  const f = fixture(), order = [];
+  f.player.generation = {stream: 7, tokens: [101, 102], pump: {
+    pause: () => order.push('pause'), snapshot: () => ({running: false}),
+    evidence: () => {order.push('phone'); return [];}
+  }};
+  f.protocol.failureDiagnostics = async (side, mode) => {
+    order.push(`${side}:${mode}`);
+    if (side === 1) throw new Error('unavailable');
+    return Uint8Array.from({length: 128}, (_, at) => [1, 7, 0, 7, mode, 1, side, 0][at] ?? 0);
+  };
+  await f.player.logFailureEvidence();
+  assert.deepEqual(order, ['pause', 'phone', '1:0', '2:0', '2:1']);
+});
+
+test('Failed asynchronous START names both lenses power barriers', () => {
+  const f = fixture(), lines = [], old = console.error;
+  f.player.generation = {tokens: []}; console.error = line => lines.push(line);
+  try { assert.throws(() => f.player.validateStatus([
+    {result: 0, state: 0, error: 16, stream: 7, high: 7, token: 101, powerStep: 8},
+    {result: 0, state: 2, error: 0, stream: 7, high: 7, token: 102, powerStep: 0},
+  ], VIDEO.status, 7), /powerStep=8/); }
+  finally { console.error = old; }
+  assert.ok(lines.some(line => /LEFT powerStep=8.*RIGHT powerStep=0/.test(line)));
+});
+
+test('Failure evidence remains available when only final cleanup fails', async () => {
+  const f = fixture(), queried = [];
+  f.protocol.failureDiagnostics = async (side, mode) => {
+    queried.push([side, mode]);
+    return Uint8Array.from({length: 128}, (_, at) => [1, 7, 0, 7, mode, 1, side, 0][at] ?? 0);
+  };
+  f.player.retire = async () => {throw new Error('STOP failed');};
+  f.onView = view => {if (view.active && f.player.generation) f.player.stop();};
+  await assert.rejects(f.player.run(), /STOP failed/);
+  assert.deepEqual(queried, [[1, 0], [1, 1], [2, 0], [2, 1]]);
+});
+
 test('Flagged report credits retain six-picture room and reject impossible seven', async () => {
   const f = fixture(); let room = 6; let offered = 0;
   f.player.generation = {stream: 1, tokens: [101, 102], index: 0,

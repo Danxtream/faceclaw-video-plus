@@ -47,6 +47,7 @@ export type VideoStatus = {
   result: number; state: number; stream: number; token: number; high: number;
   error: number; expected: number; accepted: number; consumed: number;
   pictures: number; presented: number; copyTick: number; credits: number; capacity: number;
+  powerStep: number;
 };
 
 /** Accept only the fixed decoder contract and coherent active-owner counts. */
@@ -60,7 +61,7 @@ export function parseVideoStatus(raw: Uint8Array): VideoStatus {
   const row = { result: raw[2], state: raw[3], stream: videoU32(raw, 4), token: videoU32(raw, 8),
     high: videoU32(raw, 20), error: videoU32(raw, 24), expected: videoU32(raw, 52),
     accepted: videoU32(raw, 56), consumed: videoU32(raw, 60), pictures: videoU32(raw, 64),
-    presented: videoU32(raw, 80), copyTick: videoU32(raw, 88), credits: raw[51], capacity: raw[50] };
+    presented: videoU32(raw, 80), copyTick: videoU32(raw, 88), credits: raw[51], capacity: raw[50], powerStep: raw[69] >>> 3 };
   if (row.consumed > row.accepted || (row.state === 2 && row.presented > row.pictures))
     throw new Error("Inconsistent video counts");
   return row;
@@ -133,7 +134,7 @@ export class VideoProtocol {
   async capabilities(): Promise<void> {
     const caps = await this.status(VIDEO.caps);
     caps.forEach((row, i) => {
-      if (videoStaleError(row)) console.error(`Video ${i ? "RIGHT" : "LEFT"} is idle after stream ${row.stream} ended with error=${row.error}; the next START clears it`);
+      if (videoStaleError(row)) console.error(`Video ${i ? "RIGHT" : "LEFT"} is idle after stream ${row.stream} ended with error=${row.error}; retained history, next START must pass readiness again (powerStep=${row.powerStep})`);
     });
     if (caps.some((row) => row.result || row.error && !videoStaleError(row))) {
       const lenses = caps.map((row, i) => `${i ? "RIGHT" : "LEFT"} result=${row.result} error=${row.error} state=${row.state} stream=${row.stream} high=${row.high}`).join("; ");
@@ -155,6 +156,12 @@ export class VideoProtocol {
     this.backend.configureEvidence?.(this.evidence);
   }
   measurementSnapshot(): unknown { return this.backend.measurementSnapshot?.() ?? null; }
+  /** Query each lens independently so an unavailable peer cannot hide evidence. */
+  async failureDiagnostics(side: number, mode: number): Promise<Uint8Array> {
+    if (![1, 2].includes(side) || ![0, 1].includes(mode)) throw new Error("Invalid decode diagnostic selector");
+    const raw = await this.header(7, 12); raw[8] = 7; raw[9] = mode;
+    return (await this.query(raw, 128, side))[0];
+  }
   beginMeasurement(stream: number): void { this.check(); this.backend.beginMeasurement?.(stream); }
   /** One bounded paired snapshot per normal report turn; no per-frame polling. */
   async rateEvidenceRows(stream: number, cursors: readonly number[], mode = 0): Promise<Uint8Array[] | null> {

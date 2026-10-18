@@ -33,6 +33,7 @@ export function createVideoProtocol(ingressLeft = true): VideoProtocol {
       const pump = new com.faceclaw.app.VideoUploadPump(transport, reader, identities, JSON.stringify(plan), ingressLeft, uploadEpoch);
       return {
         resume: () => pump.resumeUpload(), pause: () => pump.pauseUpload(), close: () => pump.closeUpload(),
+        evidence: () => JSON.parse(String(pump.uploadEvidence())),
         offerCredits: (stream, tokens, sent, rows, ageMs) => {
           const packet = new Uint8Array(12);
           packet.set(rows[0]); packet.set(rows[1], 6);

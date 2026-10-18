@@ -12,6 +12,31 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class VideoUploadPumpTest {
+    @Test fun failureEvidenceSurvivesRefusedPipelineAndBoundsHistory() {
+        for (timed in listOf(false, true)) {
+            val config = if (timed) timedPlan() else plan()
+            val engine = VideoUploadEngine(config, 8, { "hello".toByteArray() }, { 1 }, {},
+                { command -> if (command[1].toInt() == 10) arrayOf(reply(0, 46, if (timed) 6 shl 5 else 0), reply(0, 46, if (timed) 6 shl 5 else 0))
+                    else arrayOf(reply(word(command, 12), 6), reply(word(command, 12), 6)) },
+                { _, _ -> error("refused") })
+            assertFails { engine.step() }
+            val rows = engine.evidenceRows()
+            assertTrue(rows.isNotEmpty())
+            assertEquals(0, rows[0].sequence)
+            assertEquals(1335831723L, rows[0].checksum)
+            assertEquals(5, rows[0].length)
+            assertTrue(engine.evidence().contains("\"checksum\":1335831723"))
+        }
+        var sent = 0
+        val engine = VideoUploadEngine(plan(96), 96, { byteArrayOf(0x61) }, { 1 }, {},
+            { command -> if (command[1].toInt() == 10) arrayOf(reply(sent.toLong(), 46), reply(sent.toLong(), 46))
+                else arrayOf(reply(word(command, 12), 1), reply(word(command, 12), 1)) },
+            { records, following -> sent += records.size; intArrayOf(records.size, following.count { it != null }) })
+        while (!engine.done) engine.step()
+        val rows = engine.evidenceRows()
+        assertEquals(64, rows.size); assertEquals(32, rows[0].sequence)
+        assertEquals(95, rows[63].sequence)
+    }
     @Test fun sixTimedRoomsUseFourThenTwoAndRespectTheSmallerPeer() {
         for ((peer, wanted) in listOf(6 to 6, 4 to 4, 2 to 2)) {
             var sent = 0; var queries = 0

@@ -4,6 +4,8 @@ import org.json.JSONObject
 import java.nio.ByteBuffer
 
 internal data class VideoUploadPicture(val source: Int, val pts: Long)
+internal data class VideoNalEvidence(val sequence: Int, val source: Int, val type: Int,
+    val length: Int, val checksum: Long)
 internal data class VideoUploadPlan(val stream: Long, val tokens: LongArray, val prefix: IntArray,
     val firstNal: Int, val count: Int, val pictures: List<VideoUploadPicture>, val timed: Boolean = false)
 
@@ -27,6 +29,20 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
     var pictureBudget = 0; private set
     private data class Grant(val index: Int, val rows: Array<ByteArray>, val at: Long)
     private var offered: Grant? = null
+    private val recentNals = ArrayDeque<VideoNalEvidence>()
+    /** Payload attempts, including a batch whose acknowledgement later failed. */
+    @Synchronized private fun recordNal(sequence: Int, bytes: ByteArray) {
+        var checksum = 2166136261L.toInt()
+        for (byte in bytes) checksum = (checksum xor u(byte)) * 16777619
+        recentNals.addLast(VideoNalEvidence(sequence, source(sequence), u(bytes[0]) and 31,
+            bytes.size, checksum.toLong() and 0xffffffffL))
+        if (recentNals.size > 64) recentNals.removeFirst()
+    }
+    @Synchronized fun evidenceRows(): List<VideoNalEvidence> = recentNals.toList()
+    @Synchronized fun evidence(): String = recentNals.joinToString(",", "[", "]") { row ->
+        "{\"sequence\":${row.sequence},\"source\":${row.source},\"type\":${row.type}," +
+            "\"length\":${row.length},\"checksum\":${row.checksum}}"
+    }
     val done get() = index == plan.count
     init {
         require(plan.stream in 1..0xfffffffeL && plan.tokens.size == 2 && plan.tokens.all { it in 1..0xffffffffL })
@@ -122,11 +138,13 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
         return true
     }
     private fun nalRecord(sequence: Int, bytes: ByteArray): ByteArray = ByteArray(10 + bytes.size).also { record ->
+        recordNal(sequence, bytes)
         record[0] = 31; record[1] = 6; put(record, 2, plan.stream); put(record, 6, sequence.toLong())
         bytes.copyInto(record, 10)
     }
     private fun timedRecord(sequence: Int, ordinal: Int, bytes: ByteArray): ByteArray =
         ByteArray(TIMED_HEADER + bytes.size).also { record ->
+            recordNal(sequence, bytes)
             record[0] = 31; record[1] = TIMED_NAL.toByte(); put(record, 2, plan.stream); put(record, 6, sequence.toLong())
             put(record, 10, ordinal.toLong()); put(record, 14, plan.pictures[ordinal - 1].pts)
             bytes.copyInto(record, TIMED_HEADER)
@@ -196,6 +214,7 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
             val bytes = measurement.time(VideoMeasurement.READ) { read(source(sequence)) }; checkEpoch()
             require(bytes.size in 1..4086) { "Complete NAL exceeds advertised limit" }
             val record = ByteArray(10 + bytes.size)
+            recordNal(sequence, bytes)
             record[0] = 31; record[1] = 6; put(record, 2, plan.stream); put(record, 6, sequence.toLong())
             bytes.copyInto(record, 10)
             if (plan.pictures.getOrNull(next)?.source == source(sequence + 1)) {
@@ -329,4 +348,9 @@ class VideoUploadPump internal constructor(create: () -> VideoUploadEngine) {
         "{$progress,\"running\":${running || requested && !closed},\"error\":${failure.isNotEmpty()},\"measurement\":$sample}"
     }
     fun uploadFailure(): String = synchronized(monitor) { failure }
+    /** Read only after fencing; survives a worker exception until JS closes it. */
+    fun uploadEvidence(): String = synchronized(monitor) {
+        check(!running) { "Video upload pump is not fenced" }
+        engine?.evidence() ?: "[]"
+    }
 }

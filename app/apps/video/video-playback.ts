@@ -4,6 +4,7 @@ import { VideoAvSync, videoAvOptions, type VideoAvAction } from "./video-av-sync
 import { VideoAudioClock, VideoLensClock, videoPacePlan, videoPaceSpan, videoSkipTarget } from "./video-pacing";
 import { VideoMeasurement } from "./video-measurement";
 import { videoMeasurementLogs } from "./video-measurement-log";
+import { videoFailureLines, videoNalChecksum, type VideoNalEvidence } from "./video-failure";
 import { VIDEO, VideoProtocol, VideoReportUnavailable, videoStaleError, videoU32, type VideoStatus } from "./video-protocol";
 import { parsePlayback, parseShown, parseVideoPhy, videoRestored, videoLive, videoOwnedSnapshot, videoTickSpan, videoCopyRate, videoPhyDetails,
   type VideoPhy, type VideoShown, type VideoPlaybackState } from "./video-observations";
@@ -32,7 +33,7 @@ export type VideoPlaybackView = {
   cleanupFailed: boolean;
   hostPhy: string;
 };
-type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement" | "timedNal" | "slices" | "pace">>;
+type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement" | "timedNal" | "slices" | "pace" | "failureDiagnostics">>;
 type Intent = { kind: "pause" | "seek" | "scale" | "menu" | "skip"; value: number | boolean; resolve: () => void; reject: (error: unknown) => void };
 type Generation = { stream: number; tokens: number[]; idr: number; target: number; prefix: number[]; firstNal: number; index: number; count: number; metadata: number; paused: boolean; reached: boolean; oldPhy: VideoPhy[]; started: number; anchor: VideoPhy[]; anchorAt: number; anchorUncertainty: number; detailedReports: boolean; pump?: VideoUploadPump };
 
@@ -40,6 +41,31 @@ class VideoCancelled extends Error { constructor() { super("Video cancelled"); }
 
 /** One writer processes uploads and controls; no callback or timer writes BLE. */
 export class VideoPlayback {
+  private recentNals: VideoNalEvidence[] = [];
+  private failureEvidenceStream = 0;
+
+  private async logFailureEvidence(g = this.generation): Promise<void> {
+    if (!g || g.stream === this.failureEvidenceStream || !this.protocol.failureDiagnostics) return;
+    try { await this.suspendUpload(); }
+    catch (error) {
+      // A failed pump's terminal snapshot is still a valid writer fence.
+      try {
+        if (g.pump?.snapshot().running) throw error;
+      } catch (fenceError) { console.error(`Video failure evidence writer not fenced: ${fenceError}`); return; }
+      console.error(`Video failure writer fenced after error: ${error}`);
+    }
+    let recent = this.recentNals;
+    try { recent = g.pump?.evidence?.() ?? recent; }
+    catch (error) { console.error(`Video failure phone evidence unavailable: ${error}`); }
+    this.failureEvidenceStream = g.stream;
+    for (const side of [1, 2]) {
+      try {
+        const detail = await this.protocol.failureDiagnostics(side, 0);
+        const history = await this.protocol.failureDiagnostics(side, 1);
+        for (const line of videoFailureLines(side, g.stream, detail, history, recent)) console.error(line);
+      } catch (error) { console.error(`Video failure evidence unavailable side=${side}: ${error}`); }
+    }
+  }
   readonly view: VideoPlaybackView;
   private intents: Intent[] = [];
   private stopping = false;
@@ -197,10 +223,13 @@ export class VideoPlayback {
           (stream !== undefined && row.state !== 0 && row.stream !== stream) ||
           (tokens && row.state !== 0 && row.token !== tokens[i]))
         failures.push(`${i === 0 ? "LEFT" : "RIGHT"} operation=${name}(${operation}) result=${row.result}` +
-          ` state=${row.state} error=${row.error} stream=${row.stream} high=${row.high} token=${row.token}`);
+          ` state=${row.state} error=${row.error} stream=${row.stream} high=${row.high} token=${row.token} powerStep=${row.powerStep ?? "unavailable"}`);
     });
     if (failures.length) {
-      const message = `Video owner or decoder status failed: ${failures.join("; ")}`;
+      const barriers = operation === VIDEO.start || this.generation && !this.generation.tokens.length ?
+        `; START power barriers: ${rows.map((row, i) =>
+          `${i ? "RIGHT" : "LEFT"} powerStep=${row.powerStep ?? "unavailable"} result=${row.result} state=${row.state} error=${row.error} stream=${row.stream}`).join("; ")}` : "";
+      const message = `Video owner or decoder status failed: ${failures.join("; ")}${barriers}`;
       console.error(message);
       throw new Error(message);
     }
@@ -243,6 +272,7 @@ export class VideoPlayback {
       count: prefix.length + this.source.clip.h264.nals.length - firstNal, metadata: 0,
       paused, reached: false, oldPhy, started: this.clock(), anchor: oldPhy, anchorAt: this.clock(),
       anchorUncertainty: 0, detailedReports: !!selection.detailedReports };
+    this.recentNals = [];
     const start = await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused, 3, this.source.clip.fps, this.source.clip, selection.blackFloor);
     const retryDeadline = this.clock() + 1_000;
     for (let attempt = 0; ; attempt++) {
@@ -309,6 +339,10 @@ export class VideoPlayback {
     if (!generation) return;
     let pumpFailure: unknown = null;
     try { await this.suspendUpload(); } catch (error) { pumpFailure = error; }
+    // STOP itself can fail after the native object closes. Retain its bounded
+    // evidence first so that failure can still be compared during cleanup.
+    try { this.recentNals = generation.pump?.evidence?.() ?? this.recentNals; }
+    catch (error) { console.error(`Video failure phone evidence unavailable before close: ${error}`); }
     try { generation.pump?.close(); } catch (error) { pumpFailure ??= error; }
     generation.pump = undefined;
     // Capture actual lifecycle ownership, even after a partially failed START.
@@ -429,7 +463,16 @@ export class VideoPlayback {
   }
   private async readNal(index: number): Promise<Uint8Array> {
     if (this.stopping) throw new VideoCancelled();
-    try { return await this.source.readNal(index); }
+    try {
+      const bytes = await this.source.readNal(index), g = this.generation!;
+      const prefix = g.prefix.indexOf(index);
+      const sequence = prefix >= 0 ? prefix : g.prefix.length + index - g.firstNal;
+      this.recentNals = this.recentNals.filter(row => row.sequence !== sequence);
+      this.recentNals.push({sequence, source: index, type: bytes[0] & 31,
+        length: bytes.length, checksum: videoNalChecksum(bytes)});
+      if (this.recentNals.length > 64) this.recentNals.shift();
+      return bytes;
+    }
     catch (error) { if (this.stopping) throw new VideoCancelled(); throw error; }
   }
   private async credits(): Promise<void> {
@@ -899,8 +942,14 @@ export class VideoPlayback {
         if (!this.view.paused && this.clock() - this.progressAt > 30_000) throw new Error("Video stopped making copy progress");
         if ((!uploaded || this.view.paused) && !report && !this.metadataStaged) await this.sleep(20);
       }
-    } catch (error) { if (!(error instanceof VideoCancelled)) failure = error; }
+    } catch (error) {
+      if (!(error instanceof VideoCancelled)) {
+        failure = error;
+        await this.logFailureEvidence();
+      }
+    }
     finally {
+      const retiring = this.generation;
       try { await this.pauseAudio(); } catch (error) { failure ??= error; }
       try { await this.retire(false); } catch (error) {
         this.view.cleanupFailed = this.generation !== null;
@@ -908,6 +957,7 @@ export class VideoPlayback {
       }
       try { await this.audio.close(); } catch (error) { failure ??= error; }
       try { this.source.close(); } catch (error) { failure ??= error; }
+      if (failure) await this.logFailureEvidence(retiring);
       for (const intent of this.intents.splice(0)) intent.reject(new Error("Video ended before control completed"));
       this.view.active = false;
       this.view.error = failure ? String(failure) : null;
