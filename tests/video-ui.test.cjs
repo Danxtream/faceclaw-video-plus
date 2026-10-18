@@ -18,7 +18,7 @@ function modelFixture(strip = false) {
     '@nativescript/core': {Observable, Dialogs: {confirm: async () => replace}, Frame: {topmost: () => ({goBack() {}})}},
     '../g2/dashboard-controller': {dashboardController: {subscribe: callback => {callback({phase: 'connected'}); return () => calls.push(['unsub']);}, openVideoWindow: async () => calls.push(['window'])}},
     '../native/file-access': {hasAllFilesAccess: () => true, requestAllFilesAccess() {}, statPath: () => null},
-    '../native/g2-video-library': {ensureG2VideoDirectory() {}, listG2Videos: () => files, listG2ConversionSources: () => files,
+    '../native/g2-video-library': {ensureG2VideoDirectory() {}, listG2Videos: () => files, listG2ConversionSources: () => files, listG2Folders: () => [],
       resolveG2H264Path: () => session.path, g2VideoMetadataPath: path => path + '.json'},
     '../native/video-converter': {convertVideo: (...args) => calls.push(['convert', ...args]), cancelVideoConversion() {}, videoConversionState: () => ({running: false, stage: 'idle', progress: 0})},
     '../apps/video': {openPhoneVideo: async path => calls.push(['play', path])},
@@ -105,8 +105,8 @@ test('Bitrate defaults to 110 and is applied only to the next conversion', async
   const xml=fs.readFileSync('app/phone-ui/video-page.xml','utf8');
   assert.ok(xml.includes('selectedIndexChanged="{{ onConversionBitrateChange }}"'));
   const panel=xml.slice(xml.indexOf('<TabViewItem title="Convert">'));
-  assert.ok(panel.includes('rows="2*,*"') && panel.includes('<ScrollView row="0">'));
-  assert.ok(panel.includes('<ListView row="1" items="{{ sources }}">'));
+  assert.ok(panel.includes('<ScrollView class="p-8"><StackLayout>'));
+  assert.ok(panel.includes('<Repeater items="{{ sources }}">') && panel.includes('tap="{{ action }}"'));
 });
 
 test('Audio timing moves 25 ms per tap, stops at both ends and sends no player command', () => {

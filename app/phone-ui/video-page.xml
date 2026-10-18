@@ -11,7 +11,7 @@
           <ListView.itemTemplate>
             <GridLayout columns="*,auto" rows="auto" class="p-8">
               <Label col="0" text="{{ name }}" textWrap="true" verticalAlignment="center" />
-              <Button col="1" text="&#x25B6;" width="48" height="48" accessibilityLabel="Play video" tap="{{ play }}" />
+              <Button col="1" text="{{ actionText }}" minWidth="48" height="48" accessibilityLabel="{{ actionText }}" tap="{{ action }}" />
             </GridLayout>
           </ListView.itemTemplate>
         </ListView>
@@ -46,8 +46,9 @@
         </StackLayout></ScrollView>
       </TabViewItem>
       <TabViewItem title="Convert">
-        <GridLayout rows="2*,*" class="p-8">
-          <ScrollView row="0"><GridLayout rows="auto,auto,auto,auto,auto,auto,auto,auto">
+        <!-- Settings and the source list scroll together, so neither squeezes the other. -->
+        <ScrollView class="p-8"><StackLayout>
+          <GridLayout rows="auto,auto,auto,auto,auto,auto,auto,auto">
           <GridLayout row="0" columns="*,auto" rows="auto"><Label col="0" text="Deblocking filter" verticalAlignment="center" /><Switch col="1" checked="{{ deblocking }}" checkedChange="{{ onDeblockingChange }}" /></GridLayout>
           <GridLayout row="1" columns="auto,*"><Label text="Picture rate" verticalAlignment="center" /><SegmentedBar col="1" selectedIndex="{{ conversionRateIndex }}" selectedIndexChanged="{{ onConversionRateChange }}"><SegmentedBarItem title="10 fps" /><SegmentedBarItem title="15 fps" /><SegmentedBarItem title="20 fps" /></SegmentedBar></GridLayout>
           <GridLayout row="2" columns="auto,*"><Label text="Frame size" verticalAlignment="center" /><SegmentedBar col="1" selectedIndex="{{ conversionHeightIndex }}" selectedIndexChanged="{{ onConversionHeightChange }}"><SegmentedBarItem title="320x192" /><SegmentedBarItem title="320x176" /></SegmentedBar></GridLayout>
@@ -56,11 +57,11 @@
           <GridLayout row="5" columns="auto,*"><Label text="Bitrate (kbps)" verticalAlignment="center" /><SegmentedBar col="1" selectedIndex="{{ conversionBitrateIndex }}" selectedIndexChanged="{{ onConversionBitrateChange }}"><SegmentedBarItem title="110" /><SegmentedBarItem title="150" /><SegmentedBarItem title="200" /><SegmentedBarItem title="250" /><SegmentedBarItem title="Auto" /></SegmentedBar></GridLayout>
           <Label row="6" text="{{ conversionStatus }}" textWrap="true" />
           <GridLayout row="7" columns="*,auto" rows="auto"><Progress col="0" maxValue="100" value="{{ progress }}" verticalAlignment="center" /><Button col="1" text="Cancel" tap="{{ onCancelTap }}" visibility="{{ cancelVisibility }}" /></GridLayout>
-          </GridLayout></ScrollView>
-          <ListView row="1" items="{{ sources }}">
-            <ListView.itemTemplate><GridLayout rows="auto" columns="*,auto" class="p-8"><Label col="0" text="{{ name }}" textWrap="true" verticalAlignment="center" /><Button col="1" text="Convert" tap="{{ convert }}" /></GridLayout></ListView.itemTemplate>
-          </ListView>
-        </GridLayout>
+          </GridLayout>
+          <Repeater items="{{ sources }}">
+            <Repeater.itemTemplate><GridLayout rows="auto" columns="*,auto" class="p-8"><Label col="0" text="{{ name }}" textWrap="true" verticalAlignment="center" /><Button col="1" text="{{ actionText }}" tap="{{ action }}" /></GridLayout></Repeater.itemTemplate>
+          </Repeater>
+        </StackLayout></ScrollView>
       </TabViewItem>
     </TabView>
   </GridLayout>

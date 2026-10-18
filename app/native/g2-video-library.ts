@@ -32,9 +32,13 @@ export function shouldShowG2VideoEntry(entry: DirectoryEntry): boolean {
   if (/\.mp4$/i.test(entry.name)) return resolveG2H264Path(entry.path) !== null;
   return /\.(h264|264)$/i.test(entry.name) && pairedMp4Path(entry.path) === null;
 }
-export function listG2Videos(): DirectoryEntry[] { return (listDirectory(g2VideoDirectoryPath()) ?? []).filter(shouldShowG2VideoEntry); }
-export function listG2ConversionSources(): DirectoryEntry[] {
-  return (listDirectory(g2VideoDirectoryPath()) ?? []).filter((entry) => !entry.isDirectory && /\.mp4$/i.test(entry.name));
+export function listG2Videos(directory = g2VideoDirectoryPath()): DirectoryEntry[] { return (listDirectory(directory) ?? []).filter(shouldShowG2VideoEntry); }
+export function listG2ConversionSources(directory = g2VideoDirectoryPath()): DirectoryEntry[] {
+  return (listDirectory(directory) ?? []).filter((entry) => !entry.isDirectory && /\.mp4$/i.test(entry.name));
+}
+/** Subfolders of a G2 library folder, for browsing below Download/G2. */
+export function listG2Folders(directory = g2VideoDirectoryPath()): DirectoryEntry[] {
+  return (listDirectory(directory) ?? []).filter((entry) => entry.isDirectory);
 }
 /** One last-video key, matching the old library; no per-video index upgrade. */
 export function loadVideoResumeState(): VideoResumeState | null {

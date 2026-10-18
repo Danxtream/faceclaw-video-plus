@@ -1,7 +1,7 @@
 import { Dialogs, Frame, Observable } from "@nativescript/core";
 import { dashboardController } from "../g2/dashboard-controller";
 import { hasAllFilesAccess, requestAllFilesAccess, statPath, type DirectoryEntry } from "../native/file-access";
-import { ensureG2VideoDirectory, listG2Videos, listG2ConversionSources, resolveG2H264Path, g2VideoMetadataPath } from "../native/g2-video-library";
+import { ensureG2VideoDirectory, listG2Videos, listG2ConversionSources, listG2Folders, resolveG2H264Path, g2VideoMetadataPath } from "../native/g2-video-library";
 import { convertVideo, cancelVideoConversion, videoConversionState } from "../native/video-converter";
 import { openPhoneVideo } from "../apps/video";
 import { activeVideoSession, observeVideoSession, type VideoSession } from "../apps/video/video-session";
@@ -28,6 +28,9 @@ export class VideoViewModel extends Observable {
     (session, value) => this.action(async () => { await session.engine?.seek(value); }));
   private refreshing = false;
   private libraryStamp: string | null = null;
+  /** Folder shown in each tab; null is Download/G2 itself. Browsing never goes above it. */
+  private libraryFolder: string | null = null;
+  private convertFolder: string | null = null;
   constructor(tab = 0) { super(); this.set("tab", tab); this.set("status", ""); this.set("timeEntry", "0:00"); this.refresh(); }
   attach(): void {
     if (this.timer !== null) return;
@@ -46,15 +49,23 @@ export class VideoViewModel extends Observable {
       const access = hasAllFilesAccess();
       this.set("accessVisibility", access ? "collapse" : "visible");
       if (access) {
-        ensureG2VideoDirectory();
-        const videos = listG2Videos(), sources = listG2ConversionSources();
-        const stamp = [...videos, ...sources].map((entry) => `${entry.path}:${entry.modifiedMs}:${entry.sizeBytes}`).join(";");
+        const root = ensureG2VideoDirectory();
+        // A folder deleted while shown falls back to Download/G2.
+        if (this.libraryFolder && !statPath(this.libraryFolder)?.isDirectory) this.libraryFolder = null;
+        if (this.convertFolder && !statPath(this.convertFolder)?.isDirectory) this.convertFolder = null;
+        const libraryAt = this.libraryFolder ?? root, convertAt = this.convertFolder ?? root;
+        const videos = listG2Videos(libraryAt).filter((entry) => !entry.isDirectory), sources = listG2ConversionSources(convertAt);
+        const libraryFolders = listG2Folders(libraryAt), convertFolders = listG2Folders(convertAt);
+        const stamp = `${libraryAt}|${convertAt}|` + [...libraryFolders, ...videos, ...convertFolders, ...sources]
+          .map((entry) => `${entry.path}:${entry.modifiedMs}:${entry.sizeBytes}`).join(";");
         if (stamp !== this.libraryStamp) {
         this.libraryStamp = stamp;
-        this.set("videos", videos.filter((entry) => !entry.isDirectory).map((entry) => ({
-          name: entry.name, entry, play: () => void this.play(entry),
-        })));
-        this.set("sources", sources.map((entry) => ({name: entry.name, entry, convert: () => void this.convert(entry)})));
+        this.set("videos", [...this.folderRows(root, libraryAt, libraryFolders, (folder) => { this.libraryFolder = folder; }),
+          ...videos.map((entry) => ({name: entry.name, entry, actionText: "▶", action: () => void this.play(entry),
+            play: () => void this.play(entry)}))]);
+        this.set("sources", [...this.folderRows(root, convertAt, convertFolders, (folder) => { this.convertFolder = folder; }),
+          ...sources.map((entry) => ({name: entry.name, entry, actionText: "Convert", action: () => void this.convert(entry),
+            convert: () => void this.convert(entry)}))]);
         }
       } else { this.libraryStamp = null; this.set("videos", []); this.set("sources", []); }
       const session = activeVideoSession(), view = session?.view;
@@ -97,6 +108,15 @@ export class VideoViewModel extends Observable {
       if (!path) throw new Error("No converted H.264 stream");
       await dashboardController.openVideoWindow(); await openPhoneVideo(path); this.set("tab", 1);
     });
+  }
+  /** An Up row inside a subfolder, then one Open row per subfolder. */
+  private folderRows(root: string, at: string, folders: DirectoryEntry[], show: (folder: string | null) => void) {
+    const open = (folder: string | null) => () => { show(folder); this.libraryStamp = null; this.refresh(); };
+    const rows = folders.map((entry) => ({name: `\u{1F4C1} ${entry.name}`, actionText: "Open", action: open(entry.path)}));
+    if (at === root) return rows;
+    const parent = at.slice(0, at.lastIndexOf("/"));
+    return [{name: `⬆ Up from ${at.slice(root.length + 1)}`, actionText: "Up",
+      action: open(parent.length > root.length ? parent : null)}, ...rows];
   }
   private async convert(entry: DirectoryEntry): Promise<void> {
     const existing = resolveG2H264Path(entry.path) !== null || statPath(g2VideoMetadataPath(entry.path)) !== null;
