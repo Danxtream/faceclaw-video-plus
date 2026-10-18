@@ -14,16 +14,19 @@ export function videoConversionState(): VideoConversionState {
 }
 export type VideoConversionContrast = "default" | "medium" | "high" | "veryhigh";
 export type VideoConversionKeyframes = "default" | "large";
+export type VideoConversionBitrate = "110" | "150" | "200" | "250" | "auto";
 export function convertVideo(path: string, deblocking = false, overwrite = false, fps: 10 | 15 | 20 = 15, landscapeHeight: 176 | 192 = 176,
-  contrast: VideoConversionContrast = "default", keyframes: VideoConversionKeyframes = "default"): void {
+  contrast: VideoConversionContrast = "default", keyframes: VideoConversionKeyframes = "default",
+  bitrate: VideoConversionBitrate = "110"): void {
   if (!global.isAndroid) throw new Error("Video conversion requires Android");
   if (videoConversionState().running) throw new Error("Another video conversion is running");
   if (![10, 15, 20].includes(fps)) throw new Error("Choose 10, 15 or 20 fps");
   if (![176,192].includes(landscapeHeight)) throw new Error("Choose a 320x192 or 320x176 frame");
   if (!["default", "medium", "high", "veryhigh"].includes(contrast)) throw new Error("Choose Default, Medium, High or Very high contrast");
   if (!["default", "large"].includes(keyframes)) throw new Error("Choose Default or Large keyframes");
+  if (!["110", "150", "200", "250", "auto"].includes(bitrate)) throw new Error("Choose Auto or 110, 150, 200 or 250 kbps bitrate");
   com.faceclaw.app.VideoConversionService.start(Utils.android.getApplicationContext(), path, deblocking, overwrite, fps, landscapeHeight,
-    contrast, keyframes);
+    contrast, keyframes, bitrate);
 }
 export function cancelVideoConversion(): void {
   if (global.isAndroid && videoConversionState().running) com.faceclaw.app.VideoConversionService.cancel(Utils.android.getApplicationContext());

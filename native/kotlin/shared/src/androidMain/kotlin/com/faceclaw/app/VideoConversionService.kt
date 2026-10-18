@@ -41,7 +41,8 @@ class VideoConversionService : Service() {
             val conversion = VideoConversion(File(path), intent.getBooleanExtra("deblocking", false), intent.getBooleanExtra("overwrite", false),
                 intent.getIntExtra("fps", 15),intent.getIntExtra("landscapeHeight",176),
                 VideoContrast.of(intent.getStringExtra("contrast") ?: VideoContrast.DEFAULT.id),
-                VideoKeyframes.of(intent.getStringExtra("keyframes") ?: VideoKeyframes.DEFAULT.id)) { stage, progress ->
+                VideoKeyframes.of(intent.getStringExtra("keyframes") ?: VideoKeyframes.DEFAULT.id),
+                VideoBitrate.of(intent.getStringExtra("bitrate") ?: VideoBitrate.K110.id)) { stage, progress ->
                 state = JSONObject().put("running", true).put("stage", stage).put("progress", progress).put("source", path).toString()
                 val now = System.currentTimeMillis()
                 if (now - lastNotification >= 500) {
@@ -87,14 +88,15 @@ class VideoConversionService : Service() {
         @Volatile private var state = "{\"running\":false,\"stage\":\"idle\",\"progress\":0}"
         @JvmStatic fun snapshotJson(): String = state
         @JvmStatic fun start(context: Context, source: String, deblocking: Boolean, overwrite: Boolean, fps: Int, landscapeHeight: Int,
-            contrast: String, keyframes: String) {
+            contrast: String, keyframes: String, bitrate: String) {
             VideoEncodePlan.checkRate(fps)
             require(landscapeHeight in listOf(176,192))
             VideoContrast.of(contrast)
             VideoKeyframes.of(keyframes)
+            VideoBitrate.of(bitrate)
             val intent = Intent(context, VideoConversionService::class.java).setAction(START).putExtra("source", source)
                 .putExtra("deblocking", deblocking).putExtra("overwrite", overwrite).putExtra("fps", fps).putExtra("landscapeHeight",landscapeHeight)
-                .putExtra("contrast", contrast).putExtra("keyframes", keyframes)
+                .putExtra("contrast", contrast).putExtra("keyframes", keyframes).putExtra("bitrate", bitrate)
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else context.startService(intent)
         }
         @JvmStatic fun cancel(context: Context) { context.startService(Intent(context, VideoConversionService::class.java).setAction(CANCEL)) }

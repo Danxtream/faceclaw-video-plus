@@ -6,6 +6,30 @@ import kotlin.test.assertFails
 import kotlin.test.assertTrue
 
 class VideoConversionAuditTest {
+    @Test fun bitrateChangesOnlyMaxrateAndKeepsTheNalBoundedRecipe() {
+        for (fps in listOf(10,15,20)) for (keyframes in VideoKeyframes.entries) {
+            fun args(rate: Int = 110) = VideoEncodePlan.arguments("in.mp4","out.h264",true,fps,
+                keyframes = keyframes, bitrate = VideoBitrate.of(rate.toString())).toList()
+            for (rate in listOf(110,150,200,250)) {
+                assertEquals(args().map { it.replace("vbv-maxrate=110:","vbv-maxrate=$rate:") },args(rate))
+                val recipe=args(rate).let { it[it.indexOf("-x264-params")+1] }
+                assertTrue(recipe.contains(if(keyframes==VideoKeyframes.LARGE) "vbv-bufsize=96:slice-max-size=4000:" else "vbv-bufsize=32:"))
+            }
+            assertFails { args(0) }; assertFails { args(300) }
+        }
+        assertEquals(listOf(110,150,200,250),listOf("110","150","200","250").map { VideoBitrate.of(it).kbps(15) })
+        assertFails { VideoBitrate.of("300") }
+    }
+    @Test fun autoUsesMeasuredPerRateCapsWithoutChangingAnyOtherEncoderOption() {
+        for ((fps,cap) in listOf(10 to 110,15 to 150,20 to 170)) for (keyframes in VideoKeyframes.entries) {
+            fun args(bitrate: VideoBitrate) = VideoEncodePlan.arguments("in.mp4","out.h264",true,fps,
+                keyframes = keyframes, bitrate = bitrate).toList()
+            assertEquals(cap,VideoBitrate.AUTO.kbps(fps))
+            assertEquals(args(VideoBitrate.K110).map { it.replace("vbv-maxrate=110:","vbv-maxrate=$cap:") },args(VideoBitrate.AUTO))
+        }
+        assertEquals(VideoBitrate.AUTO,VideoBitrate.of("auto"))
+        assertFails { VideoBitrate.AUTO.kbps(16) }
+    }
     @Test fun chosenRatesPreserveRecipeBitrateAndKeyframeSecondsAndRejectLegacyRate() {
         for (fps in listOf(10,15,20)) {
             val args=VideoEncodePlan.arguments("in.mp4","out.h264",false,fps)

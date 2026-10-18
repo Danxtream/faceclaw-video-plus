@@ -51,6 +51,11 @@ export const videoConversionKeyframesSetting = new ConfigSettingEnum<"default" |
   id: "video-conversion-keyframes", label: "Keyframes", storageKey: "video.conversionKeyframes", defaultValue: "default",
   values: ["default", "large"], formatValue: value => value === "default" ? "Default" : "Large",
 });
+/** Applies only to the next conversion; higher caps are not a link-speed guarantee. */
+export const videoConversionBitrateSetting = new ConfigSettingEnum<"110" | "150" | "200" | "250" | "auto">({
+  id: "video-conversion-bitrate", label: "Bitrate", storageKey: "video.conversionBitrate", defaultValue: "110",
+  values: ["110", "150", "200", "250", "auto"], formatValue: value => value === "auto" ? "Auto" : value + " kbps",
+});
 export const videoDetailedReportsSetting = new ConfigSettingBoolean({
   id: "video-detailed-reports", label: "Video detailed reports", storageKey: "video.detailedReports", defaultValue: false,
 });

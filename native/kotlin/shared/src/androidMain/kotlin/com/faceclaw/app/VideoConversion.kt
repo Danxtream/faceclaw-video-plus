@@ -76,6 +76,7 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
     private val fps: Int = 15, private val landscapeHeight: Int = 176,
     private val contrast: VideoContrast = VideoContrast.DEFAULT,
     private val keyframes: VideoKeyframes = VideoKeyframes.DEFAULT,
+    private val bitrate: VideoBitrate = VideoBitrate.K110,
     private val progress: (String, Double) -> Unit) {
     init { VideoEncodePlan.checkRate(fps); require(landscapeHeight in listOf(176,192)) }
     private val cancelled = AtomicBoolean(false)
@@ -159,7 +160,7 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
                 if (sideData.getJSONObject(i).has("rotation")) rotation = sideData.getJSONObject(i).getInt("rotation")
             val geometry = VideoFrameGeometry.fit(stream.getInt("width"),stream.getInt("height"),
                 stream.optString("sample_aspect_ratio","1:1"),rotation,landscapeHeight)
-            val args = VideoEncodePlan.arguments(input.path, publication.candidate.path, deblocking, fps, geometry, contrast, keyframes)
+            val args = VideoEncodePlan.arguments(input.path, publication.candidate.path, deblocking, fps, geometry, contrast, keyframes, bitrate)
             progress("encoding", 0.0)
             execute(args, duration)
             progress("auditing headers", 0.99)
@@ -199,6 +200,7 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
                     .put("width",geometry.pictureWidth).put("height",geometry.pictureHeight))
                 .put("duration", (pictures.size * 1000L + fps / 2) / fps).put("range", "full").put("deblocking", deblocking)
                 .put("contrast", contrast.id).put("keyframes", keyframes.id)
+                .put("bitrate", bitrate.kbps(fps)).put("bitrateSelection", bitrate.id)
                 .put("encoder", "${VideoEncodePlan.ENCODER}; FFmpeg ${FFmpegKitConfig.getFFmpegVersion()}")
                 .put("options", JSONArray(args.toList())).put("source", JSONObject().put("name", input.name).put("bytes", bytes).put("sha256", sourceHash))
                 .put("h264", JSONObject().put("bytes", audit.bytes).put("sha256", audit.sha256)

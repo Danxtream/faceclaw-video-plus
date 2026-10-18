@@ -7,7 +7,7 @@ import { openPhoneVideo } from "../apps/video";
 import { activeVideoSession, observeVideoSession, type VideoSession } from "../apps/video/video-session";
 import { VideoSeekControls } from "./video-seek-controls";
 export { formatVideoTime } from "./video-seek-controls";
-import { videoRadioSetting, videoScaleSetting, videoDitherSetting, videoBlackFloorSetting, videoDeblockingSetting, videoConversionRateSetting, videoConversionHeightSetting, videoConversionContrastSetting, videoConversionKeyframesSetting, videoAudioOffsetSetting, VIDEO_AUDIO_OFFSETS } from "../apps/video/video-settings";
+import { videoRadioSetting, videoScaleSetting, videoDitherSetting, videoBlackFloorSetting, videoDeblockingSetting, videoConversionRateSetting, videoConversionHeightSetting, videoConversionContrastSetting, videoConversionKeyframesSetting, videoConversionBitrateSetting, videoAudioOffsetSetting, VIDEO_AUDIO_OFFSETS } from "../apps/video/video-settings";
 
 /** Strict remote time input, with no changes to the source's fixed frame cadence. */
 export function parseVideoTime(text: string): number {
@@ -75,6 +75,7 @@ export class VideoViewModel extends Observable {
       this.set("conversionHeightIndex", ["192", "176"].indexOf(videoConversionHeightSetting.get()));
       this.set("conversionContrastIndex", ["default", "medium", "high", "veryhigh"].indexOf(videoConversionContrastSetting.get()));
       this.set("conversionKeyframesIndex", ["default", "large"].indexOf(videoConversionKeyframesSetting.get()));
+      this.set("conversionBitrateIndex", ["110", "150", "200", "250", "auto"].indexOf(videoConversionBitrateSetting.get()));
       this.set("radioLabel", `Selected: ${videoRadioSetting.displayValue()} / Confirmed: ${view?.hostPhy ?? "Unknown"}`);
       const conversion = videoConversionState();
       this.set("conversionRunning", conversion.running); this.set("progress", conversion.progress * 100);
@@ -102,7 +103,7 @@ export class VideoViewModel extends Observable {
     if (existing && !await Dialogs.confirm({title: "Replace converted video?", message: entry.name, okButtonText: "Replace", cancelButtonText: "Cancel"})) return;
     try { convertVideo(entry.path, videoDeblockingSetting.get(), existing, Number(videoConversionRateSetting.get()) as 10 | 15 | 20,
       Number(videoConversionHeightSetting.get()) as 176 | 192, videoConversionContrastSetting.get(),
-      videoConversionKeyframesSetting.get()); this.refresh(); }
+      videoConversionKeyframesSetting.get(), videoConversionBitrateSetting.get()); this.refresh(); }
     catch (error) { this.set("status", String(error)); }
   }
   onAccessTap(): void { requestAllFilesAccess(); }
@@ -127,6 +128,11 @@ export class VideoViewModel extends Observable {
     if (this.refreshing) return;
     const keyframes = (["default", "large"] as const)[args.object?.selectedIndex ?? -1];
     if (keyframes) videoConversionKeyframesSetting.set(keyframes);
+  }
+  onConversionBitrateChange(args: {object?: {selectedIndex?: number}}): void {
+    if (this.refreshing) return;
+    const bitrate = (["110", "150", "200", "250", "auto"] as const)[args.object?.selectedIndex ?? -1];
+    if (bitrate) videoConversionBitrateSetting.set(bitrate);
   }
   onToggleTap(): void { void this.action(async () => { const player = activeVideoSession()?.engine; if (player) await player.pause(!player.view.paused); }); }
   onStopTap(): void { activeVideoSession()?.stop(); }

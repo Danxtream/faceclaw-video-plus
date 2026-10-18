@@ -5,7 +5,7 @@ const {loader} = require('./helpers/load-typescript.cjs');
 
 function modelFixture(strip = false) {
   const calls = [], values = new Map(); let timer, observer, replace = false;
-  const settings = key => ({get: () => values.get(key) ?? (key === 'radio' ? 'video' : key === 'scale' ? 'native' : key === 'rate' ? '15' : key === 'height' ? '176' : key === 'floor' ? '1' : key === 'contrast' ? 'default' : key === 'keyframes' ? 'default' : key === 'audioOffset' ? '0' : false),
+  const settings = key => ({get: () => values.get(key) ?? (key === 'radio' ? 'video' : key === 'scale' ? 'native' : key === 'rate' ? '15' : key === 'height' ? '176' : key === 'floor' ? '1' : key === 'contrast' ? 'default' : key === 'keyframes' ? 'default' : key === 'bitrate' ? '110' : key === 'audioOffset' ? '0' : false),
     set: value => {values.set(key, value); calls.push([key, value]);}, displayValue: () => values.get(key) === 'off' ? 'Off' : 'Video-only'});
   const player = {view: {active: true, paused: false, position: 1234, duration: 20000},
     pause: async value => calls.push(['pause', value]), seek: async value => calls.push(['seek', value]),
@@ -24,7 +24,7 @@ function modelFixture(strip = false) {
     '../apps/video': {openPhoneVideo: async path => calls.push(['play', path])},
     '../apps/video/video-session': {activeVideoSession: () => session, observeVideoSession: () => () => calls.push(['unsub-video'])},
     '../apps/video/video-settings': {videoRadioSetting: settings('radio'), videoScaleSetting: settings('scale'), videoDitherSetting: settings('dither'), videoBlackFloorSetting: settings('floor'), videoDeblockingSetting: settings('deblock'), videoConversionRateSetting: settings('rate'),videoConversionHeightSetting: settings('height'),
-      videoConversionContrastSetting: settings('contrast'), videoConversionKeyframesSetting: settings('keyframes'),
+      videoConversionContrastSetting: settings('contrast'), videoConversionKeyframesSetting: settings('keyframes'), videoConversionBitrateSetting: settings('bitrate'),
       videoAudioOffsetSetting: settings('audioOffset'), VIDEO_AUDIO_OFFSETS: Array.from({length: 45}, (_, i) => String(i * 25 - 100))},
   });
   const module = load(strip ? 'app/phone-ui/video-strip.ts' : 'app/phone-ui/video-view-model.ts');
@@ -80,11 +80,33 @@ test('Contrast and keyframes default to Default and the chosen levels go to the 
   assert.equal(f.values.get('keyframes'),'large');
   f.confirmReplace(true);
   f.fixture.get('sources')[0].convert(); await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(f.calls.find(row=>row[0]==='convert'),['convert','/Download/G2/movie.mp4',false,true,15,176,'veryhigh','large']);
+  assert.deepEqual(f.calls.find(row=>row[0]==='convert'),['convert','/Download/G2/movie.mp4',false,true,15,176,'veryhigh','large','110']);
   const xml=fs.readFileSync('app/phone-ui/video-page.xml','utf8');
   assert.ok(xml.includes('selectedIndexChanged="{{ onConversionContrastChange }}"') && xml.includes('title="Very high"'));
   assert.ok(xml.includes('selectedIndexChanged="{{ onConversionKeyframesChange }}"'));
   f.fixture.dispose();
+});
+
+test('Bitrate defaults to 110 and is applied only to the next conversion', async () => {
+  const f=modelFixture();
+  assert.equal(f.fixture.get('conversionBitrateIndex'),0);
+  for(const [index,rate] of ['110','150','200','250'].entries()) {
+    f.fixture.onConversionBitrateChange({object:{selectedIndex:index}});
+    assert.equal(f.values.get('bitrate'),rate);
+  }
+  f.fixture.onConversionBitrateChange({object:{selectedIndex:99}});
+  assert.equal(f.values.get('bitrate'),'250');
+  assert.ok(f.calls.every(row=>row[0]==='bitrate'));
+  f.fixture.onConversionBitrateChange({object:{selectedIndex:4}});
+  assert.equal(f.values.get('bitrate'),'auto');
+  f.confirmReplace(true);
+  f.fixture.get('sources')[0].convert(); await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.calls.find(row=>row[0]==='convert').at(-1),'auto');
+  const xml=fs.readFileSync('app/phone-ui/video-page.xml','utf8');
+  assert.ok(xml.includes('selectedIndexChanged="{{ onConversionBitrateChange }}"'));
+  const panel=xml.slice(xml.indexOf('<TabViewItem title="Convert">'));
+  assert.ok(panel.includes('rows="2*,*"') && panel.includes('<ScrollView row="0">'));
+  assert.ok(panel.includes('<ListView row="1" items="{{ sources }}">'));
 });
 
 test('Audio timing moves 25 ms per tap, stops at both ends and sends no player command', () => {

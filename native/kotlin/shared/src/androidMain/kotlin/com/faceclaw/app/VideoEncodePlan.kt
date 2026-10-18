@@ -56,7 +56,7 @@ enum class VideoContrast(val id: String) {
 enum class VideoKeyframes(val id: String) {
     /** One slice per picture within the NAL limit; plays on every firmware. */
     DEFAULT("default"),
-    /** Detailed keyframes up to about 10 KB, split into slices; needs multi-slice firmware. */
+    /** Detailed keyframes split into bounded slices; needs multi-slice firmware. */
     LARGE("large");
 
     companion object {
@@ -65,19 +65,40 @@ enum class VideoKeyframes(val id: String) {
     }
 }
 
-/** Fixed high-effort recipe apart from the chosen clip cadence. */
+/** Conversion cap; the validated result must still satisfy the existing NAL limit. */
+enum class VideoBitrate(val id: String, private val fixedKbps: Int) {
+    K110("110", 110), K150("150", 150), K200("200", 200), K250("250", 250), AUTO("auto", 0);
+
+    /** Smallest tested caps matching the 10 fps/110 Y-quality baseline; not link adaptation. */
+    fun kbps(fps: Int): Int {
+        VideoEncodePlan.checkRate(fps)
+        return if (this != AUTO) fixedKbps else when (fps) {
+            10 -> 110
+            15 -> 150
+            20 -> 170
+            else -> error("Unsupported conversion picture rate")
+        }
+    }
+
+    companion object {
+        fun of(id: String): VideoBitrate = entries.firstOrNull { it.id == id }
+            ?: throw IllegalArgumentException("Choose Auto or 110, 150, 200 or 250 kbps bitrate")
+    }
+}
+
+/** High-effort recipe apart from the selected conversion settings. */
 object VideoEncodePlan {
     const val ENCODER = "dev.ffmpegkit-maintained:ffmpeg-kit-min-gpl:8.1.7"
     // Keyframes get a normal budget: ipratio 0.50 with a 22 kbit buffer made each keyframe about
     // 4.5 dB worse than the pictures before it, a visible blur every 8 s that took ~8 pictures to
     // recover. A 32 kbit buffer keeps every picture under the 4,086-byte NAL limit (largest
-    // measured 3.6 KB) while the 110 kbps cap stays.
+    // measured 3.6 KB at the original 110 kbps cap). The final audit remains mandatory.
     private const val RECIPE = "scenecut=0:crf=12:" +
         "aq-mode=2:aq-strength=1.0:chroma-qp-offset=-2:subme=8:trellis=2:me=hex:merange=16:" +
-        "rc-lookahead=50:ipratio=1.00:vbv-maxrate=110:"
+        "rc-lookahead=50:ipratio=1.00:"
     private const val RECIPE_TAIL = "threads=1:range=pc"
     // Large keyframes: detailed keyframes needed about 9-10 KB before their blur disappeared, so
-    // a 96 kbit buffer lets them grow that far (the 110 kbps cap stays) and slice-max-size splits
+    // a 96 kbit buffer lets them grow that far and slice-max-size splits
     // any picture into slices that each stay under the 4,086-byte NAL limit.
     private const val LARGE_KEYFRAMES = "vbv-bufsize=96:slice-max-size=4000:"
     // Y + 0.8 * (Y - blur), with the boost fading only within 64 levels of the end it would push
@@ -92,8 +113,9 @@ object VideoEncodePlan {
     fun checkRate(fps: Int) { require(fps in listOf(10, 15, 20)) { "Choose 10, 15 or 20 fps and re-convert this clip" } }
     @JvmStatic fun arguments(input: String, output: String, deblocking: Boolean, fps: Int = 15,
         geometry: VideoFrameGeometry = VideoFrameGeometry(320,192), contrast: VideoContrast = VideoContrast.DEFAULT,
-        keyframes: VideoKeyframes = VideoKeyframes.DEFAULT): Array<String> {
+        keyframes: VideoKeyframes = VideoKeyframes.DEFAULT, bitrate: VideoBitrate = VideoBitrate.K110): Array<String> {
         checkRate(fps)
+        val cap = bitrate.kbps(fps)
         require(input.isNotBlank() && output.isNotBlank() && input != output && !input.contains('\u0000') && !output.contains('\u0000'))
         val size = "scale=${geometry.pictureWidth}:${geometry.pictureHeight}:flags=lanczos:in_range=auto"
         val gray = when (contrast) {
@@ -109,7 +131,7 @@ object VideoEncodePlan {
             "-vf", "fps=$fps,$filter", "-c:v", "libx264", "-profile:v", "baseline", "-pix_fmt", "yuvj420p", "-color_range", "pc",
             // Preserve eight-second GOPs; x264's minimum is half a GOP plus one picture.
             "-x264-params", "ref=1:bframes=0:weightp=0:8x8dct=0:cabac=0:keyint=${fps * 8}:min-keyint=${fps * 4 + 1}:" +
-                RECIPE + (if (keyframes == VideoKeyframes.LARGE) LARGE_KEYFRAMES else "vbv-bufsize=32:") + RECIPE_TAIL +
+                RECIPE + "vbv-maxrate=$cap:" + (if (keyframes == VideoKeyframes.LARGE) LARGE_KEYFRAMES else "vbv-bufsize=32:") + RECIPE_TAIL +
                 if (deblocking) ":deblock=0,0" else ":no-deblock=1", "-f", "h264", output)
     }
 }

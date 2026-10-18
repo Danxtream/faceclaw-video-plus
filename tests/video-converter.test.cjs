@@ -3,6 +3,31 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const {loader} = require('./helpers/load-typescript.cjs');
 
+test('Chosen bitrate crosses the native boundary and unsupported values never start a job', () => {
+  const calls = [];
+  const native = {snapshotJson: () => JSON.stringify({running:false,stage:'idle',progress:0}), start: (...args) => calls.push(args)};
+  const load = loader({global:{isAndroid:true},com:{faceclaw:{app:{VideoConversionService:native}}}},
+    {'@nativescript/core':{Utils:{android:{getApplicationContext:()=> 'context'}}}});
+  const {convertVideo} = load('app/native/video-converter.ts');
+  for (const bitrate of ['110','150','200','250','auto']) {
+    convertVideo('source.mp4',true,false,20,176,'veryhigh','large',bitrate);
+    assert.equal(calls.at(-1).at(-1),bitrate);
+  }
+  for (const bitrate of ['0','130','300','',110])
+    assert.throws(()=>convertVideo('source.mp4',true,false,20,176,'veryhigh','large',bitrate), /bitrate/i);
+  assert.equal(calls.length,5);
+});
+
+test('Persisted bitrate setting keeps the approved 110 default and fixed choices', () => {
+  class Setting { constructor(options) { Object.assign(this,options); } }
+  const load=loader({}, {'../../ui/dashboard-settings':{ConfigSettingEnum:Setting,ConfigSettingBoolean:Setting}});
+  const setting=load('app/apps/video/video-settings.ts').videoConversionBitrateSetting;
+  assert.equal(setting.defaultValue,'110');
+  assert.deepEqual(Array.from(setting.values),['110','150','200','250','auto']);
+  assert.equal(setting.formatValue('250'),'250 kbps');
+  assert.equal(setting.formatValue('auto'),'Auto');
+});
+
 test('Converter starts independently of glasses and requires explicit overwrite', () => {
   const calls = [], state = {running: false, stage: 'idle', progress: 0};
   const native = {snapshotJson: () => JSON.stringify(state), start: (...args) => calls.push(['start', ...args]), cancel: (...args) => calls.push(['cancel', ...args])};
@@ -10,17 +35,17 @@ test('Converter starts independently of glasses and requires explicit overwrite'
     {'@nativescript/core': {Utils: {android: {getApplicationContext: () => 'context'}}}});
   const bridge = load('app/native/video-converter.ts');
   bridge.convertVideo('source.mp4');
-  assert.deepEqual(calls[0], ['start', 'context', 'source.mp4', false, false, 15,176,'default','default']);
+  assert.deepEqual(calls[0], ['start', 'context', 'source.mp4', false, false, 15,176,'default','default','110']);
   bridge.convertVideo('source.mp4', true, true);
-  assert.deepEqual(calls[1], ['start', 'context', 'source.mp4', true, true, 15,176,'default','default']);
+  assert.deepEqual(calls[1], ['start', 'context', 'source.mp4', true, true, 15,176,'default','default','110']);
   bridge.convertVideo('source.mp4',false,false,10,192);
-  assert.deepEqual(calls.pop(),['start','context','source.mp4',false,false,10,192,'default','default']);
+  assert.deepEqual(calls.pop(),['start','context','source.mp4',false,false,10,192,'default','default','110']);
   for (const contrast of ['medium','high','veryhigh']) {
     bridge.convertVideo('source.mp4',false,false,10,176,contrast);
-    assert.deepEqual(calls.pop(),['start','context','source.mp4',false,false,10,176,contrast,'default']);
+    assert.deepEqual(calls.pop(),['start','context','source.mp4',false,false,10,176,contrast,'default','110']);
   }
   bridge.convertVideo('source.mp4',false,false,10,176,'high','large');
-  assert.deepEqual(calls.pop(),['start','context','source.mp4',false,false,10,176,'high','large']);
+  assert.deepEqual(calls.pop(),['start','context','source.mp4',false,false,10,176,'high','large','110']);
   assert.throws(()=>bridge.convertVideo('source.mp4',false,false,15,176,'high','huge'),/Default or Large keyframes/);
   assert.throws(()=>bridge.convertVideo('source.mp4',false,false,15,180),/320x192 or 320x176/);
   assert.throws(()=>bridge.convertVideo('source.mp4',false,false,15,176,'extra'),/Default, Medium, High or Very high/);
@@ -42,6 +67,7 @@ test('Converter service owns only media processing and never Bluetooth or boot s
   assert.ok(process.includes('START_NOT_STICKY'));
   assert.ok(job.includes('VideoPictureMap.build'));
   assert.ok(job.includes('input.lastModified() == modified && hash(input) == sourceHash'));
+  assert.ok(job.includes('.put("bitrate", bitrate.kbps(fps)).put("bitrateSelection", bitrate.id)'));
 });
 
 test('Header report runs on a new thread each conversion, never a pooled FFmpeg thread', () => {
