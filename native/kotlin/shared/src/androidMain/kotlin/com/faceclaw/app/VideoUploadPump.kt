@@ -33,6 +33,12 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
     private var offered: Grant? = null
     private val recentNals = ArrayDeque<VideoNalEvidence>()
     private var flowBudget = VideoFlowBudget(plan.stream, plan.tokens)
+    var onProgress: (() -> Unit)? = null
+    /** Upload worker only; the pump publishes this coherent row under its monitor. */
+    fun progressFields(): String =
+        "\"index\":$index,\"metadata\":$metadata,\"consumed\":$consumed," +
+        "\"budget\":$budget,\"blocked\":$blocked,\"consumedL\":$leftConsumed,\"consumedR\":$rightConsumed," +
+        "\"creditAgeMs\":${if (creditAt == 0L) -1 else (measurement.now() - creditAt) / 1_000_000}"
     /** Payload attempts, including a batch whose acknowledgement later failed. */
     @Synchronized private fun recordNal(sequence: Int, bytes: ByteArray) {
         var checksum = 2166136261L.toInt()
@@ -104,6 +110,7 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
             }
             leftConsumed = flowBudget.expected(1); rightConsumed = flowBudget.expected(2)
             consumed = minOf(leftConsumed, rightConsumed); creditAt = measurement.now(); blocked = false
+            onProgress?.invoke()
             return
         }
         budget = creditBudget(credit)
@@ -271,6 +278,7 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
                         index++; budget--; if (starts) pictureBudget--
                         measurement.add(VideoMeasurement.NALS)
                         measurement.add(VideoMeasurement.BYTES, count = bytes.size.toLong())
+                        onProgress?.invoke()
                         record
                     }
                 }
@@ -279,6 +287,7 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
                     budget = nals; pictureBudget = frames
                     leftConsumed = flowBudget.expected(1); rightConsumed = flowBudget.expected(2)
                     consumed = minOf(leftConsumed, rightConsumed); creditAt = measurement.now()
+                    onProgress?.invoke()
                 }
                 flowBudget.capacity
             }, shouldContinue)
@@ -344,6 +353,7 @@ class VideoUploadPump internal constructor(create: () -> VideoUploadEngine) {
         Thread({
             try {
                 val engine = create()
+                engine.onProgress = { synchronized(monitor) { progress = engine.progressFields() } }
                 synchronized(monitor) { this.engine = engine }
                 while (true) {
                     synchronized(monitor) {
@@ -358,10 +368,7 @@ class VideoUploadPump internal constructor(create: () -> VideoUploadEngine) {
                     while (synchronized(monitor) { requested && !closed }) {
                         engine.step { synchronized(monitor) { requested && !closed } }
                         synchronized(monitor) {
-                            progress = "\"index\":${engine.index},\"metadata\":${engine.metadata},\"consumed\":${engine.consumed}," +
-                                "\"budget\":${engine.budget},\"blocked\":${engine.blocked}," +
-                                "\"consumedL\":${engine.leftConsumed},\"consumedR\":${engine.rightConsumed}," +
-                                "\"creditAgeMs\":${if (engine.creditAt == 0L) -1 else (engine.measurement.now() - engine.creditAt) / 1_000_000}"
+                            progress = engine.progressFields()
                             if (engine.done) requested = false
                             else if (engine.blocked && requested && !closed) {
                                 val from = engine.measurement.now()

@@ -11,6 +11,29 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class VideoFlowTest {
+    @Test fun progressIsVisibleBeforeContinuousEpisodeReturnsAndPauseStillFences() {
+        val sent = java.util.concurrent.CountDownLatch(1)
+        val config = VideoUploadPlan(50,longArrayOf(101,102),intArrayOf(),0,8,
+            (0 until 8).map { VideoUploadPicture(it,it*50L) },timed=true,flow=true)
+        val pump = VideoUploadPump { VideoUploadEngine(config,8,{byteArrayOf(0x61)},{1L},{},
+            {arrayOf(row(1,0),row(2,0))},{_,_->error("No batch")},continuous={next,_,keep->
+                next();next();sent.countDown()
+                while(keep())Thread.sleep(1)
+            }) }
+        pump.resumeUpload()
+        try {
+            assertTrue(sent.await(2,TimeUnit.SECONDS))
+            val live = pump.uploadSnapshot()
+            assertTrue(live.contains("\"index\":2,"));assertTrue(live.contains("\"running\":true,"))
+        } finally {
+            pump.pauseUpload()
+            val deadline=System.nanoTime()+2_000_000_000L
+            while(pump.uploadSnapshot().contains("\"running\":true,")) {
+                check(System.nanoTime()<deadline);Thread.sleep(1)
+            }
+            pump.closeUpload()
+        }
+    }
     @Test fun productionEngineUsesLiveGrantsAndLostGrantsFallBackOnlyAtAFence() {
         for (lose in listOf(false, true)) {
             var delivered = 0; var pictures = 0; var queries = 0; var sends = 0
