@@ -1,5 +1,8 @@
 import org.apache.tools.ant.taskdefs.condition.Os
 
+// Keep the normal manifest's resource references when the separate app is off.
+def faceclawTestApp = System.getenv("FACECLAW_TEST_APP") == "1"
+
 // You can add your native dependencies here
 dependencies {
   // The encoder POM omits its Java runtime dependencies; pin them explicitly.
@@ -274,6 +277,10 @@ android {
   }
 
   defaultConfig {
+    manifestPlaceholders += [
+      faceclawAppLabel: faceclawTestApp ? "Faceclaw 2" : "@string/app_name",
+      faceclawActivityLabel: faceclawTestApp ? "Faceclaw 2" : "@string/title_activity_kimera"
+    ]
     minSdkVersion 24
     targetSdkVersion 35
     ndk {

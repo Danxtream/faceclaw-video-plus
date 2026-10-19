@@ -1,7 +1,7 @@
 import { NativeScriptConfig } from '@nativescript/core';
 
 export default {
-  id: 'com.faceclaw.app',
+  id: process.env.FACECLAW_TEST_APP === '1' ? 'com.faceclaw.app.test' : 'com.faceclaw.app',
   appPath: 'app',
   appResourcesPath: 'App_Resources',
   android: {
