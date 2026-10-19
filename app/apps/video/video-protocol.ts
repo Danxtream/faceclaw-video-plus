@@ -20,6 +20,7 @@ export interface VideoBackend {
   configureEvidence?(enabled: boolean): void;
   measurementSnapshot?(): unknown;
   beginMeasurement?(stream: number): void;
+  linkMtus?(): readonly number[];
 }
 
 export const VIDEO = {
@@ -80,6 +81,7 @@ export class VideoProtocol {
   private geometry = false;
   private pictureStyle = false;
   private multiSlice = false;
+  private deliverySupport: (boolean | undefined)[] = [];
   /** Both lenses accept a picture's frame time inside its VCL NAL record. */
   get timedNal(): boolean { return this.timed; }
   /** Both lenses decode pictures split into several slices (large-keyframe clips). */
@@ -156,6 +158,21 @@ export class VideoProtocol {
     this.backend.configureEvidence?.(this.evidence);
   }
   measurementSnapshot(): unknown { return this.backend.measurementSnapshot?.() ?? null; }
+  /** Cached Android link state only; no new GATT transaction. */
+  linkMtus(): readonly number[] { return this.backend.linkMtus?.() ?? []; }
+  /** Discover and freeze passive aggregates only at retirement or failure. */
+  async deliveryMeasure(stream: number, side: number, mode: number): Promise<Uint8Array | null> {
+    if (![1, 2].includes(side) || ![0, 1].includes(mode)) throw new Error("Invalid delivery selector");
+    if (this.deliverySupport[side - 1] === undefined) {
+      const request = await this.header(7, 12); request[8] = 8;
+      const row = (await this.query(request, 128, side))[0];
+      this.deliverySupport[side - 1] = row[0] === 1 && row[1] === 7 && !row[2] &&
+        row[3] === 8 && row[5] === 2 && row[8] === 172 && row[9] === 128;
+    }
+    if (!this.deliverySupport[side - 1]) return null;
+    const request = await this.header(7, 16); request[8] = 8; request[9] = mode; put(request, 12, stream);
+    return (await this.query(request, mode ? 128 : 172, side))[0];
+  }
   /** Query each lens independently so an unavailable peer cannot hide evidence. */
   async failureDiagnostics(side: number, mode: number): Promise<Uint8Array> {
     if (![1, 2].includes(side) || ![0, 1].includes(mode)) throw new Error("Invalid decode diagnostic selector");

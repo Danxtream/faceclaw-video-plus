@@ -4,6 +4,7 @@ import { VideoAvSync, videoAvOptions, type VideoAvAction } from "./video-av-sync
 import { VideoAudioClock, VideoLensClock, videoPacePlan, videoPaceSpan, videoSkipTarget } from "./video-pacing";
 import { VideoMeasurement } from "./video-measurement";
 import { videoMeasurementLogs } from "./video-measurement-log";
+import { videoDeliveryMeasureLines } from "./video-delivery-measure";
 import { videoFailureLines, videoNalChecksum, type VideoNalEvidence } from "./video-failure";
 import { VIDEO, VideoProtocol, VideoReportUnavailable, videoStaleError, videoU32, type VideoStatus } from "./video-protocol";
 import { parsePlayback, parseShown, parseVideoPhy, videoRestored, videoLive, videoOwnedSnapshot, videoTickSpan, videoCopyRate, videoPhyDetails,
@@ -33,7 +34,7 @@ export type VideoPlaybackView = {
   cleanupFailed: boolean;
   hostPhy: string;
 };
-type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement" | "timedNal" | "slices" | "pace" | "failureDiagnostics" | "heapDiagnostics">>;
+type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement" | "timedNal" | "slices" | "pace" | "failureDiagnostics" | "heapDiagnostics" | "deliveryMeasure" | "linkMtus">>;
 type Intent = { kind: "pause" | "seek" | "scale" | "menu" | "skip"; value: number | boolean; resolve: () => void; reject: (error: unknown) => void };
 type Generation = { stream: number; tokens: number[]; idr: number; target: number; prefix: number[]; firstNal: number; index: number; count: number; metadata: number; paused: boolean; reached: boolean; oldPhy: VideoPhy[]; started: number; anchor: VideoPhy[]; anchorAt: number; anchorUncertainty: number; detailedReports: boolean; pump?: VideoUploadPump };
 
@@ -43,6 +44,36 @@ class VideoCancelled extends Error { constructor() { super("Video cancelled"); }
 export class VideoPlayback {
   private recentNals: VideoNalEvidence[] = [];
   private failureEvidenceStream = 0;
+  private deliveryStreams = new Set<number>();
+
+  private async logDeliveryMeasure(when: "end" | "failure", g = this.generation): Promise<void> {
+    if (!g || g.tokens.length !== 2 || !this.protocol.deliveryMeasure || this.deliveryStreams.has(g.stream)) return;
+    this.deliveryStreams.add(g.stream);
+    const began = this.clock();
+    for (const side of [1, 2]) for (const mode of [0, 1]) {
+      try {
+        const row = await this.protocol.deliveryMeasure(g.stream, side, mode);
+        if (!row) { console.error(`Video measure stream=${g.stream} side=${side} unavailable=unsupported`); break; }
+        for (const line of videoDeliveryMeasureLines(row, g.stream, g.tokens[side - 1], side)) console.error(`${line} when=${when}`);
+      } catch (error) { console.error(`Video measure stream=${g.stream} side=${side} mode=${mode} unavailable=${error}`); }
+    }
+    for (const line of videoMeasurementLogs({stream: g.stream, tokens: g.tokens}, 0, when,
+      {transport: this.readMeasurement()})) console.error(line.replace(/^Video measurement /, "Video measure "));
+    console.error(`Video measure stream=${g.stream} when=${when} queryTicks=${this.clock() - began}`);
+  }
+
+  private logDeliveryRadio(phy: VideoPhy[]): void {
+    let mtus: readonly number[] = [];
+    try { mtus = this.protocol.linkMtus?.() ?? []; }
+    catch (error) { console.error(`Video measure radio MTU unavailable=${error}`); }
+    for (const side of phy) side.links.forEach((link, index) => {
+      if (!link.bound) return;
+      console.error(`Video measure radio stream=${this.generation!.stream} side=${side.lens} link=${index + 1}` +
+        ` epoch=${link.epoch} txPhy=${link.current & 255} rxPhy=${link.current >>> 8}` +
+        ` mtu=${mtus[side.lens - 1] ?? "unavailable"} interval=unavailable dataLength=unavailable` +
+        ` source=existing-PHY-and-Android-MTU-cache`);
+    });
+  }
 
   private async logFailureEvidence(g = this.generation): Promise<void> {
     if (!g || g.stream === this.failureEvidenceStream || !this.protocol.failureDiagnostics) return;
@@ -54,6 +85,7 @@ export class VideoPlayback {
       } catch (fenceError) { console.error(`Video failure evidence writer not fenced: ${fenceError}`); return; }
       console.error(`Video failure writer fenced after error: ${error}`);
     }
+    await this.logDeliveryMeasure("failure", g);
     let recent = this.recentNals;
     try { recent = g.pump?.evidence?.() ?? recent; }
     catch (error) { console.error(`Video failure phone evidence unavailable: ${error}`); }
@@ -318,6 +350,7 @@ export class VideoPlayback {
     const anchorBegin = this.clock();
     const ownedPhy = await this.phy();
     videoLive(oldPhy, ownedPhy);
+    this.logDeliveryRadio(ownedPhy);
     this.generation.oldPhy = videoOwnedSnapshot(oldPhy, ownedPhy);
     this.generation.anchor = ownedPhy;
     this.generation.anchorAt = (anchorBegin + this.clock()) / 2;
@@ -379,6 +412,7 @@ export class VideoPlayback {
       if (this.clock() > deadline) throw new Error("Video cleanup or original PHY restoration timed out");
       await this.sleep(20);
     }
+    await this.logDeliveryMeasure("end", generation);
     // Never hold a user cancel/seek for observational tail reads. Normal EOF
     // gets a bounded drain; one already-running native request owns its deadline.
     const tailUntil = this.clock() + 3000, tail = !this.stopping && !reset;

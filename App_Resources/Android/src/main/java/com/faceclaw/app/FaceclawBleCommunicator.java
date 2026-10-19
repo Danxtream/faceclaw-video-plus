@@ -1039,6 +1039,14 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
         return videoTransport;
     }
 
+    /** Read cached MTUs for video diagnostics without issuing a GATT operation. */
+    public int[] getVideoLinkMtus() {
+        synchronized (lock) {
+            return new int[] {bleManager.getNegotiatedMtu(leftAddress),
+                    bleManager.getNegotiatedMtu(rightAddress)};
+        }
+    }
+
     private void enqueueVideoCacheLeaseLocked(int operation, boolean left,
             Runnable written, Runnable failed) {
         OutboundMessage control = messageBuilder.faceclawFramebufferControl(operation, left);
