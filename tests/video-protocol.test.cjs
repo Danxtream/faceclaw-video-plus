@@ -2,6 +2,19 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { VideoProtocol, VideoReportUnavailable, VIDEO, parseVideoStatus, videoU32 } = require('../.test-build/app/apps/video/video-protocol');
 
+test('Confirmation room requires both base capabilities and adds no discovery query', async () => {
+  for (const sides of [[0,0],[128,0],[128,128]]) {
+    let calls=0, plan;
+    const p=new VideoProtocol({epoch:()=>1,exchange:async(raw,length)=>{
+      calls++;
+      return raw[1]===13 ? [1,2].map(()=>Uint8Array.from([1,13,0,255,194,7,255,255,...Array(8).fill(0)])) :
+        sides.map(bit=>{const row=status().slice(0,length);row[71]=bit;return row;});
+    },createUploadPump:(_,value)=>{plan=value;}},()=>calls+1);
+    await p.capabilities(); p.createUploadPump({},{});
+    assert.equal(calls,2); assert.equal(plan.confirmationRoom,sides.every(x=>x===128));
+  }
+});
+
 test('Independent metadata room accepts six but never seven on either send path', async () => {
   let room = 6;
   const rows = () => [1, 2].map(() => Uint8Array.from([2, 0, 0, 0, room, 0]));

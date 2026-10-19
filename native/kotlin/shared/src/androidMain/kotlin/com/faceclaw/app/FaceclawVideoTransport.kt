@@ -26,6 +26,7 @@ class VideoSubmission internal constructor(
     internal var attempt = -1
     internal var acknowledged = 0
     internal var accepted = 0
+    internal val room = arrayOfNulls<ByteArray>(2)
     internal var listed = false
     internal var delivered = false
     internal var failure: String? = null
@@ -75,6 +76,11 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
     private var queryIngressLeft = true
     private var replyFailure: String? = null
     private var uncertainContexts = 0
+    private var confirmedRooms: Array<ByteArray>? = null
+    /** Single-use paired PRIMARY evidence from the last fully fenced record. */
+    internal fun takeConfirmationCredits(): Array<ByteArray>? = writer.withLock {
+        confirmedRooms.also { confirmedRooms = null }
+    }
     @Volatile internal var evidenceReserve: (() -> Long)? = null
     private var collectingEvidence = false
     private var refusalEvidenceTargets = 0
@@ -104,6 +110,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             record.attempt = message.magic
             record.acknowledged = 0
             record.accepted = 0
+            record.room.fill(null)
             record.listed = false
         }
         record.targets
@@ -150,6 +157,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         check(epoch != Long.MAX_VALUE) { "Video connection epoch exhausted" }
         epoch++
         uncertainContexts = 0
+        confirmedRooms = null
         evidenceReserve = null
         refusalEvidenceTargets = 0
         pending.forEach { it.failure = reason }
@@ -241,9 +249,9 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         val stream = u32(records[0], 2)
         records.forEachIndexed { i, nal ->
             // A timed NAL (op 24) carries its picture's frame time in an 18-byte header.
-            val timed = nal.size > 1 && unsigned(nal[1]) == VideoUploadEngine.TIMED_NAL
+            val timed = nal.size > 1 && unsigned(nal[1]) in listOf(VideoUploadEngine.TIMED_NAL, 29)
             require(nal.size in (if (timed) VideoUploadEngine.TIMED_HEADER + 1 else 11)..4096 &&
-                unsigned(nal[0]) == MESSAGE && (timed || unsigned(nal[1]) == 6))
+                unsigned(nal[0]) == MESSAGE && (timed || unsigned(nal[1]) in listOf(6, 28)))
             require(!timed || following[i] == null)
             require(u32(nal, 2) == stream && u32(nal, 6) == u32(records[0], 6) + i)
             following[i]?.let { meta ->
@@ -253,6 +261,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         }
         val deadline = System.nanoTime() + 15_000_000_000L
         val submitted = mutableListOf<VideoSubmission>()
+        confirmedRooms = null
         var admitted = 0
         synchronized(monitor) {
             check(epoch == generation) { "Video generation retired before submission" }
@@ -285,6 +294,10 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             }
             await(generation, deadline) { submitted.all { it.delivered } }
             check(submitted.all { it.accepted == targets }) { "Paired NAL transport refused" }
+            val last = submitted.last()
+            if (targets == 3 && unsigned(last.payload[1]) in listOf(28, 29) && last.room.all { it != null } &&
+                System.nanoTime() - last.queuedAt in 0..500_000_000L)
+                confirmedRooms = last.room.map { it!!.copyOf() }.toTypedArray()
             intArrayOf(submitted.size, admitted)
         } finally {
             synchronized(monitor) {
@@ -368,9 +381,23 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             }
             return true
         }
-        val acks = CfwTransport.parseAcks(packet) ?: return false
+        // Kind 5 is opt-in video only. Normalize its existing exact ACK fields
+        // for the shared parser; never treat ACK-history entries as room grants.
+        val room = if (unsigned(packet[8]) == 5) {
+            if (packet.size !in 25..46 || (packet.size - 25) % 7 != 0 ||
+                CfwTransport.crc(packet.copyOfRange(8, packet.size - 2)) != u16(packet, packet.size - 2)) return true
+            packet.copyOfRange(17, 23)
+        } else null
+        val normalized = if (room == null) packet else ByteArray(packet.size - 6).also {
+            packet.copyInto(it, 0, 0, 17)
+            packet.copyInto(it, 17, 23, packet.size - 2)
+            it[3] = (it.size - 8).toByte(); it[8] = 1
+            val crc = CfwTransport.crc(it.copyOfRange(8, it.size - 2))
+            it[it.size - 2] = crc.toByte(); it[it.size - 1] = (crc shr 8).toByte()
+        }
+        val acks = CfwTransport.parseAcks(normalized) ?: return false
         synchronized(monitor) {
-            for (ack in acks) {
+            for ((ackIndex, ack) in acks.withIndex()) {
                 val record = pending.firstOrNull {
                     it.epoch == epoch && it.ingressLeft == ingressLeft && it.message?.magic == ack.streamId
                 } ?: continue
@@ -379,10 +406,13 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                     record.attempt = message.magic
                     record.acknowledged = 0
                     record.accepted = 0
+                    record.room.fill(null)
                 }
                 if (ack.messageId != 0 || record.targets and ack.lens == 0 ||
                     (!ack.nack && (ack.size != message.message.size || ack.checksum != message.cfwChecksum))) continue
                 if (record.acknowledged and ack.lens == 0) {
+                    if (room != null && ackIndex == 0 && unsigned(record.payload[1]) in listOf(28, 29))
+                        record.room[ack.lens - 1] = room.copyOf()
                     if (ack.nack) uncertainContexts = uncertainContexts or if (ingressLeft) 1 else 2
                     record.acknowledged = record.acknowledged or ack.lens
                     if (!ack.nack) record.accepted = record.accepted or ack.lens
@@ -393,9 +423,9 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                 }
             }
         }
-        // Redundant ACK packets can also contain ordinary image successes.
-        // Their native handler still needs the packet after our completions.
-        return false
+        // Ordinary ACK history still reaches the shared handler. The video-only
+        // format must take its wake-up path after completions are drained.
+        return room != null
     }
 
     /** Submit up to four records without granting decoder credits implicitly. */

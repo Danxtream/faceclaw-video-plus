@@ -77,6 +77,7 @@ export class VideoProtocol {
   private evidence = false;
   private rateEvidence = false;
   private timed = false;
+  private confirmationRoom = false;
   private geometry = false;
   private pictureStyle = false;
   private multiSlice = false;
@@ -92,7 +93,8 @@ export class VideoProtocol {
   }
   createUploadPump(reader: unknown, plan: VideoUploadPlan): VideoUploadPump | undefined {
     this.check();
-    return reader === undefined ? undefined : this.backend.createUploadPump?.(reader, {...plan, timed: this.timed});
+    return reader === undefined ? undefined : this.backend.createUploadPump?.(reader, {...plan, timed: this.timed,
+      confirmationRoom: this.confirmationRoom});
   }
   private async header(op: number, bytes: number): Promise<Uint8Array> {
     this.check();
@@ -129,9 +131,12 @@ export class VideoProtocol {
   async status(op: number = VIDEO.status, stream = 0): Promise<VideoStatus[]> {
     const raw = await this.header(op, op === VIDEO.reset || op === VIDEO.stop ? 12 : 8);
     if (raw.length === 12) put(raw, 8, stream);
-    return (await this.query(raw, op === VIDEO.status ? 192 : 128)).map(parseVideoStatus);
+    const rows = await this.query(raw, op === VIDEO.status ? 192 : 128);
+    if (op === VIDEO.caps) this.confirmationRoom = rows.every(row => !!(row[71] & 128));
+    return rows.map(parseVideoStatus);
   }
   async capabilities(): Promise<void> {
+    this.confirmationRoom = false;
     const caps = await this.status(VIDEO.caps);
     caps.forEach((row, i) => {
       if (videoStaleError(row)) console.error(`Video ${i ? "RIGHT" : "LEFT"} is idle after stream ${row.stream} ended with error=${row.error}; retained history, next START must pass readiness again (powerStep=${row.powerStep})`);
@@ -149,6 +154,8 @@ export class VideoProtocol {
     this.rateEvidence = rows.every(row => !!(row[7] & 64));
     // Bit 128: timed NAL records and timeline room in flagged credit replies.
     this.timed = rows.every(row => !!(row[7] & 128));
+    // Base supported-options byte: opt-in NAL confirmations include live room.
+    this.confirmationRoom = this.timed && this.confirmationRoom;
     this.geometry = rows.every(row => !!(row[4] & 128));
     this.pictureStyle = rows.every(row => !!(row[4] & 64));
     // Bit 8 of byte 7 was reserved before multi-slice pictures; older firmware leaves it clear.

@@ -17,9 +17,9 @@ internal class VideoRecordMeasurement(private val clock: () -> Long = System::na
         val s = scope ?: return null
         if (epoch != s.epoch) return null
         val op = payload[1].toInt() and 255
-        val offset = when (op) { 6, 24 -> 2; 10, 14 -> 8; else -> -1 }
+        val offset = when (op) { 6, 24, 28, 29 -> 2; 10, 14 -> 8; else -> -1 }
         if (offset >= 0 && (payload.size < offset + 4 || VideoUploadEngine.word(payload, offset) != s.stream)) return null
-        val kind = when (op) { 6, 24 -> 0; 14 -> 1; 10 -> 2
+        val kind = when (op) { 6, 24, 28, 29 -> 0; 14 -> 1; 10 -> 2
             5 -> when (parentOp) { 14 -> 3; 10 -> 4; else -> 5 }; else -> 6 }
         s.rows[kind][0]++
         return Ticket(s, kind, clock())

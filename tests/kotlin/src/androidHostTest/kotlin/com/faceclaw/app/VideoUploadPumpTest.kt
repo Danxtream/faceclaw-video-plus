@@ -12,6 +12,41 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class VideoUploadPumpTest {
+    @Test fun confirmationRoomLatencyModelRemovesQueriesWithoutChangingWindowOrTimeline() {
+        fun measure(enabled: Boolean): Triple<Double, Int, Int> {
+            var sent = 0; var queries = 0; var time = 0.0; var peak = 0
+            val config = timedPlan().copy(confirmationRoom = enabled)
+            val engine = VideoUploadEngine(config, 8, { byteArrayOf(0x65) }, { 1 }, {},
+                { queries++; time += 39; arrayOf(reply(sent.toLong(), 46, 192), reply(sent.toLong(), 46, 192)) },
+                { records, _ ->
+                    check(records.size <= 4); peak = maxOf(peak, minOf(3, records.size))
+                    assertTrue(records.all { (it[1].toInt() and 255) in if (enabled) listOf(28,29) else listOf(6,24) })
+                    // Serialized fragment writes overlap a 35ms lens confirmation bracket.
+                    time += records.size * 23 + 35
+                    sent += records.size; intArrayOf(records.size, 0)
+                }, confirmation = { arrayOf(reply(sent.toLong(), 46, 192), reply(sent.toLong(), 46, 192)) })
+            while (!engine.done) engine.step()
+            return Triple(sent * 1000 / time, queries, peak)
+        }
+        val before = measure(false); val after = measure(true)
+        println("Room ACK model NAL/s old=${before.first} new=${after.first} queries=${before.second}->${after.second} inFlightPeak=${after.third}; batch4/window3/timeline6 unchanged")
+        assertTrue(after.first > before.first); assertEquals(1, after.second); assertEquals(3, after.third)
+    }
+
+    @Test fun missingRoomUsesLegacyAndInvalidRoomNeverGrantsExtraCredit() {
+        for (bad in listOf(false, true)) {
+            var sent = 0; var queries = 0
+            val engine = VideoUploadEngine(timedPlan().copy(confirmationRoom = true), 8,
+                { byteArrayOf(0x65) }, { 1 }, {},
+                { queries++; arrayOf(reply(sent.toLong(), 46, 192), reply(sent.toLong(), 46, 192)) },
+                { records, _ -> sent += records.size; intArrayOf(records.size, 0) },
+                confirmation = { if (!bad) null else arrayOf(reply(sent.toLong(), 47, 192), reply(sent.toLong(), 46, 192)) })
+            if (bad) assertFails { engine.step() } else {
+                while (!engine.done) engine.step()
+                assertTrue(queries > 1)
+            }
+        }
+    }
     @Test fun failureEvidenceSurvivesRefusedPipelineAndBoundsHistory() {
         for (timed in listOf(false, true)) {
             val config = if (timed) timedPlan() else plan()

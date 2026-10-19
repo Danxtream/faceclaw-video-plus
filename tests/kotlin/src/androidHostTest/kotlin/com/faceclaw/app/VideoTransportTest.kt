@@ -134,10 +134,11 @@ class VideoTransportTest {
         })
 
         fun ack(record: VideoSubmission, side: Int, success: Boolean = true, left: Boolean = record.ingressLeft,
-                size: Int = record.payload.size, checksum: Int = CfwTransport.crc(record.payload), attempt: Int = record.message!!.magic) {
-            val body = byteArrayOf(if (success) 1 else 3, attempt.toByte(), 0, 0, side.toByte(),
-                size.toByte(), (size shr 8).toByte(), checksum.toByte(), (checksum shr 8).toByte())
-            assertFalse(transport.receive(left, packet(body)))
+                size: Int = record.payload.size, checksum: Int = CfwTransport.crc(record.payload), attempt: Int = record.message!!.magic,
+                room: ByteArray? = null) {
+            val body = byteArrayOf(if (!success) 3 else if (room == null) 1 else 5, attempt.toByte(), 0, 0, side.toByte(),
+                size.toByte(), (size shr 8).toByte(), checksum.toByte(), (checksum shr 8).toByte()) + (room ?: byteArrayOf())
+            assertEquals(room != null, transport.receive(left, packet(body)))
             for (completion in transport.drainCompleted()) {
                 if (completion.attempt == completion.message.magic && completion.epoch == transport.epoch)
                     completion.message.onAck!!.run()
@@ -166,6 +167,25 @@ class VideoTransportTest {
                 f.ack(record, 2)
                 assertContentEquals(intArrayOf(3), result.get(1, TimeUnit.SECONDS))
             } finally { worker.shutdownNow() }
+        }
+    }
+
+    @Test fun roomConfirmationUsesBothExactPrimaryAttemptsAndIsSingleUse() {
+        for (left in listOf(true, false)) for (missing in listOf(false, true)) {
+            val f = Fixture()
+            f.respond = { record ->
+                f.ack(record, 1, room = byteArrayOf(0, 0, 0, 0, 43, 96))
+                f.ack(record, 2, room = if (missing) null else byteArrayOf(0, 0, 0, 0, 42, 64))
+            }
+            val record = nal(0).also { it[1] = 28 }
+            assertContentEquals(intArrayOf(1, 0), f.transport.pipeline(arrayOf(record), arrayOf(null), 3, left))
+            val rows = f.transport.takeConfirmationCredits()
+            if (missing) assertEquals(null, rows) else {
+                assertEquals(listOf(43, 42), rows!!.map { it[4].toInt() })
+                assertEquals(listOf(96, 64), rows.map { it[5].toInt() })
+            }
+            assertEquals(null, f.transport.takeConfirmationCredits())
+            f.transport.retire("seek"); assertEquals(null, f.transport.takeConfirmationCredits())
         }
     }
 

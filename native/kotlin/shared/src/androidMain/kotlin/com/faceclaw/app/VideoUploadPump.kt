@@ -7,7 +7,8 @@ internal data class VideoUploadPicture(val source: Int, val pts: Long)
 internal data class VideoNalEvidence(val sequence: Int, val source: Int, val type: Int,
     val length: Int, val checksum: Long)
 internal data class VideoUploadPlan(val stream: Long, val tokens: LongArray, val prefix: IntArray,
-    val firstNal: Int, val count: Int, val pictures: List<VideoUploadPicture>, val timed: Boolean = false)
+    val firstNal: Int, val count: Int, val pictures: List<VideoUploadPicture>, val timed: Boolean = false,
+    val confirmationRoom: Boolean = false)
 
 /** Credit-bounded state; the report handoff may stage a grant only while fenced. */
 internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: Int,
@@ -15,7 +16,8 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
     private val checkEpoch: () -> Unit, private val exchange: (ByteArray) -> Array<ByteArray>,
     private val pipeline: (Array<ByteArray>, Array<ByteArray?>) -> IntArray,
     val measurement: VideoMeasurement = VideoMeasurement(),
-    private val canReuse: () -> Boolean = { true }) {
+    private val canReuse: () -> Boolean = { true },
+    private val confirmation: () -> Array<ByteArray>? = { null }) {
     var index = 0; private set
     var metadata = 0; private set
     var consumed = -1L; private set
@@ -139,13 +141,13 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
     }
     private fun nalRecord(sequence: Int, bytes: ByteArray): ByteArray = ByteArray(10 + bytes.size).also { record ->
         recordNal(sequence, bytes)
-        record[0] = 31; record[1] = 6; put(record, 2, plan.stream); put(record, 6, sequence.toLong())
+        record[0] = 31; record[1] = (if (plan.confirmationRoom) 28 else 6).toByte(); put(record, 2, plan.stream); put(record, 6, sequence.toLong())
         bytes.copyInto(record, 10)
     }
     private fun timedRecord(sequence: Int, ordinal: Int, bytes: ByteArray): ByteArray =
         ByteArray(TIMED_HEADER + bytes.size).also { record ->
             recordNal(sequence, bytes)
-            record[0] = 31; record[1] = TIMED_NAL.toByte(); put(record, 2, plan.stream); put(record, 6, sequence.toLong())
+            record[0] = 31; record[1] = (if (plan.confirmationRoom) 29 else TIMED_NAL).toByte(); put(record, 2, plan.stream); put(record, 6, sequence.toLong())
             put(record, 10, ordinal.toLong()); put(record, 14, plan.pictures[ordinal - 1].pts)
             bytes.copyInto(record, TIMED_HEADER)
         }
@@ -189,6 +191,13 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
         }; checkEpoch()
         require(result.size == 2 && result[0] == records.size && result[1] == 0) { "Invalid video pipeline completion" }
         index += records.size; metadata += timed; budget -= records.size; pictureBudget -= timed
+        if (plan.confirmationRoom) {
+            val rows = confirmation()
+            // BUSY marks an accepted replay/future NAL without an ordered room
+            // promise. Never invent room from a missing or history-only ACK.
+            if (rows != null && canReuse() && rows.size == 2 && rows.all { it.size == 6 && u(it[5]) and 31 == 0 })
+                acceptCredits(rows)
+        }
         measurement.add(VideoMeasurement.NALS, count = records.size.toLong())
         measurement.add(VideoMeasurement.BYTES, count = payload)
         return true
@@ -271,12 +280,12 @@ class VideoUploadPump internal constructor(create: () -> VideoUploadEngine) {
         val config = VideoUploadPlan(json.getLong("stream"), longArrayOf(json.getJSONArray("tokens").getLong(0), json.getJSONArray("tokens").getLong(1)),
             IntArray(prefix.length()) { prefix.getInt(it) }, json.getInt("firstNal"), json.getInt("count"),
             (0 until pictures.length()).map { i -> pictures.getJSONObject(i).let { VideoUploadPicture(it.getInt("nal"), it.getLong("pts")) } },
-            json.optBoolean("timed", false))
+            json.optBoolean("timed", false), json.optBoolean("confirmationRoom", false))
         VideoUploadEngine(config, reader.nalCount(), reader::readNalBytes, identities::reserveNow,
             { check(transport.epoch == epoch) { "Video connection generation changed; restart at IDR" } },
             { transport.exchange(it, 6, 3, ingressLeft, 5, epoch) },
             { records, following -> transport.pipeline(records, following, 3, ingressLeft, epoch) },
-            canReuse = { transport.creditReuseSafe(epoch) })
+            canReuse = { transport.creditReuseSafe(epoch) }, confirmation = transport::takeConfirmationCredits)
     })
 
     init {

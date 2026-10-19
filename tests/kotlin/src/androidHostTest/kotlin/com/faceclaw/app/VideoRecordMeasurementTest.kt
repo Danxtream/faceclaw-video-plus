@@ -7,7 +7,7 @@ import kotlin.test.assertTrue
 class VideoRecordMeasurementTest {
     private fun command(op: Int, stream: Long = 50) = ByteArray(24).also {
         it[0] = 31; it[1] = op.toByte()
-        VideoUploadEngine.put(it, if (op == 6) 2 else 8, stream)
+        VideoUploadEngine.put(it, if (op in listOf(6,24,28,29)) 2 else 8, stream)
     }
     @Test fun generationAndRecordKindsDoNotMixPumpLifetimeOrOtherStreams() {
         var now = 0L
@@ -46,5 +46,14 @@ class VideoRecordMeasurementTest {
         m.begin(51, 8); val before = m.snapshot()
         m.written(page); m.acknowledged(page); m.finished(page)
         assertEquals(before, m.snapshot())
+    }
+    @Test fun roomNalOperationsKeepTheExistingPerGenerationNalTimingBucket() {
+        val m = VideoRecordMeasurement { 0L }; m.begin(50, 7)
+        for (op in listOf(28,29)) {
+            val ticket = m.queued(command(op), 7, 0)
+            m.written(ticket); m.acknowledged(ticket); m.finished(ticket)
+            assertEquals(null, m.queued(command(op, 49), 7, 0))
+        }
+        assertTrue(m.snapshot().contains("\"nal\":{\"records\":2"))
     }
 }
