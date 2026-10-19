@@ -3,6 +3,7 @@ import { type VideoUploadPump, type VideoUploadProgress } from "./video-upload";
 import { VideoAvSync, videoAvOptions, type VideoAvAction } from "./video-av-sync";
 import { VideoAudioClock, VideoLensClock, videoPacePlan, videoPaceSpan, videoSkipTarget } from "./video-pacing";
 import { VideoMeasurement } from "./video-measurement";
+import { videoMemoryLines } from "./video-memory";
 import { videoMeasurementLogs } from "./video-measurement-log";
 import { videoFailureLines, videoNalChecksum, type VideoNalEvidence } from "./video-failure";
 import { VIDEO, VideoProtocol, VideoReportUnavailable, videoStaleError, videoU32, type VideoStatus } from "./video-protocol";
@@ -33,7 +34,7 @@ export type VideoPlaybackView = {
   cleanupFailed: boolean;
   hostPhy: string;
 };
-type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement" | "timedNal" | "slices" | "pace" | "failureDiagnostics" | "heapDiagnostics">>;
+type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement" | "timedNal" | "slices" | "pace" | "failureDiagnostics" | "heapDiagnostics" | "memoryEvidence">>;
 type Intent = { kind: "pause" | "seek" | "scale" | "menu" | "skip"; value: number | boolean; resolve: () => void; reject: (error: unknown) => void };
 type Generation = { stream: number; tokens: number[]; idr: number; target: number; prefix: number[]; firstNal: number; index: number; count: number; metadata: number; paused: boolean; reached: boolean; oldPhy: VideoPhy[]; started: number; anchor: VideoPhy[]; anchorAt: number; anchorUncertainty: number; detailedReports: boolean; pump?: VideoUploadPump };
 
@@ -43,6 +44,17 @@ class VideoCancelled extends Error { constructor() { super("Video cancelled"); }
 export class VideoPlayback {
   private recentNals: VideoNalEvidence[] = [];
   private failureEvidenceStream = 0;
+  private memoryStreams = new Set<number>();
+  private async logMemoryEvidence(g = this.generation): Promise<void> {
+    if (!g || g.tokens.length !== 2 || !this.protocol.memoryEvidence || this.memoryStreams.has(g.stream)) return;
+    this.memoryStreams.add(g.stream);
+    for (const side of [1, 2]) {
+      try {
+        const raw = await this.protocol.memoryEvidence(g.stream, side);
+        for (const line of videoMemoryLines(raw, g.stream, g.tokens[side - 1], side)) console.error(line);
+      } catch (error) { console.error(`Video memory stream=${g.stream} side=${side} unavailable=${error}`); }
+    }
+  }
 
   private async logFailureEvidence(g = this.generation): Promise<void> {
     if (!g || g.stream === this.failureEvidenceStream || !this.protocol.failureDiagnostics) return;
@@ -55,6 +67,7 @@ export class VideoPlayback {
       console.error(`Video failure writer fenced after error: ${error}`);
     }
     let recent = this.recentNals;
+    await this.logMemoryEvidence(g);
     try { recent = g.pump?.evidence?.() ?? recent; }
     catch (error) { console.error(`Video failure phone evidence unavailable: ${error}`); }
     this.failureEvidenceStream = g.stream;
@@ -379,6 +392,7 @@ export class VideoPlayback {
       if (this.clock() > deadline) throw new Error("Video cleanup or original PHY restoration timed out");
       await this.sleep(20);
     }
+    await this.logMemoryEvidence(generation);
     // Never hold a user cancel/seek for observational tail reads. Normal EOF
     // gets a bounded drain; one already-running native request owns its deadline.
     const tailUntil = this.clock() + 3000, tail = !this.stopping && !reset;

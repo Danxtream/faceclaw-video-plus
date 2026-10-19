@@ -37,9 +37,17 @@ export function videoFailureLines(side: number, stream: number, detail: Uint8Arr
     ` powerStep=${word(detail, 104)} peerGeneration=${word(detail, 108)} peerStream=${word(detail, 112)} peerClosed=${word(detail, 116)}` +
     ` inputPinned=${word(detail, 120)} decoderPresent=${word(detail, 124)}` +
     // History bytes 20-31: presenter faults record their call site and state.
-    ` task=${history[29] ? "presenter" : "worker"} site=0x${word(history, 20).toString(16)}` +
-    ` presenterStackUsed=${word(history, 24)} presenterGuards=${history[28]}` +
-    ` presenterQueue=${history[30] | history[31] << 8}`];
+    ` task=${word(history, 20) ? "presenter" : "worker"} site=0x${word(history, 20).toString(16)}` +
+    (word(history, 20) ? ` presenterStackUsed=${word(history, 24)} presenterGuards=${history[28]}` +
+    ` presenterQueue=${history[30] | history[31] << 8}` : "")];
+  if (!word(history, 20) && history[24]) {
+    const count = (at: number) => {
+      const value = history[at] | history[at + 1] << 8 | history[at + 2] << 16;
+      return value === 0xffffff ? "unavailable" : value;
+    };
+    lines.push(`Video failure storage side=${side} stream=${savedStream} rule=${history[24]}` +
+      ` liveSlots=${history[25]} cachedFree=${count(26)} cachedLargest=${count(29)}`);
+  }
   const compare = (sequence: number, type: number, length: number, checksum: number, current: boolean): void => {
     const sent = savedStream === stream ? recent.find(row => row.sequence === sequence) : undefined;
     const verdict = savedStream !== stream ? "STALE STREAM" : !sent ? "NO PHONE EVIDENCE" :

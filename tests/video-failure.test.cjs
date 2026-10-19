@@ -14,6 +14,14 @@ test('FNV matches firmware including unsigned multiplication and empty input', (
   assert.equal(videoNalChecksum(new TextEncoder().encode('hello')), 0x4f9f2cab);
   assert.equal(videoNalChecksum(new Uint8Array()), 2166136261);
 });
+
+test('Worker storage rules do not reinterpret cached counts as presenter state',()=>{
+  const {rows,sent}=evidence();rows[1].set([4,19,48,0,0,48,0,0],24);
+  const lines=videoFailureLines(1,7,...rows,sent);
+  assert.match(lines[0],/task=worker/);
+  assert.ok(lines.some(x=>/rule=4 liveSlots=19 cachedFree=48 cachedLargest=48/.test(x)));
+  assert.ok(!lines[0].includes('presenterStackUsed'));
+});
 test('Retained current and previous NALs compare only within the same stream', () => {
   const {rows, sent} = evidence();
   let lines = videoFailureLines(1, 7, ...rows, sent);

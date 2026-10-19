@@ -163,6 +163,12 @@ export class VideoProtocol {
     this.backend.configureEvidence?.(this.evidence);
   }
   measurementSnapshot(): unknown { return this.backend.measurementSnapshot?.() ?? null; }
+  /** Retained allocation-time minima only; called at retirement or failure. */
+  async memoryEvidence(stream: number, side: number): Promise<Uint8Array> {
+    if (![1, 2].includes(side)) throw new Error("Invalid video memory lens");
+    const raw = await this.header(7, 16); raw[8] = 9; put(raw, 12, stream);
+    return (await this.query(raw, 128, side))[0];
+  }
   /** Query each lens independently so an unavailable peer cannot hide evidence. */
   async failureDiagnostics(side: number, mode: number): Promise<Uint8Array> {
     if (![1, 2].includes(side) || ![0, 1].includes(mode)) throw new Error("Invalid decode diagnostic selector");
