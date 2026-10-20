@@ -95,6 +95,10 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
     private var ridersWaiting = 0
     /** Changes whenever a rider takes or frees a slot, so a waiting flow re-checks its window. */
     private var riderEvents = 0
+    /** Highest request number this transport has sent; see [exchangeOnce]. */
+    private var sentRequestHigh = 0L
+    /** The shared request-number allocator, for queries overtaken while they waited. */
+    @Volatile internal var requestReserve: (() -> Long)? = null
     private class Operation(val epoch: Long) {
         var complete = false
         var result = ""
@@ -111,6 +115,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
     /** Enable only after both lenses advertise receive/clock diagnostics. */
     fun configureEvidence(identities: VideoIdentityAllocator, enabled: Boolean) {
         evidenceReserve = if (enabled) identities::reserveNow else null
+        requestReserve = identities::reserveNow
     }
 
     /** Return only this class's envelope mask; ordinary CFW records stay unchanged. */
@@ -588,38 +593,59 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         require(payload.size >= 8 && length in 1..192 && resultOffset in 0 until length)
         // A flagged credits request (op 10, 24 bytes) packs timeline room above its 5-bit result.
         val resultMask = if (unsigned(payload[1]) == 10 && payload.size == 24) 31 else 255
-        val id = u32(payload, 4)
-        require(id in 1..0xfffffffeL)
+        require(u32(payload, 4) in 1..0xfffffffeL)
         require(leading.size <= 1 && leading.all { it.size in 11..4096 && unsigned(it[0]) == MESSAGE && unsigned(it[1]) == 6 })
-        synchronized(monitor) {
-            // Replies are matched to one request at a time; a rider holds it briefly.
-            while (request != 0L && epoch == generation && deadline - System.nanoTime() > 0)
-                monitor.wait(minOf(100L, (deadline - System.nanoTime()) / 1_000_000L + 1))
-            check(epoch == generation) { "Video query generation retired" }
-            check(request == 0L) { "Video query already active" }
-            request = id
-            queryTimingOp = unsigned(payload[1])
-            requestedTargets = targets
-            queryIngressLeft = ingressLeft
-            replyFailure = null
-            pages.clear()
+        // The lenses refuse, without a reply, a request number not above the last
+        // one they saw. A number reserved before another query was sent ahead of
+        // it (the upload pump's own room query, for example) takes a fresh one at
+        // its turn. Preallocated pipeline metadata and leading NALs keep theirs.
+        var command = payload
+        while (true) {
+            val stale = synchronized(monitor) {
+                // Replies are matched to one request at a time; a rider holds it briefly.
+                while (request != 0L && epoch == generation && deadline - System.nanoTime() > 0)
+                    monitor.wait(minOf(100L, (deadline - System.nanoTime()) / 1_000_000L + 1))
+                check(epoch == generation) { "Video query generation retired" }
+                check(request == 0L) { "Video query already active" }
+                val current = u32(command, 4)
+                if (current <= sentRequestHigh && requestReserve != null && leading.isEmpty() && !overlap) true
+                else {
+                    request = current; sentRequestHigh = maxOf(sentRequestHigh, current)
+                    queryTimingOp = unsigned(command[1])
+                    requestedTargets = targets
+                    queryIngressLeft = ingressLeft
+                    replyFailure = null
+                    pages.clear()
+                    false
+                }
+            }
+            if (!stale) break
+            val fresh = requestReserve!!()
+            require(fresh in 1..0xfffffffeL) { "Video request ID exhausted" }
+            command = command.copyOf().also { for (i in 0..3) it[4 + i] = (fresh shr (8 * i)).toByte() }
         }
+        val id = u32(command, 4)
         val began = System.nanoTime()
         var complete = false
         var refusalTargets = 0
         var waiting = "transport ACK"
         return try {
-            val masks = send(leading + payload, targets, ingressLeft, generation, deadline, overlap, riding)
+            val masks = send(leading + command, targets, ingressLeft, generation, deadline, overlap, riding)
             check(masks.take(leading.size).all { it == targets }) { "Paired NAL transport refused" }
             val accepted = masks.last()
             val sides = (1..2).filter { targets and it != 0 }
+            var refusedEmpty = false
             for (side in sides.filter { accepted and it == 0 }) {
                 val count = synchronized(monitor) { pages[Pair(side, 0)]?.first ?: 0 }
+                if (count == 0) refusedEmpty = true
                 System.err.println("Video command refused op=${unsigned(payload[1])} request=$id side=$side " +
                     "page=0 pages=$count attempt=1 elapsedMs=${(System.nanoTime() - began) / 1_000_000}")
             }
             waiting = "page0"
-            await(generation, deadline) { sides.all { Pair(it, 0) in pages } }
+            // A rider refused without a frozen reply gets none later; free the
+            // single reply slot quickly so the video flow is not held behind it.
+            val pageDeadline = if (riding && refusedEmpty) minOf(deadline, System.nanoTime() + RIDER_REFUSAL_WAIT_NS) else deadline
+            await(generation, pageDeadline) { sides.all { Pair(it, 0) in pages } }
             val result = mutableListOf<ByteArray>()
             for (side in sides) {
                 val first = synchronized(monitor) { pages[Pair(side, 0)]!! }
@@ -757,6 +783,8 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
     companion object {
         const val MESSAGE = 31
         const val VIDEO_REPLY_MAX_BYTES = 200
+        /** How long a refused rider waits for a reply page that a refusal never sends. */
+        private const val RIDER_REFUSAL_WAIT_NS = 300_000_000L
         private fun unsigned(value: Byte) = value.toInt() and 255
         private fun u16(data: ByteArray, offset: Int) = unsigned(data[offset]) or (unsigned(data[offset + 1]) shl 8)
         private fun u32(data: ByteArray, offset: Int): Long =

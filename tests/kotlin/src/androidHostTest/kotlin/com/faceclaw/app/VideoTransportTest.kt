@@ -127,6 +127,37 @@ class VideoTransportTest {
         }
     }
 
+    @Test fun overtakenQueryTakesAFreshRequestNumberAtItsTurn() {
+        for (left in listOf(true, false)) {
+            val f = Fixture(); var fresh = 200L
+            f.transport.requestReserve = { fresh++ }
+            f.respond = { record -> answer(f, record, left) }
+            assertEquals(2, f.transport.exchange(query(95), 6, 3, left, 2).size)
+            // Reserved before 95 was sent: the lenses would refuse 90 as a replay.
+            assertEquals(2, f.transport.exchange(query(90), 6, 3, left, 2).size)
+            val ids = generateSequence { f.records.poll() }.map { VideoUploadEngine.word(it.payload, 4) }.toList()
+            assertEquals(listOf(95L, 200L), ids)
+        }
+    }
+
+    @Test fun refusedRiderWithoutAReplyFreesTheReplySlotQuickly() {
+        for (left in listOf(true, false)) {
+            val f = Fixture(); val worker = Executors.newFixedThreadPool(2); var keep = true; var sent = 0
+            try {
+                val flow = worker.submit { f.transport.flow({ if (keep && sent == 0) nal(sent++).also { it[1] = 28 } else null },
+                    { _, _, _ -> }, { keep }, VideoMeasurement(), left, 1) }
+                val video = f.records.poll(1, TimeUnit.SECONDS)!!
+                // Both lenses refuse the rider and freeze no reply, as for a replayed number.
+                f.respond = { record -> f.ack(record, 1, success = false); f.ack(record, 2, success = false) }
+                val began = System.nanoTime()
+                assertFailsWith<VideoQueryUnavailable> { f.transport.exchange(query(97), 6, 3, left, 2) }
+                assertTrue(System.nanoTime() - began < 1_500_000_000L, "A refused rider must not hold the reply slot for its full deadline")
+                f.respond = null; keep = false
+                f.ack(video, 1); f.ack(video, 2); flow.get(1, TimeUnit.SECONDS)
+            } finally { worker.shutdownNow() }
+        }
+    }
+
     @Test fun retirementFailsAWaitingRiderAndItsFlow() {
         for (left in listOf(true, false)) {
             val f = Fixture(); val worker = Executors.newFixedThreadPool(2); var sent = 0
