@@ -12,6 +12,50 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class VideoTransportTest {
+    @Test fun flowRefillsBeforeBatchDrainAndFencesPauseOnBothIngresses() {
+        for(left in listOf(true,false)) {
+            val f=Fixture();val worker=Executors.newSingleThreadExecutor()
+            var sent=0;var keep=true;val grants=mutableListOf<Int>()
+            try {
+                val result=worker.submit {
+                    f.transport.flow({if(sent<12) nal(sent++).also{it[1]=28} else null},
+                        {seq,_,_->grants.add(seq)},{keep},VideoMeasurement(),left,1)
+                }
+                val first=List(3){f.records.poll(1,TimeUnit.SECONDS)!!}
+                assertEquals(null,f.records.poll(30,TimeUnit.MILLISECONDS))
+                f.ack(first[0],1);f.ack(first[0],2)
+                val fourth=f.records.poll(1,TimeUnit.SECONDS)!!
+                assertEquals(3,VideoUploadEngine.word(fourth.payload,6))
+                // Fourth is submitted before the other two initial records ACK.
+                keep=false;f.ack(fourth,1);f.ack(fourth,2)
+                assertFalse(result.isDone)
+                for(r in first.drop(1)){f.ack(r,1);f.ack(r,2)}
+                result.get(1,TimeUnit.SECONDS)
+                assertEquals(4,sent);assertEquals(4,grants.size)
+                f.respond={r->f.ack(r,1);f.ack(r,2)}
+                assertContentEquals(intArrayOf(3),f.transport.sendWindow(arrayOf(nal(20)),3,left))
+            } finally {worker.shutdownNow()}
+        }
+    }
+
+    @Test fun flowCannotHideRefusalDisconnectOrReplayIdentity() {
+        for(left in listOf(true,false)) {
+            val f=Fixture();var sent=0
+            f.respond={r->f.ack(r,1);f.ack(r,2,success=false)}
+            assertFails { f.transport.flow({if(sent++==0)nal(0).also{it[1]=28}else null},
+                {_,_,_->error("No refused grant")},{true},VideoMeasurement(),left,1) }
+            val retired=Fixture();val worker=Executors.newSingleThreadExecutor()
+            try {
+                var next=0
+                val result=worker.submit {retired.transport.flow({nal(next++).also{it[1]=28}},
+                    {_,_,_->},{true},VideoMeasurement(),left,1)}
+                retired.records.poll(1,TimeUnit.SECONDS)!!
+                retired.transport.retire("seek")
+                assertFails {result.get(1,TimeUnit.SECONDS)}
+            }finally{worker.shutdownNow()}
+        }
+    }
+
     @Test fun metadataPipelineAcceptsSixRoomsButNotSevenOnBothIngresses() {
         for (left in listOf(true, false)) for (room in listOf(6, 7)) {
             val f = Fixture()

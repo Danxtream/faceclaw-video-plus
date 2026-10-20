@@ -243,7 +243,11 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
 
     /** Metadata acceptance gates the next NAL, not the preceding NAL's ACK. */
     fun pipeline(records: Array<ByteArray>, following: Array<ByteArray?>, targets: Int,
-                 ingressLeft: Boolean, generation: Long = epoch): IntArray = writer.withLock {
+                 ingressLeft: Boolean, generation: Long = epoch): IntArray =
+        pipelineMeasured(records, following, targets, ingressLeft, generation, measurement)
+
+    internal fun pipelineMeasured(records: Array<ByteArray>, following: Array<ByteArray?>, targets: Int,
+                 ingressLeft: Boolean, generation: Long, stats: VideoMeasurement): IntArray = writer.withLock {
         require(targets in 1..3 && records.size in 1..4 && following.size == records.size)
         require(records.all { it.size in 11..4096 })
         val stream = u32(records[0], 2)
@@ -267,12 +271,17 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             check(epoch == generation) { "Video generation retired before submission" }
             check(pending.isEmpty()) { "Video record window is not fenced" }
         }
-        fun room() = await(generation, deadline) {
+        fun room() {
+            val began = stats.now()
+            val full = synchronized(monitor) { pending.count { !it.delivered } >= 3 }
+            await(generation, deadline) {
             val done = submitted.filter { it in pending && it.delivered }
             check(done.all { it.accepted == targets }) { "Paired NAL transport refused" }
             done.forEach { recordMeasurement.finished(it.timing) }
             pending.removeAll(done.toSet())
             pending.size < 3
+            }
+            if (full) stats.add(VideoMeasurement.WINDOW_WAIT, stats.now() - began)
         }
         try {
             for (i in records.indices) {
@@ -292,7 +301,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                 if (rows.any { unsigned(it[5]) != 0 }) break
                 admitted++
             }
-            await(generation, deadline) { submitted.all { it.delivered } }
+            stats.time(VideoMeasurement.FENCE_WAIT) { await(generation, deadline) { submitted.all { it.delivered } } }
             check(submitted.all { it.accepted == targets }) { "Paired NAL transport refused" }
             val last = submitted.last()
             if (targets == 3 && unsigned(last.payload[1]) in listOf(28, 29) && last.room.all { it != null } &&
@@ -303,6 +312,69 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             synchronized(monitor) {
                 submitted.forEach { recordMeasurement.finished(it.timing) }
                 pending.removeAll(submitted.toSet())
+            }
+            flushRefusalEvidence(ingressLeft, generation)
+        }
+    }
+
+    /** Refill the existing three-record writer window from validated paired
+     * grants. No query or new notification is introduced. A control/report
+     * handoff stops the producer and drains every exact attempt before return. */
+    internal fun flow(next: () -> ByteArray?, grant: (Int, Array<ByteArray>?, Long) -> Unit,
+        keep: () -> Boolean, stats: VideoMeasurement, ingressLeft: Boolean, generation: Long) = writer.withLock {
+        val live = mutableListOf<VideoSubmission>()
+        var stream = -1L; var sequence = -1L
+        var deadline = System.nanoTime() + 15_000_000_000L
+        confirmedRooms = null
+        synchronized(monitor) {
+            check(epoch == generation && pending.isEmpty()) { "Video record window is not fenced" }
+        }
+        try {
+            while (true) {
+                val done = synchronized(monitor) {
+                    check(epoch == generation) { "Video generation retired before submission" }
+                    val ready = live.filter { it.delivered }
+                    check(ready.all { it.accepted == 3 }) { "Paired NAL transport refused" }
+                    ready.forEach { recordMeasurement.finished(it.timing) }
+                    pending.removeAll(ready.toSet()); live.removeAll(ready.toSet())
+                    ready.sortedBy { u32(it.payload, 6) }
+                }
+                for (record in done) {
+                    val rows = synchronized(monitor) {
+                        if (record.room.all { it != null }) record.room.map { it!!.copyOf() }.toTypedArray() else null
+                    }
+                    grant(u32(record.payload, 6).toInt(), rows, (System.nanoTime() - record.queuedAt) / 1_000_000)
+                    deadline = System.nanoTime() + 15_000_000_000L
+                }
+                val continuing = keep()
+                // Bound sequence distance too: out-of-order completions must not
+                // run past the oldest unconfirmed record's replay window.
+                val window = live.size < 3 && (live.isEmpty() || sequence + 1 - u32(live.first().payload, 6) < 3)
+                val payload = if (continuing && window) next() else null
+                if (payload != null) {
+                    require(payload.size in 11..4096 && unsigned(payload[0]) == MESSAGE && unsigned(payload[1]) in listOf(28, 29))
+                    require(unsigned(payload[1]) != 29 || payload.size > VideoUploadEngine.TIMED_HEADER)
+                    val current = u32(payload, 6)
+                    if (stream < 0) { stream = u32(payload, 2); sequence = current - 1 }
+                    require(u32(payload, 2) == stream && current == sequence + 1)
+                    val record = VideoSubmission(payload.copyOf(), 3, ingressLeft, generation, this)
+                    synchronized(monitor) {
+                        check(epoch == generation) { "Video generation retired before enqueue" }
+                        pending.add(record); live.add(record)
+                    }
+                    sequence = current
+                    if (!queue.enqueue(record)) failed(record, "Video session is not ready")
+                    continue
+                }
+                if (live.isEmpty()) break
+                stats.time(if (!continuing) VideoMeasurement.FENCE_WAIT else if (!window) VideoMeasurement.WINDOW_WAIT else VideoMeasurement.PRODUCER_WAIT) {
+                    await(generation, deadline) { live.any { it.delivered } }
+                }
+            }
+        } finally {
+            synchronized(monitor) {
+                live.forEach { recordMeasurement.finished(it.timing) }
+                pending.removeAll(live.toSet())
             }
             flushRefusalEvidence(ingressLeft, generation)
         }

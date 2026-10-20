@@ -736,7 +736,9 @@ export class VideoPlayback {
     const plan = videoPacePlan({ now, heard, offset: this.audioOffsetMs, first: this.lastShownOrdinal + 1, lead: 400,
       pts: this.source.clip.pictures.slice(g.idr).map((picture) => picture.pts), clocks: this.lensClocks, latency });
     if (!plan) return;
-    const rows = await this.protocol.pace(g.stream, g.tokens, plan.ordinal, plan.ticks);
+    const began = this.clock();
+    const rows = await this.protocol.pace(g.stream, g.tokens, plan.ordinal, plan.ticks)
+      .finally(() => this.measurement?.span(began, this.clock(), "pacing"));
     // STALE is a race with STOP or seek; FORMAT means a malformed command.
     if (rows.some((row) => row[1] !== VIDEO.pace || (row[2] && row[2] !== 2))) throw new Error("Video PACE refused");
     // The coordinator applies it on its next loop pass; age copies from slightly after the reply.

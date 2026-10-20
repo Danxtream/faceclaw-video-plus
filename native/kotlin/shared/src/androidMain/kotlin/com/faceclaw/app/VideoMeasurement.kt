@@ -35,9 +35,20 @@ internal class VideoMeasurement(private val clock: () -> Long = System::nanoTime
         const val BUILD = 15
         const val REPLY_WAIT = 16; const val REPLY_BYTES = 17; const val PLANNED_PAGES = 18
         const val CREDIT_REUSE = 19; const val CREDIT_DISCARD = 20
+        const val BATCHES = 21; const val BATCH_RECORDS = 22; const val BATCH_CAP = 23
+        const val TIMELINE_WAIT = 24; const val WINDOW_WAIT = 25; const val FENCE_WAIT = 26
+        const val BATCH_GAP = 27; const val ROOM_ACCEPT = 28; const val ROOM_MISSING = 29
+        const val ROOM_STALE = 30; const val ROOM_REJECT = 31; const val QUERY_FALLBACK = 32
+        const val CREDIT_END = 33; const val BATCH_ONE = 34; const val BATCH_TWO = 35
+        const val BATCH_THREE = 36; const val BATCH_FOUR = 37; const val BATCH_LARGER = 38
+        const val BATCH_ZERO = 39
+        const val PRODUCER_WAIT = 40
         val NAMES = arrayOf("read", "identity", "pipeline", "credits", "metadata", "creditWait",
             "metadataWait", "nals", "bytes", "queueToWrite", "writeToAck", "query", "pageFetch",
             "refusal", "failure", "build", "pageReplyWait", "replyBytes", "declaredPages",
-            "creditReuse", "creditDiscard")
+            "creditReuse", "creditDiscard", "batches", "batchRecords", "fourRecordCap",
+            "timelineEnd", "threeInFlightWait", "confirmationFence", "interBatchGap",
+            "roomAccepted", "roomMissing", "roomStale", "roomRejected", "queryFallback",
+            "creditEnd", "batchOne", "batchTwo", "batchThree", "batchFour", "batchLarger", "batchZero", "producerWait")
     }
 }

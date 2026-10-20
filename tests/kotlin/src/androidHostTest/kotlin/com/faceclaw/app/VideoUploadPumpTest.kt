@@ -12,6 +12,123 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class VideoUploadPumpTest {
+    @Test fun pairedLatencyTransportFlowsMoreThanTwentyFiveNalsPerSecondWithoutExtraQueries() {
+        fun measure(flowing: Boolean): Pair<Double, Int> {
+            val f = VideoTransportTest.Fixture()
+            val timer = Executors.newSingleThreadScheduledExecutor()
+            var writeAt = System.nanoTime(); var queries = 0
+            val live = java.util.concurrent.atomic.AtomicInteger()
+            val peak = java.util.concurrent.atomic.AtomicInteger()
+            f.respond = { record ->
+                val op = record.payload[1].toInt()
+                if (op == 10) {
+                    queries++
+                    for (side in 1..2) {
+                        f.page(word(record.payload,4),side,0,1,reply(0,46,192),true)
+                        f.ack(record,side)
+                    }
+                } else {
+                    peak.accumulateAndGet(live.incrementAndGet(),::maxOf)
+                    writeAt = maxOf(writeAt,System.nanoTime()) + 32_000_000
+                    timer.schedule({
+                        val grant = reply(word(record.payload,6)+1,46,192)
+                        live.decrementAndGet()
+                        for(side in 1..2) f.ack(record,side,room=grant)
+                    },writeAt + 70_000_000 - System.nanoTime(),TimeUnit.NANOSECONDS)
+                }
+            }
+            val engine = VideoUploadEngine(timedPlan(40).copy(confirmationRoom=true),40,
+                {byteArrayOf(0x65)},{1},{},{f.transport.exchange(it,6,3,true,5)},
+                {records,following->f.transport.pipeline(records,following,3,true)},
+                confirmation=f.transport::takeConfirmationCredits,
+                roomFlow=if(!flowing)null else {next,grant,keep,stats->f.transport.flow(next,grant,keep,stats,true,1)})
+            try {
+                val from=System.nanoTime()
+                while(!engine.done)engine.step()
+                val rate=40e9/(System.nanoTime()-from)
+                assertEquals(1,queries);assertEquals(3,peak.get())
+                return Pair(rate,queries)
+            }finally{timer.shutdownNow()}
+        }
+        val before=measure(false);val after=measure(true)
+        println("Paired room latency fake NAL/s batch=${before.first} flowing=${after.first}; queries=${before.second}->${after.second}; serialized write32ms,ACKtail70ms,window3,instant decode; not hardware")
+        assertTrue(after.first>before.first*1.1);assertTrue(after.first>=25)
+    }
+    @Test fun continuousPumpPublishesLiveProgressBeforeItsWriterFence() {
+        val entered=CountDownLatch(1);val release=CountDownLatch(1)
+        val engine=VideoUploadEngine(timedPlan().copy(confirmationRoom=true),8,
+            {byteArrayOf(0x65)},{1},{},{arrayOf(reply(0,46,192),reply(0,46,192))},
+            {_,_->error("legacy")},roomFlow={next,_,_,_->
+                repeat(3){assertTrue(next()!=null)};entered.countDown()
+                check(release.await(1,TimeUnit.SECONDS))
+            })
+        val pump=VideoUploadPump{engine};pump.resumeUpload()
+        try {
+            assertTrue(entered.await(1,TimeUnit.SECONDS))
+            assertTrue(pump.uploadSnapshot().contains("\"index\":3"))
+            assertTrue(pump.uploadSnapshot().contains("\"running\":true"))
+            pump.pauseUpload();release.countDown()
+            val until=System.nanoTime()+TimeUnit.SECONDS.toNanos(1)
+            while(pump.uploadSnapshot().contains("\"running\":true") && System.nanoTime()<until)Thread.yield()
+            assertTrue(pump.uploadSnapshot().contains("\"running\":false"));pump.closeUpload()
+        }finally{release.countDown()}
+    }
+    @Test fun flowingRoomSubtractsAllLaterNalsAndPicturesAndYieldsWithoutAQuery() {
+        for (leftRoom in listOf(2, 6)) {
+            var sent = 0; var queries = 0; var stopped = false
+            val engine = VideoUploadEngine(timedPlan().copy(confirmationRoom = true), 8,
+                { byteArrayOf(0x65) }, { 1 }, {},
+                { queries++; arrayOf(reply(0,46,192),reply(0,46,192)) },
+                { _, _ -> error("No legacy batch") }, roomFlow = { next, grant, _, _ ->
+                    repeat(3) { assertTrue(next() != null); sent++ }
+                    // S=0: two later NALs/pictures already spend this grant.
+                    grant(0,arrayOf(reply(0,46,leftRoom shl 5),reply(0,46,192)),0)
+                    if (leftRoom == 2) assertEquals(null,next())
+                    else { assertTrue(next()!=null); sent++ }
+                    stopped = true
+                })
+            assertTrue(engine.step { !stopped }); assertEquals(1,queries)
+            assertEquals(if(leftRoom==2)3 else 4,sent)
+        }
+    }
+
+    @Test fun flowingRoomNeverInventsSpaceFromStaleMissingBusyOrOutOfOrderGrants() {
+        val stats=VideoMeasurement()
+        val engine=VideoUploadEngine(timedPlan().copy(confirmationRoom=true),8,
+            { byteArrayOf(0x65) },{1},{},{arrayOf(reply(0,46,192),reply(0,46,192))},
+            {_,_->error("legacy")},measurement=stats,roomFlow={next,grant,_,_->
+                repeat(3){assertTrue(next()!=null)}
+                grant(0,null,0);grant(0,arrayOf(reply(0,46,192),reply(0,46,192)),501)
+                grant(1,arrayOf(reply(0,46,195),reply(0,46,192)),0)
+                grant(1,arrayOf(reply(0,46,32),reply(0,46,32)),0)
+                assertEquals(null,next()) // One later picture spends the only remaining room.
+                grant(0,arrayOf(reply(0,46,192),reply(0,46,192)),0)
+                assertEquals(null,next()) // Older ACK cannot reopen the window.
+            })
+        engine.step()
+        val snapshot=stats.snapshot()
+        assertTrue(snapshot.contains("\"roomMissing\":{\"count\":1"))
+        assertTrue(snapshot.contains("\"roomStale\":{\"count\":1"))
+        assertTrue(snapshot.contains("\"roomRejected\":{\"count\":2"))
+    }
+
+    @Test fun streamingHostModelRemovesBatchTailWithTheSameThreeRecordWindow() {
+        // Conditional model: serialized 32ms queue/write plus a 70ms paired ACK
+        // tail, with immediate decoder room. It is not a glasses prediction.
+        fun model(flow:Boolean):Double {
+            val ack=mutableListOf<Double>();var t=39.0
+            for(i in 0 until 240) {
+                if(!flow && i%4==0 && ack.isNotEmpty()){t=maxOf(t,ack.max());ack.clear()}
+                while(ack.size>=3){val first=ack.min();t=maxOf(t,first);ack.removeAll{it<=t}}
+                t+=32;ack.add(t+70)
+            }
+            return 240000/maxOf(t,ack.max())
+        }
+        val before=model(false);val after=model(true)
+        println("Granted room host model NAL/s batch=$before flowing=$after; write32ms,ACKtail70ms,window3; not glasses data")
+        assertTrue(after>=25);assertTrue(after>before)
+    }
+
     @Test fun confirmationRoomLatencyModelRemovesQueriesWithoutChangingWindowOrTimeline() {
         fun measure(enabled: Boolean): Triple<Double, Int, Int> {
             var sent = 0; var queries = 0; var time = 0.0; var peak = 0

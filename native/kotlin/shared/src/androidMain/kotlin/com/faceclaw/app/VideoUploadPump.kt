@@ -10,6 +10,9 @@ internal data class VideoUploadPlan(val stream: Long, val tokens: LongArray, val
     val firstNal: Int, val count: Int, val pictures: List<VideoUploadPicture>, val timed: Boolean = false,
     val confirmationRoom: Boolean = false)
 
+internal typealias VideoRoomFlow = (() -> ByteArray?, (Int, Array<ByteArray>?, Long) -> Unit,
+    () -> Boolean, VideoMeasurement) -> Unit
+
 /** Credit-bounded state; the report handoff may stage a grant only while fenced. */
 internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: Int,
     private val read: (Int) -> ByteArray, private val reserve: () -> Long,
@@ -17,7 +20,8 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
     private val pipeline: (Array<ByteArray>, Array<ByteArray?>) -> IntArray,
     val measurement: VideoMeasurement = VideoMeasurement(),
     private val canReuse: () -> Boolean = { true },
-    private val confirmation: () -> Array<ByteArray>? = { null }) {
+    private val confirmation: () -> Array<ByteArray>? = { null },
+    private val roomFlow: VideoRoomFlow? = null) {
     var index = 0; private set
     var metadata = 0; private set
     var consumed = -1L; private set
@@ -31,6 +35,27 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
     var pictureBudget = 0; private set
     private data class Grant(val index: Int, val rows: Array<ByteArray>, val at: Long)
     private var offered: Grant? = null
+    private var previousBatchEnd = 0L
+    private var lastRoomSequence = -1
+    private val timedReservations = ArrayDeque<Int>()
+    internal var progressSink: (() -> Unit)? = null
+
+    private inline fun batch(work: () -> Unit) {
+        if (previousBatchEnd != 0L) measurement.add(VideoMeasurement.BATCH_GAP, measurement.now() - previousBatchEnd)
+        val first = index
+        try { work() } finally {
+            val size = index - first
+            measurement.add(VideoMeasurement.BATCHES)
+            measurement.add(VideoMeasurement.BATCH_RECORDS, count = size.toLong())
+            measurement.add(when (size) {
+                0 -> VideoMeasurement.BATCH_ZERO
+                1 -> VideoMeasurement.BATCH_ONE; 2 -> VideoMeasurement.BATCH_TWO
+                3 -> VideoMeasurement.BATCH_THREE; 4 -> VideoMeasurement.BATCH_FOUR
+                else -> VideoMeasurement.BATCH_LARGER
+            })
+            previousBatchEnd = measurement.now()
+        }
+    }
     private val recentNals = ArrayDeque<VideoNalEvidence>()
     /** Payload attempts, including a batch whose acknowledgement later failed. */
     @Synchronized private fun recordNal(sequence: Int, bytes: ByteArray) {
@@ -92,6 +117,7 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
     }
     private val resultMask = if (plan.timed) TIMELINE_RESULT_MASK else 255
     private fun acceptCredits(credit: Array<ByteArray>) {
+        timedReservations.clear() // Called only with the transport fully fenced.
         budget = creditBudget(credit)
         pictureBudget = if (plan.timed) credit.minOf { u(it[5]) shr TIMELINE_ROOM_SHIFT } else 0
         consumed = credit.minOf { word(it, 0) }
@@ -119,6 +145,7 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
         return accepted
     }
     private fun credits(shouldContinue: () -> Boolean): Boolean {
+        measurement.add(VideoMeasurement.QUERY_FALLBACK)
         var rows: Array<ByteArray>? = null
         for (attempt in 1..2) {
             val command = query(10, if (plan.timed) 24 else 20)
@@ -159,7 +186,11 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
     private fun stepTimed(shouldContinue: () -> Boolean): Boolean {
         val picture = plan.pictures.getOrNull(metadata)?.source == source(index)
         if ((budget == 0 || picture && pictureBudget == 0) && !credits(shouldContinue)) return false
-        if (picture && pictureBudget == 0) { waitKind = VideoMeasurement.BUSY; blocked = true; return false }
+        if (picture && pictureBudget == 0) {
+            measurement.add(VideoMeasurement.TIMELINE_WAIT)
+            waitKind = VideoMeasurement.BUSY; blocked = true; return false
+        }
+        if (plan.confirmationRoom && roomFlow != null) return stepFlow(shouldContinue)
         val limit = minOf(4, budget, plan.count - index)
         if (limit == 0) { blocked = true; return false }
         val records = ArrayList<ByteArray>(limit)
@@ -191,6 +222,8 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
         }; checkEpoch()
         require(result.size == 2 && result[0] == records.size && result[1] == 0) { "Invalid video pipeline completion" }
         index += records.size; metadata += timed; budget -= records.size; pictureBudget -= timed
+        if (records.size == 4) measurement.add(VideoMeasurement.BATCH_CAP)
+        if (budget == 0) measurement.add(VideoMeasurement.CREDIT_END)
         if (plan.confirmationRoom) {
             val rows = confirmation()
             // BUSY marks an accepted replay/future NAL without an ordered room
@@ -202,11 +235,92 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
         measurement.add(VideoMeasurement.BYTES, count = payload)
         return true
     }
+
+    /** Reserve every later NAL and timed picture against both PRIMARY grants.
+     * A grant at S predates those later submissions even when their ACKs arrived
+     * first. Never reuse history, old attempts, stale grants or uncertain epochs. */
+    private fun acceptRoom(sequence: Int, rows: Array<ByteArray>?, ageMs: Long) {
+        checkEpoch()
+        if (rows == null) { measurement.add(VideoMeasurement.ROOM_MISSING); return }
+        if (ageMs !in 0..500) { measurement.add(VideoMeasurement.ROOM_STALE); return }
+        if (!canReuse() || sequence <= lastRoomSequence || rows.size != 2 ||
+            rows.any { it.size != 6 || u(it[5]) and 31 != 0 }) {
+            measurement.add(VideoMeasurement.ROOM_REJECT); return
+        }
+        check(sequence in 0 until index) { "Room grant is ahead of submitted NALs" }
+        val available = creditBudget(rows) // Retain the fatal owner/epoch/window checks.
+        val later = index - sequence - 1
+        while (timedReservations.isNotEmpty() && timedReservations.first() <= sequence) timedReservations.removeFirst()
+        budget = maxOf(0, minOf(available, rows.minOf { u(it[4]) and 7 } - later))
+        pictureBudget = maxOf(0, rows.minOf { u(it[5]) shr TIMELINE_ROOM_SHIFT } - timedReservations.size)
+        consumed = rows.minOf { word(it, 0) }; leftConsumed = word(rows[0], 0); rightConsumed = word(rows[1], 0)
+        creditAt = measurement.now() - ageMs * 1_000_000; lastRoomSequence = sequence
+        measurement.add(VideoMeasurement.ROOM_ACCEPT)
+        progressSink?.invoke()
+    }
+
+    private fun stepFlow(shouldContinue: () -> Boolean): Boolean {
+        val first = index
+        measurement.time(VideoMeasurement.PIPELINE) {
+            roomFlow!!({
+                checkEpoch()
+                val starts = !done && plan.pictures.getOrNull(metadata)?.source == source(index)
+                if (done || !shouldContinue()) null
+                else if (budget == 0) { measurement.add(VideoMeasurement.CREDIT_END); null }
+                else if (starts && pictureBudget == 0) { measurement.add(VideoMeasurement.TIMELINE_WAIT); null }
+                else {
+                    val bytes = measurement.time(VideoMeasurement.READ) { read(source(index)) }; checkEpoch()
+                    require(bytes.size in 1..4086) { "Complete NAL exceeds advertised limit" }
+                    // Oversized timed records need a separately fenced metadata command.
+                    if (starts && TIMED_HEADER + bytes.size > 4096) null
+                    else measurement.time(VideoMeasurement.BUILD) {
+                        val sequence = index
+                        val record = if (starts) timedRecord(sequence, metadata + 1, bytes) else nalRecord(sequence, bytes)
+                        index++; budget--
+                        if (starts) { metadata++; pictureBudget--; timedReservations.addLast(sequence) }
+                        measurement.add(VideoMeasurement.NALS)
+                        measurement.add(VideoMeasurement.BYTES, count = bytes.size.toLong())
+                        progressSink?.invoke()
+                        record
+                    }
+                }
+            }, ::acceptRoom, { shouldContinue() && !done }, measurement)
+        }
+        if (index == first && shouldContinue() && !done && budget > 0 && pictureBudget > 0) {
+            // Nothing is pending here; only the large-record metadata fallback
+            // can need the legacy batch builder. It never overlaps a query.
+            return stepOversized(shouldContinue)
+        }
+        blocked = index == first
+        return index != first
+    }
+    private fun stepOversized(shouldContinue: () -> Boolean): Boolean {
+        checkEpoch()
+        if (!shouldContinue()) return false
+        val bytes = measurement.time(VideoMeasurement.READ) { read(source(index)) }
+        require(bytes.size in (4096 - TIMED_HEADER + 1)..4086)
+        if (!metadataAccepted(metadataCommand(metadata + 1, index))) { blocked = true; return false }
+        metadata++; pictureBudget--
+        val result = pipeline(arrayOf(nalRecord(index, bytes)), arrayOfNulls(1)); checkEpoch()
+        require(result.contentEquals(intArrayOf(1, 0))) { "Invalid video pipeline completion" }
+        index++; budget--
+        measurement.add(VideoMeasurement.NALS); measurement.add(VideoMeasurement.BYTES, count = bytes.size.toLong())
+        return true
+    }
     /** Finish exactly one existing native pipeline batch before any writer handoff. */
     fun step(shouldContinue: () -> Boolean = { true }): Boolean {
         checkEpoch(); blocked = false; waitKind = VideoMeasurement.ZERO_CREDIT
         if (done) return false
-        if (plan.timed) return stepTimed(shouldContinue)
+        if (plan.timed) {
+            var result = false
+            batch { result = stepTimed(shouldContinue) }
+            return result
+        }
+        var result = false
+        batch { result = stepUntimed(shouldContinue) }
+        return result
+    }
+    private fun stepUntimed(shouldContinue: () -> Boolean): Boolean {
         if (budget == 0 && !credits(shouldContinue)) return false
         val first = plan.pictures.getOrNull(metadata)
         if (first?.source == source(index)) {
@@ -239,6 +353,8 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
         require(admitted in 0..expected && (admitted == expected || admitted == expected - 1 && following[sent - 1] != null) &&
             (sent == count || admitted != expected)) { "Invalid video pipeline completion" }
         index += sent; metadata += admitted; budget -= sent
+        if (sent == 4) measurement.add(VideoMeasurement.BATCH_CAP)
+        if (budget == 0) measurement.add(VideoMeasurement.CREDIT_END)
         measurement.add(VideoMeasurement.NALS, count = sent.toLong())
         measurement.add(VideoMeasurement.BYTES, count = records.take(sent).sumOf { it.size - 10 }.toLong())
         return true
@@ -281,17 +397,20 @@ class VideoUploadPump internal constructor(create: () -> VideoUploadEngine) {
             IntArray(prefix.length()) { prefix.getInt(it) }, json.getInt("firstNal"), json.getInt("count"),
             (0 until pictures.length()).map { i -> pictures.getJSONObject(i).let { VideoUploadPicture(it.getInt("nal"), it.getLong("pts")) } },
             json.optBoolean("timed", false), json.optBoolean("confirmationRoom", false))
+        val stats = VideoMeasurement()
         VideoUploadEngine(config, reader.nalCount(), reader::readNalBytes, identities::reserveNow,
             { check(transport.epoch == epoch) { "Video connection generation changed; restart at IDR" } },
             { transport.exchange(it, 6, 3, ingressLeft, 5, epoch) },
-            { records, following -> transport.pipeline(records, following, 3, ingressLeft, epoch) },
-            canReuse = { transport.creditReuseSafe(epoch) }, confirmation = transport::takeConfirmationCredits)
+            { records, following -> transport.pipelineMeasured(records, following, 3, ingressLeft, epoch, stats) },
+            measurement = stats, canReuse = { transport.creditReuseSafe(epoch) }, confirmation = transport::takeConfirmationCredits,
+            roomFlow = { next, grant, keep, meter -> transport.flow(next, grant, keep, meter, ingressLeft, epoch) })
     })
 
     init {
         Thread({
             try {
                 val engine = create()
+                engine.progressSink = { synchronized(monitor) { publishProgress(engine) } }
                 synchronized(monitor) { this.engine = engine }
                 while (true) {
                     synchronized(monitor) {
@@ -306,10 +425,7 @@ class VideoUploadPump internal constructor(create: () -> VideoUploadEngine) {
                     while (synchronized(monitor) { requested && !closed }) {
                         engine.step { synchronized(monitor) { requested && !closed } }
                         synchronized(monitor) {
-                            progress = "\"index\":${engine.index},\"metadata\":${engine.metadata},\"consumed\":${engine.consumed}," +
-                                "\"budget\":${engine.budget},\"blocked\":${engine.blocked}," +
-                                "\"consumedL\":${engine.leftConsumed},\"consumedR\":${engine.rightConsumed}," +
-                                "\"creditAgeMs\":${if (engine.creditAt == 0L) -1 else (engine.measurement.now() - engine.creditAt) / 1_000_000}"
+                            publishProgress(engine)
                             if (engine.done) requested = false
                             else if (engine.blocked && requested && !closed) {
                                 val from = engine.measurement.now()
@@ -323,6 +439,13 @@ class VideoUploadPump internal constructor(create: () -> VideoUploadEngine) {
                 synchronized(monitor) { failure = error.message ?: error.javaClass.simpleName }
             } finally { synchronized(monitor) { closed = true; running = false; monitor.notifyAll() } }
         }, "video-upload").apply { isDaemon = true; start() }
+    }
+    /** Called on the native writer, under the monitor; no JS callback/poll. */
+    private fun publishProgress(engine: VideoUploadEngine) {
+        progress = "\"index\":${engine.index},\"metadata\":${engine.metadata},\"consumed\":${engine.consumed}," +
+            "\"budget\":${engine.budget},\"blocked\":${engine.blocked}," +
+            "\"consumedL\":${engine.leftConsumed},\"consumedR\":${engine.rightConsumed}," +
+            "\"creditAgeMs\":${if (engine.creditAt == 0L) -1 else (engine.measurement.now() - engine.creditAt) / 1_000_000}"
     }
     fun resumeUpload() = synchronized(monitor) {
         if (failure.isEmpty()) check(!closed) { "Video upload pump closed" }
