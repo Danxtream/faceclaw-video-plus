@@ -44,6 +44,22 @@ test('Failure evidence remains available when only final cleanup fails', async (
   assert.deepEqual(queried, [[1, 0], [1, 1], [2, 0], [2, 1]]);
 });
 
+test('A PACE whose reply is lost is dropped for the next turn, but other PACE failures still end playback', async () => {
+  for (const [message, dropped] of [['java.lang.IllegalStateException: Video query unavailable: op=25 waiting=page0', true],
+    ['Video owner credit window failed', false]]) {
+    const f = fixture(), lines = [], old = console.error;
+    Object.assign(f.player, {paceMode: 'on', masterStarted: true, audioClock: {heard: () => 0},
+      lensClocks: [1, 2].map(() => ({tickAt: at => at + 5000, rate: 1}))});
+    f.player.generation = {stream: 1, tokens: [101, 102], reached: true, idr: 0};
+    f.protocol.pace = async () => { throw new Error(message); };
+    console.error = line => lines.push(line);
+    try {
+      if (dropped) { await f.player.pace(); assert.ok(lines.some(line => line.includes('Video pace dropped'))); }
+      else await assert.rejects(f.player.pace(), /credit window/);
+    } finally { console.error = old; }
+  }
+});
+
 test('Flagged report credits retain six-picture room and reject impossible seven', async () => {
   const f = fixture(); let room = 6; let offered = 0;
   f.player.generation = {stream: 1, tokens: [101, 102], index: 0,

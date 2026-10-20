@@ -739,15 +739,26 @@ export class VideoPlayback {
       pts: this.source.clip.pictures.slice(g.idr).map((picture) => picture.pts), clocks: this.lensClocks, latency });
     if (!plan) return;
     const began = this.clock();
-    const rows = await this.protocol.pace(g.stream, g.tokens, plan.ordinal, plan.ticks)
-      .finally(() => this.measurement?.span(began, this.clock(), "pacing"));
+    let rows: Uint8Array[];
+    try {
+      rows = await this.protocol.pace(g.stream, g.tokens, plan.ordinal, plan.ticks)
+        .finally(() => this.measurement?.span(began, this.clock(), "pacing"));
+    } catch (error) {
+      // A lost PACE reply costs one correction: the next report turn re-paces.
+      if (this.stopping || !String(error).includes("Video query unavailable:")) throw error;
+      console.error(`Video pace dropped ordinal=${plan.ordinal}: ${error}`);
+      return;
+    }
     // STALE is a race with STOP or seek; FORMAT means a malformed command.
     if (rows.some((row) => row[1] !== VIDEO.pace || (row[2] && row[2] !== 2))) throw new Error("Video PACE refused");
     // The coordinator applies it on its next loop pass; age copies from slightly after the reply.
     this.paces.push({ ordinal: plan.ordinal, ticks: plan.ticks, applied: this.lensClocks[1].tickAt(this.clock() + 50) ?? 0 });
     if (this.paces.length > 4) this.paces.shift();
+    // The reply carries each lens's last shown picture time: the real picture-to-sound gap.
+    const positions = rows.map((row) => row.length >= 28 ? videoU32(row, 24) : -1);
+    const shown = positions.join("/");
     console.error(`Video pace ordinal=${plan.ordinal} dueIn=${Math.round(plan.due - now)}ms heard=${Math.round(heard)} ` +
-      `rate=${this.lensClocks[1].rate.toFixed(4)} latency=${latency}`);
+      `rate=${this.lensClocks[1].rate.toFixed(4)} latency=${latency} lensShown=${shown} offset=${this.audioOffsetMs}`);
   }
   /** RIGHT copy minus commanded due tick for an on-time picture: the steady display-path delay. */
   private learnPaceLatency(row: VideoShown): void {
@@ -774,7 +785,8 @@ export class VideoPlayback {
       if (now - this.stallSince >= 1000 && now - this.skippedAt >= 4000 && target > video + 1000 &&
           target < this.source.clip.duration - 500 && !this.intents.some((intent) => intent.kind === "skip")) {
         this.skippedAt = now;
-        console.error(`Video skip: picture ${Math.round(heard - this.audioOffsetMs - video)}ms behind audio, restart at ${target}`);
+        console.error(`Video skip: picture ${Math.round(heard - this.audioOffsetMs - video)}ms behind audio, restart at ${target} ` +
+          `heard=${Math.round(heard)} video=${Math.round(video)} decodedPts=${this.consumedPts()} lastShown=${this.lastShownOrdinal}`);
         this.intents.push({ kind: "skip", value: target, resolve: () => {}, reject: () => {} });
       }
     } else this.stallSince = null;
