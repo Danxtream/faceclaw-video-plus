@@ -71,6 +71,8 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
             "\"length\":${row.length},\"checksum\":${row.checksum}}"
     }
     val done get() = index == plan.count
+    /** Status queries ride in the confirmation-room flow; other paths still need a fence. */
+    val ridesQueries get() = plan.timed && plan.confirmationRoom && roomFlow != null
     init {
         require(plan.stream in 1..0xfffffffeL && plan.tokens.size == 2 && plan.tokens.all { it in 1..0xffffffffL })
         require(plan.count > 0 && plan.prefix.size <= 2 && plan.prefix.all { it in 0 until nalCount } && plan.firstNal in 0 until nalCount &&
@@ -443,7 +445,7 @@ class VideoUploadPump internal constructor(create: () -> VideoUploadEngine) {
     /** Called on the native writer, under the monitor; no JS callback/poll. */
     private fun publishProgress(engine: VideoUploadEngine) {
         progress = "\"index\":${engine.index},\"metadata\":${engine.metadata},\"consumed\":${engine.consumed}," +
-            "\"budget\":${engine.budget},\"blocked\":${engine.blocked}," +
+            "\"budget\":${engine.budget},\"blocked\":${engine.blocked},\"rides\":${engine.ridesQueries}," +
             "\"consumedL\":${engine.leftConsumed},\"consumedR\":${engine.rightConsumed}," +
             "\"creditAgeMs\":${if (engine.creditAt == 0L) -1 else (engine.measurement.now() - engine.creditAt) / 1_000_000}"
     }

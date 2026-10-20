@@ -28,6 +28,8 @@ class VideoSubmission internal constructor(
     internal var accepted = 0
     internal val room = arrayOfNulls<ByteArray>(2)
     internal var listed = false
+    /** A status query carried in a running flow's window; see [FaceclawVideoTransport.exchange]. */
+    internal var riding = false
     internal var delivered = false
     internal var failure: String? = null
     internal val queuedAt = System.nanoTime()
@@ -84,6 +86,15 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
     @Volatile internal var evidenceReserve: (() -> Long)? = null
     private var collectingEvidence = false
     private var refusalEvidenceTargets = 0
+    /* A running flow holds the writer for as long as it streams. A status
+     * query issued meanwhile rides in one of its three window slots instead of
+     * stopping and draining it. Anything that needs an empty window waits for
+     * the rider's record to be acknowledged. */
+    private var flowing = false
+    private var flowReserving = false
+    private var ridersWaiting = 0
+    /** Changes whenever a rider takes or frees a slot, so a waiting flow re-checks its window. */
+    private var riderEvents = 0
     private class Operation(val epoch: Long) {
         var complete = false
         var result = ""
@@ -268,6 +279,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         confirmedRooms = null
         var admitted = 0
         synchronized(monitor) {
+            if (pending.any { it.riding }) await(generation, deadline) { pending.none { it.riding } }
             check(epoch == generation) { "Video generation retired before submission" }
             check(pending.isEmpty()) { "Video record window is not fenced" }
         }
@@ -319,7 +331,8 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
 
     /** Refill the existing three-record writer window from validated paired
      * grants. No query or new notification is introduced. A control/report
-     * handoff stops the producer and drains every exact attempt before return. */
+     * handoff stops the producer and drains every exact attempt before return.
+     * A status query from another thread may take one of the three slots. */
     internal fun flow(next: () -> ByteArray?, grant: (Int, Array<ByteArray>?, Long) -> Unit,
         keep: () -> Boolean, stats: VideoMeasurement, ingressLeft: Boolean, generation: Long) = writer.withLock {
         val live = mutableListOf<VideoSubmission>()
@@ -327,7 +340,8 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         var deadline = System.nanoTime() + 15_000_000_000L
         confirmedRooms = null
         synchronized(monitor) {
-            check(epoch == generation && pending.isEmpty()) { "Video record window is not fenced" }
+            check(epoch == generation && pending.all { it.riding }) { "Video record window is not fenced" }
+            flowing = true
         }
         try {
             while (true) {
@@ -349,8 +363,14 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                 val continuing = keep()
                 // Bound sequence distance too: out-of-order completions must not
                 // run past the oldest unconfirmed record's replay window.
-                val window = live.size < 3 && (live.isEmpty() || sequence + 1 - u32(live.first().payload, 6) < 3)
-                val payload = if (continuing && window) next() else null
+                val window = continuing && live.size < 3 &&
+                    (live.isEmpty() || sequence + 1 - u32(live.first().payload, 6) < 3) &&
+                    synchronized(monitor) {
+                        // Reserve the slot before reading; a waiting rider gets the next free one.
+                        (pending.count { !it.delivered } < if (ridersWaiting > 0) 2 else 3).also { flowReserving = it }
+                    }
+                val payload = if (window) next() else null
+                if (payload == null && window) synchronized(monitor) { flowReserving = false; monitor.notifyAll() }
                 if (payload != null) {
                     require(payload.size in 11..4096 && unsigned(payload[0]) == MESSAGE && unsigned(payload[1]) in listOf(28, 29))
                     require(unsigned(payload[1]) != 29 || payload.size > VideoUploadEngine.TIMED_HEADER)
@@ -360,6 +380,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                     val record = VideoSubmission(payload.copyOf(), 3, ingressLeft, generation, this)
                     synchronized(monitor) {
                         check(epoch == generation) { "Video generation retired before enqueue" }
+                        flowReserving = false
                         pending.add(record); live.add(record)
                     }
                     sequence = current
@@ -367,14 +388,17 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                     continue
                 }
                 if (live.isEmpty()) break
+                val seen = synchronized(monitor) { riderEvents }
                 stats.time(if (!continuing) VideoMeasurement.FENCE_WAIT else if (!window) VideoMeasurement.WINDOW_WAIT else VideoMeasurement.PRODUCER_WAIT) {
-                    await(generation, deadline) { live.any { it.delivered } }
+                    await(generation, deadline) { live.any { it.delivered } || continuing && riderEvents != seen }
                 }
             }
         } finally {
             synchronized(monitor) {
+                flowing = false; flowReserving = false
                 live.forEach { recordMeasurement.finished(it.timing) }
                 pending.removeAll(live.toSet())
+                monitor.notifyAll()
             }
             flushRefusalEvidence(ingressLeft, generation)
         }
@@ -507,14 +531,27 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
 
     private fun send(records: Array<ByteArray>, targets: Int, ingressLeft: Boolean,
                      generation: Long = epoch, deadline: Long = System.nanoTime() + 15_000_000_000L,
-                     overlap: Boolean = false): IntArray {
-        require(targets in 1..3 && records.size in 1..4)
+                     overlap: Boolean = false, riding: Boolean = false): IntArray {
+        require(targets in 1..3 && records.size in 1..4 && (!riding || records.size == 1))
         require(records.all { it.size in 2..4096 && unsigned(it[0]) == MESSAGE })
-        val submitted = records.map { VideoSubmission(it.copyOf(), targets, ingressLeft, generation, this) }
+        val submitted = records.map { VideoSubmission(it.copyOf(), targets, ingressLeft, generation, this).also { r -> r.riding = riding } }
         synchronized(monitor) {
-            check(epoch == generation) { "Video generation retired before submission" }
-            check(pending.isEmpty() || overlap && pending.size + submitted.size <= 3) { "Video record window is not fenced" }
-            pending.addAll(submitted)
+            if (riding) {
+                // The flow holds itself to two records while a rider waits, so
+                // this takes at most one acknowledgement.
+                ridersWaiting++
+                try {
+                    await(generation, deadline) {
+                        pending.count { !it.delivered } + submitted.size + (if (flowReserving) 1 else 0) <= 3
+                    }
+                    pending.addAll(submitted)
+                } finally { ridersWaiting--; riderEvents++; monitor.notifyAll() }
+            } else {
+                if (pending.any { it.riding }) await(generation, deadline) { pending.none { it.riding } }
+                check(epoch == generation) { "Video generation retired before submission" }
+                check(pending.isEmpty() || overlap && pending.size + submitted.size <= 3) { "Video record window is not fenced" }
+                pending.addAll(submitted)
+            }
         }
         try {
             for (record in submitted) {
@@ -527,14 +564,27 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             synchronized(monitor) {
                 submitted.forEach { recordMeasurement.finished(it.timing) }
                 pending.removeAll(submitted.toSet())
+                if (riding) riderEvents++
+                monitor.notifyAll()
             }
         }
     }
 
-    /** Fetch bounded pages of one frozen command reply, preserving refusal evidence. */
+    /** Fetch bounded pages of one frozen command reply, preserving refusal evidence.
+     * Issued from another thread while a flow streams, it rides in the flow's
+     * window instead of waiting for the writer, so video keeps moving. */
     fun exchange(payload: ByteArray, length: Int, targets: Int, ingressLeft: Boolean, resultOffset: Int,
                  generation: Long = epoch, leading: Array<ByteArray> = emptyArray(), overlap: Boolean = false,
-                 deadline: Long = System.nanoTime() + 15_000_000_000L): Array<ByteArray> = writer.withLock {
+                 deadline: Long = System.nanoTime() + 15_000_000_000L): Array<ByteArray> {
+        val riding = leading.isEmpty() && !overlap && !writer.isHeldByCurrentThread &&
+            synchronized(monitor) { flowing && epoch == generation }
+        return if (riding) exchangeOnce(payload, length, targets, ingressLeft, resultOffset, generation, leading, overlap, deadline, true)
+        else writer.withLock { exchangeOnce(payload, length, targets, ingressLeft, resultOffset, generation, leading, overlap, deadline, false) }
+    }
+
+    private fun exchangeOnce(payload: ByteArray, length: Int, targets: Int, ingressLeft: Boolean, resultOffset: Int,
+                             generation: Long, leading: Array<ByteArray>, overlap: Boolean, deadline: Long,
+                             riding: Boolean): Array<ByteArray> {
         require(payload.size >= 8 && length in 1..192 && resultOffset in 0 until length)
         // A flagged credits request (op 10, 24 bytes) packs timeline room above its 5-bit result.
         val resultMask = if (unsigned(payload[1]) == 10 && payload.size == 24) 31 else 255
@@ -542,6 +592,9 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         require(id in 1..0xfffffffeL)
         require(leading.size <= 1 && leading.all { it.size in 11..4096 && unsigned(it[0]) == MESSAGE && unsigned(it[1]) == 6 })
         synchronized(monitor) {
+            // Replies are matched to one request at a time; a rider holds it briefly.
+            while (request != 0L && epoch == generation && deadline - System.nanoTime() > 0)
+                monitor.wait(minOf(100L, (deadline - System.nanoTime()) / 1_000_000L + 1))
             check(epoch == generation) { "Video query generation retired" }
             check(request == 0L) { "Video query already active" }
             request = id
@@ -555,8 +608,8 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         var complete = false
         var refusalTargets = 0
         var waiting = "transport ACK"
-        try {
-            val masks = send(leading + payload, targets, ingressLeft, generation, deadline, overlap)
+        return try {
+            val masks = send(leading + payload, targets, ingressLeft, generation, deadline, overlap, riding)
             check(masks.take(leading.size).all { it == targets }) { "Paired NAL transport refused" }
             val accepted = masks.last()
             val sides = (1..2).filter { targets and it != 0 }
@@ -586,7 +639,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                                 (id shr 16).toByte(), (id shr 24).toByte(), page.toByte()).copyInto(it)
                         }
                         val attemptAt = System.nanoTime()
-                        val acceptedPage = send(arrayOf(command), side, ingressLeft, generation, deadline)[0] == side
+                        val acceptedPage = send(arrayOf(command), side, ingressLeft, generation, deadline, riding = riding)[0] == side
                         measurement.add(VideoMeasurement.PAGE, System.nanoTime() - attemptAt)
                         if (acceptedPage) break
                         measurement.add(VideoMeasurement.REFUSAL)
@@ -633,18 +686,18 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         } finally {
             measurement.add(VideoMeasurement.QUERY, System.nanoTime() - began)
             if (!complete) measurement.add(VideoMeasurement.FAILURE)
-            synchronized(monitor) { request = 0; pages.clear() }
-            if (!collectingEvidence && epoch == generation) {
-                refusalEvidenceTargets = refusalEvidenceTargets or refusalTargets
-                if (!overlap) flushRefusalEvidence(ingressLeft, generation)
+            synchronized(monitor) {
+                request = 0; pages.clear(); monitor.notifyAll()
+                if (!collectingEvidence && epoch == generation) refusalEvidenceTargets = refusalEvidenceTargets or refusalTargets
             }
+            // A rider leaves its evidence to the writer's next fenced point.
+            if (!overlap && !riding) flushRefusalEvidence(ingressLeft, generation)
         }
     }
 
     private fun flushRefusalEvidence(ingressLeft: Boolean, generation: Long) {
         if (collectingEvidence || epoch != generation) return
-        val targets = refusalEvidenceTargets
-        refusalEvidenceTargets = 0
+        val targets = synchronized(monitor) { refusalEvidenceTargets.also { refusalEvidenceTargets = 0 } }
         if (targets != 0) collectRefusalEvidence(targets, ingressLeft, generation)
     }
 

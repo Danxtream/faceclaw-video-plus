@@ -56,6 +56,93 @@ class VideoTransportTest {
         }
     }
 
+    private fun query(id: Int) = byteArrayOf(31, 25, 1, 0, id.toByte(), 0, 0, 0)
+    private fun answer(f: Fixture, record: VideoSubmission, left: Boolean) {
+        val id = VideoUploadEngine.word(record.payload, 4)
+        for (side in 1..2) { f.page(id, side, 0, 1, byteArrayOf(1, 25, 0, side.toByte(), 0, 0), left); f.ack(record, side) }
+    }
+
+    @Test fun statusQueryRidesInARunningFlowWithoutDrainingItOrExceedingThree() {
+        for (left in listOf(true, false)) {
+            val f = Fixture(); val worker = Executors.newFixedThreadPool(2)
+            var sent = 0; var keep = true; val nals = mutableListOf<VideoSubmission>()
+            f.respond = { record ->
+                if (record.payload[1].toInt() == 25) {
+                    // Two video records at most share the window with the query.
+                    assertTrue(synchronized(nals) { nals.count { !it.delivered } } <= 2)
+                    answer(f, record, left)
+                } else synchronized(nals) { nals.add(record) }
+            }
+            try {
+                val flow = worker.submit { f.transport.flow({ if (keep) nal(sent++).also { it[1] = 28 } else null },
+                    { _, _, _ -> }, { keep }, VideoMeasurement(), left, 1) }
+                val first = List(3) { f.records.poll(1, TimeUnit.SECONDS)!! }
+                val reply = worker.submit<Array<ByteArray>> { f.transport.exchange(query(90), 6, 3, left, 2) }
+                assertEquals(null, f.records.poll(150, TimeUnit.MILLISECONDS), "The window is full until one ACK")
+                f.ack(first[0], 1); f.ack(first[0], 2)
+                assertEquals(25, f.records.poll(1, TimeUnit.SECONDS)!!.payload[1].toInt(), "The freed slot goes to the query")
+                assertEquals(2, reply.get(1, TimeUnit.SECONDS).size)
+                assertFalse(flow.isDone, "The flow kept running through the query")
+                // The flow refills the query's slot and keeps going.
+                assertEquals(28, f.records.poll(1, TimeUnit.SECONDS)!!.payload[1].toInt())
+                keep = false
+                while (!flow.isDone) {
+                    synchronized(nals) { nals.filter { !it.delivered } }.forEach { f.ack(it, 1); f.ack(it, 2) }
+                    Thread.sleep(5)
+                }
+                flow.get(1, TimeUnit.SECONDS)
+            } finally { worker.shutdownNow() }
+        }
+    }
+
+    @Test fun writerAndNextQueryWaitForARiderInsteadOfFailing() {
+        for (left in listOf(true, false)) {
+            val f = Fixture(); val worker = Executors.newFixedThreadPool(2)
+            var sent = 0
+            f.respond = null
+            try {
+                val flow = worker.submit { f.transport.flow({ if (sent == 0) nal(sent++).also { it[1] = 28 } else null },
+                    { _, _, _ -> }, { true }, VideoMeasurement(), left, 1) }
+                val video = f.records.poll(1, TimeUnit.SECONDS)!!
+                val reply = worker.submit<Array<ByteArray>> { f.transport.exchange(query(91), 6, 3, left, 2) }
+                val rider = f.records.poll(1, TimeUnit.SECONDS)!!
+                assertEquals(25, rider.payload[1].toInt())
+                f.ack(video, 1); f.ack(video, 2); flow.get(1, TimeUnit.SECONDS)
+                // The flow has ended but the rider's record is still unacknowledged.
+                f.respond = { record -> f.ack(record, 1); f.ack(record, 2) }
+                val batch = worker.submit<IntArray> { f.transport.pipeline(arrayOf(nal(5)), arrayOf(null), 3, left) }
+                assertEquals(null, f.records.poll(50, TimeUnit.MILLISECONDS), "The batch waits for the rider's record")
+                assertFalse(batch.isDone)
+                f.ack(rider, 1); f.ack(rider, 2)
+                assertContentEquals(intArrayOf(1, 0), batch.get(1, TimeUnit.SECONDS))
+                // The rider still holds the single reply slot: a fenced query waits for it.
+                f.respond = { record -> answer(f, record, left) }
+                val next = worker.submit<Array<ByteArray>> { f.transport.exchange(query(92), 6, 3, left, 2) }
+                Thread.sleep(50)
+                assertFalse(next.isDone)
+                for (side in 1..2) f.page(91, side, 0, 1, byteArrayOf(1, 25, 0, side.toByte(), 0, 0), left)
+                assertEquals(2, reply.get(1, TimeUnit.SECONDS).size)
+                assertEquals(2, next.get(1, TimeUnit.SECONDS).size)
+            } finally { worker.shutdownNow() }
+        }
+    }
+
+    @Test fun retirementFailsAWaitingRiderAndItsFlow() {
+        for (left in listOf(true, false)) {
+            val f = Fixture(); val worker = Executors.newFixedThreadPool(2); var sent = 0
+            try {
+                val flow = worker.submit { f.transport.flow({ nal(sent++).also { it[1] = 28 } },
+                    { _, _, _ -> }, { true }, VideoMeasurement(), left, 1) }
+                repeat(3) { f.records.poll(1, TimeUnit.SECONDS)!! }
+                val reply = worker.submit<Array<ByteArray>> { f.transport.exchange(query(93), 6, 3, left, 2) }
+                Thread.sleep(30)
+                f.transport.retire("seek")
+                assertFails { reply.get(1, TimeUnit.SECONDS) }
+                assertFails { flow.get(1, TimeUnit.SECONDS) }
+            } finally { worker.shutdownNow() }
+        }
+    }
+
     @Test fun metadataPipelineAcceptsSixRoomsButNotSevenOnBothIngresses() {
         for (left in listOf(true, false)) for (room in listOf(6, 7)) {
             val f = Fixture()
