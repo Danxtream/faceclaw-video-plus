@@ -2,16 +2,24 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { VideoProtocol, VideoReportUnavailable, VIDEO, parseVideoStatus, videoU32 } = require('../.test-build/app/apps/video/video-protocol');
 
-test('Confirmation room requires both base capabilities and adds no discovery query', async () => {
-  for (const sides of [[0,0],[128,0],[128,128]]) {
+test('Confirmation room requires both base capabilities and adds only the queue-size query', async () => {
+  for (const [sides, deep] of [[[0,0],true],[[128,0],true],[[128,128],true],[[128,128],false]]) {
     let calls=0, plan;
     const p=new VideoProtocol({epoch:()=>1,exchange:async(raw,length)=>{
       calls++;
+      if (raw[1]===7) {
+        // Firmware with a deeper queue echoes subtype 11; older firmware sends its generic status.
+        assert.equal(raw[8],11); assert.equal(length,128);
+        return [1,2].map(side=>{const row=deep ? new Uint8Array(128) : status().slice(0,128);
+          if (deep) row.set([1,7,0,11,4,side===1 ? 12 : 13,12,side]); return row;});
+      }
       return raw[1]===13 ? [1,2].map(()=>Uint8Array.from([1,13,0,255,194,7,255,255,...Array(8).fill(0)])) :
         sides.map(bit=>{const row=status().slice(0,length);row[71]=bit;return row;});
     },createUploadPump:(_,value)=>{plan=value;}},()=>calls+1);
     await p.capabilities(); p.createUploadPump({},{});
-    assert.equal(calls,2); assert.equal(plan.confirmationRoom,sides.every(x=>x===128));
+    const room=sides.every(x=>x===128);
+    assert.equal(calls,room ? 3 : 2); assert.equal(plan.confirmationRoom,room);
+    assert.equal(plan.queueCapacity,room && deep ? 12 : 6); assert.equal(p.queueCapacity,plan.queueCapacity);
   }
 });
 

@@ -305,6 +305,21 @@ class VideoUploadPumpTest {
         assertEquals(1,queries); assertEquals(10,engine.index)
     }
 
+    @Test fun extendedQueueKeepsSendingPastSixOutstandingOnlyWithItsAdvertisedCapacity() {
+        for (capacity in listOf(6, 12)) {
+            val engine = VideoUploadEngine(plan(20).copy(queueCapacity = capacity), 20, { byteArrayOf(0x61) }, { 1 }, {},
+                { command ->
+                    // The lenses have consumed nothing and report the legacy six free slots.
+                    val row = if (command[1].toInt() == 10) reply(0, 46) else reply(word(command, 12), 1)
+                    arrayOf(row, row)
+                }, { records, following -> intArrayOf(records.size, following.count { it != null }) },
+                VideoMeasurement { 0 })
+            repeat(6) { engine.step() }
+            assertEquals(capacity, engine.index)
+        }
+        assertFails { plan().copy(queueCapacity = 16) }
+    }
+
     @Test fun mismatchedStaleRefusedUncertainOrRetiredHandoffsNeverCreateCredits() {
         var now = 1_000_000_000L; var live = true; var safe = true; var queries = 0
         val engine = VideoUploadEngine(plan(),8,{byteArrayOf(0x61)},{1},{check(live)},

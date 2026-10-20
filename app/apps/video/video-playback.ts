@@ -34,7 +34,7 @@ export type VideoPlaybackView = {
   cleanupFailed: boolean;
   hostPhy: string;
 };
-type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement" | "timedNal" | "slices" | "pace" | "failureDiagnostics" | "heapDiagnostics" | "memoryEvidence">>;
+type Protocol = Pick<VideoProtocol, "capabilities" | "status" | "radioSelection" | "timeline" | "start" | "owned" | "metadata" | "sendNals" | "shown" | "phy"> & Partial<Pick<VideoProtocol, "sendNalsWithMetadata" | "sendPipeline" | "createUploadPump" | "clockEvidence" | "rateEvidenceRows" | "measurementSnapshot" | "beginMeasurement" | "timedNal" | "slices" | "queueCapacity" | "pace" | "failureDiagnostics" | "heapDiagnostics" | "memoryEvidence">>;
 type Intent = { kind: "pause" | "seek" | "scale" | "menu" | "skip"; value: number | boolean; resolve: () => void; reject: (error: unknown) => void };
 type Generation = { stream: number; tokens: number[]; idr: number; target: number; prefix: number[]; firstNal: number; index: number; count: number; metadata: number; paused: boolean; reached: boolean; oldPhy: VideoPhy[]; started: number; anchor: VideoPhy[]; anchorAt: number; anchorUncertainty: number; detailedReports: boolean; pump?: VideoUploadPump };
 
@@ -524,7 +524,8 @@ export class VideoPlayback {
     const expected = credit.map((raw) => videoU32(raw, 0));
     let budget = 6;
     for (let side = 0; side < 2; side++) {
-      const packed = credit[side][4], state = packed >>> 4 & 7, capacity = packed & 8 ? 6 : 4, free = packed & 7;
+      const packed = credit[side][4], state = packed >>> 4 & 7, free = packed & 7;
+      const capacity = packed & 8 ? this.protocol.queueCapacity ?? 6 : 4;
       if (credit[side][5] & (timed ? 31 : 255) || (timed && (credit[side][5] >>> 5) > 6) ||
           packed & 128 || state !== 2 || free > capacity || expected[side] > g.index || g.index - expected[side] > capacity)
         throw new Error("Video owner credit window failed");

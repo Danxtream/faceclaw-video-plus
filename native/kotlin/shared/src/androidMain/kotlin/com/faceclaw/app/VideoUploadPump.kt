@@ -8,7 +8,9 @@ internal data class VideoNalEvidence(val sequence: Int, val source: Int, val typ
     val length: Int, val checksum: Long)
 internal data class VideoUploadPlan(val stream: Long, val tokens: LongArray, val prefix: IntArray,
     val firstNal: Int, val count: Int, val pictures: List<VideoUploadPicture>, val timed: Boolean = false,
-    val confirmationRoom: Boolean = false)
+    val confirmationRoom: Boolean = false, val queueCapacity: Int = 6) {
+    init { require(queueCapacity in 6..15) { "Invalid video queue capacity" } }
+}
 
 internal typealias VideoRoomFlow = (() -> ByteArray?, (Int, Array<ByteArray>?, Long) -> Unit,
     () -> Boolean, VideoMeasurement) -> Unit
@@ -108,7 +110,8 @@ internal class VideoUploadEngine(private val plan: VideoUploadPlan, nalCount: In
         var available = 6
         for ((side, raw) in credit.withIndex()) {
             val expected = word(raw, 0)
-            val packed = u(raw[4]); val capacity = if (packed and 8 != 0) 6 else 4; val free = packed and 7
+            // Flag 8: the queue grew past four slots, to six on older firmware.
+            val packed = u(raw[4]); val capacity = if (packed and 8 != 0) plan.queueCapacity else 4; val free = packed and 7
             check(u(raw[5]) and resultMask == 0 && (!plan.timed || (u(raw[5]) shr TIMELINE_ROOM_SHIFT) <= 6) &&
                 packed and 128 == 0 && (packed shr 4 and 7) == 2 && free <= capacity &&
                 expected <= index && index - expected <= capacity &&
@@ -398,7 +401,7 @@ class VideoUploadPump internal constructor(create: () -> VideoUploadEngine) {
         val config = VideoUploadPlan(json.getLong("stream"), longArrayOf(json.getJSONArray("tokens").getLong(0), json.getJSONArray("tokens").getLong(1)),
             IntArray(prefix.length()) { prefix.getInt(it) }, json.getInt("firstNal"), json.getInt("count"),
             (0 until pictures.length()).map { i -> pictures.getJSONObject(i).let { VideoUploadPicture(it.getInt("nal"), it.getLong("pts")) } },
-            json.optBoolean("timed", false), json.optBoolean("confirmationRoom", false))
+            json.optBoolean("timed", false), json.optBoolean("confirmationRoom", false), json.optInt("queueCapacity", 6))
         val stats = VideoMeasurement()
         VideoUploadEngine(config, reader.nalCount(), reader::readNalBytes, identities::reserveNow,
             { check(transport.epoch == epoch) { "Video connection generation changed; restart at IDR" } },

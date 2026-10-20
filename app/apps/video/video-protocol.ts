@@ -81,10 +81,13 @@ export class VideoProtocol {
   private geometry = false;
   private pictureStyle = false;
   private multiSlice = false;
+  private extendedQueue = 6;
   /** Both lenses accept a picture's frame time inside its VCL NAL record. */
   get timedNal(): boolean { return this.timed; }
   /** Both lenses decode pictures split into several slices (large-keyframe clips). */
   get slices(): boolean { return this.multiSlice; }
+  /** NAL slots both lenses hold once their queue reports itself extended (credit flag 8). */
+  get queueCapacity(): number { return this.extendedQueue; }
   constructor(private readonly backend: VideoBackend, private readonly reserve: () => number | Promise<number>) {
     this.epoch = backend.epoch();
   }
@@ -94,7 +97,7 @@ export class VideoProtocol {
   createUploadPump(reader: unknown, plan: VideoUploadPlan): VideoUploadPump | undefined {
     this.check();
     return reader === undefined ? undefined : this.backend.createUploadPump?.(reader, {...plan, timed: this.timed,
-      confirmationRoom: this.confirmationRoom});
+      confirmationRoom: this.confirmationRoom, queueCapacity: this.extendedQueue});
   }
   private async header(op: number, bytes: number): Promise<Uint8Array> {
     this.check();
@@ -160,7 +163,20 @@ export class VideoProtocol {
     this.pictureStyle = rows.every(row => !!(row[4] & 64));
     // Bit 8 of byte 7 was reserved before multi-slice pictures; older firmware leaves it clear.
     this.multiSlice = rows.every(row => !!(row[7] & 8));
+    this.extendedQueue = this.confirmationRoom ? await this.queueSize() : 6;
     this.backend.configureEvidence?.(this.evidence);
+  }
+  /** Credits and room reports stop at six for older apps; firmware with a deeper
+   *  queue states its real size in diagnostics subtype 11. Older firmware answers
+   *  with a generic status whose byte 3 is a lifecycle state, so it stays six. */
+  private async queueSize(): Promise<number> {
+    try {
+      const raw = await this.header(7, 12); raw[8] = 11;
+      const rows = await this.query(raw, 128);
+      if (rows.every(row => row[0] === 1 && row[1] === 7 && !row[2] && row[3] === 11 && row[4] === 4 && row[5] >= 6 && row[5] <= 15))
+        return Math.min(...rows.map(row => row[5]));
+    } catch (error) { console.error(`Video queue size unavailable, using six: ${error}`); }
+    return 6;
   }
   measurementSnapshot(): unknown { return this.backend.measurementSnapshot?.() ?? null; }
   /** Retained allocation-time minima only; called at retirement or failure. */

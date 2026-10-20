@@ -7,6 +7,8 @@ export type VideoUploadPlan = {
   /** Send each picture's VCL NAL with its frame time (firmware capability). */
   timed?: boolean;
   confirmationRoom?: boolean;
+  /** NAL slots behind the extended-queue credit flag; six on older firmware. */
+  queueCapacity?: number;
 };
 export type VideoUploadProgress = {
   index: number; metadata: number; consumed: number; budget: number;
