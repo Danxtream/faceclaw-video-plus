@@ -164,9 +164,9 @@ export class VideoProtocol {
   }
   measurementSnapshot(): unknown { return this.backend.measurementSnapshot?.() ?? null; }
   /** Retained allocation-time minima only; called at retirement or failure. */
-  async memoryEvidence(stream: number, side: number): Promise<Uint8Array> {
+  async memoryEvidence(stream: number, side: number, shape = false): Promise<Uint8Array> {
     if (![1, 2].includes(side)) throw new Error("Invalid video memory lens");
-    const raw = await this.header(7, 16); raw[8] = 9; put(raw, 12, stream);
+    const raw = await this.header(7, 16); raw[8] = shape ? 10 : 9; put(raw, 12, stream);
     return (await this.query(raw, 128, side))[0];
   }
   /** Query each lens independently so an unavailable peer cannot hide evidence. */

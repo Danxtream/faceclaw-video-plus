@@ -1,6 +1,6 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {videoMemoryLines}=require('../.test-build/app/apps/video/video-memory');
+const {videoMemoryLines,videoHeapShapeLines}=require('../.test-build/app/apps/video/video-memory');
 const {VideoPlayback}=require('../.test-build/app/apps/video/video-playback');
 const {VideoProtocol}=require('../.test-build/app/apps/video/video-protocol');
 function row(side=1) {
@@ -28,8 +28,20 @@ test('Memory queries are independent and run only once at terminal hooks, not re
     await VideoPlayback.prototype.logMemoryEvidence.call(fake);
     await VideoPlayback.prototype.logMemoryEvidence.call(fake);
   } finally {console.error=old;}
-  assert.deepEqual(calls,[1,2]);assert.ok(lines.some(x=>x.includes('side=1 unavailable')));
+  assert.deepEqual(calls,[1,1,2,2]);assert.ok(lines.some(x=>x.includes('side=1 unavailable')));
   assert.ok(lines.some(x=>x.includes('side=2 heap=cached')));
+});
+
+test('Queue extension distinguishes legacy absence and unknown fields; shape is identity checked',()=>{
+  const raw=row(),v=new DataView(raw.buffer);
+  assert.equal(videoMemoryLines(raw,50,101,1).length,3);
+  v.setUint16(30,1,true);v.setUint16(20,150,true);v.setUint16(24,65535,true);
+  assert.match(videoMemoryLines(raw,50,101,1)[3],/syncWaiting=150.*uartRxBytes=unavailable/);
+  raw[3]=10;v.setUint32(32,1,true);v.setUint32(36,200,true);v.setUint32(40,180,true);
+  v.setUint32(56,58000,true);
+  assert.match(videoHeapShapeLines(raw,50,101,1)[0],/usedBlocks=200.*smallUsedLe512=180.*58000/);
+  v.setUint32(32,2,true);assert.match(videoHeapShapeLines(raw,50,101,1)[0],/heap-lock-busy/);
+  assert.throws(()=>videoHeapShapeLines(raw,51,101,1),/identity/);
 });
 test('Retained heap request carries exact stream and lens without adding periodic work',async()=>{
   let seen;

@@ -3,7 +3,7 @@ import { type VideoUploadPump, type VideoUploadProgress } from "./video-upload";
 import { VideoAvSync, videoAvOptions, type VideoAvAction } from "./video-av-sync";
 import { VideoAudioClock, VideoLensClock, videoPacePlan, videoPaceSpan, videoSkipTarget } from "./video-pacing";
 import { VideoMeasurement } from "./video-measurement";
-import { videoMemoryLines } from "./video-memory";
+import { videoMemoryLines, videoHeapShapeLines } from "./video-memory";
 import { videoMeasurementLogs } from "./video-measurement-log";
 import { videoFailureLines, videoNalChecksum, type VideoNalEvidence } from "./video-failure";
 import { VIDEO, VideoProtocol, VideoReportUnavailable, videoStaleError, videoU32, type VideoStatus } from "./video-protocol";
@@ -53,6 +53,10 @@ export class VideoPlayback {
         const raw = await this.protocol.memoryEvidence(g.stream, side);
         for (const line of videoMemoryLines(raw, g.stream, g.tokens[side - 1], side)) console.error(line);
       } catch (error) { console.error(`Video memory stream=${g.stream} side=${side} unavailable=${error}`); }
+      try {
+        const raw = await this.protocol.memoryEvidence(g.stream, side, true);
+        for (const line of videoHeapShapeLines(raw, g.stream, g.tokens[side - 1], side)) console.error(line);
+      } catch (error) { console.error(`Video memory shape stream=${g.stream} side=${side} unavailable=${error}`); }
     }
   }
 
