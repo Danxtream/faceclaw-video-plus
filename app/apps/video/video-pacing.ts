@@ -116,6 +116,22 @@ export function videoPacePlan(input: {
 }
 
 /**
+ * How far the picture is behind the audio, in media milliseconds. The phone's
+ * estimate alone can drift while the lenses play on time, and a restart blanks
+ * the picture for about two seconds; a fresh report of the lenses' last shown
+ * picture (from a PACE reply, assumed to have kept playing since) must agree.
+ */
+export function videoStallBehind(input: {
+  now: number; heard: number; offset: number; estimate: number;
+  lens: { pts: number; at: number } | null; maxAgeMs?: number;
+}): number {
+  const { now, heard, offset, estimate, lens, maxAgeMs = 3000 } = input;
+  const behind = heard - offset - estimate;
+  if (!lens || now - lens.at < 0 || now - lens.at > maxAgeMs) return behind;
+  return Math.min(behind, heard - offset - (lens.pts + (now - lens.at)));
+}
+
+/**
  * Where to restart a stalled picture so it lands on the audio: the picture at
  * `milliseconds` when its keyframe is at most `maxPreroll` pictures back
  * (decode-only catch-up), otherwise the next keyframe after it.

@@ -1,7 +1,7 @@
 import { videoSeekPoint, type VideoSource } from "./video-clip";
 import { type VideoUploadPump, type VideoUploadProgress } from "./video-upload";
 import { VideoAvSync, videoAvOptions, type VideoAvAction } from "./video-av-sync";
-import { VideoAudioClock, VideoLensClock, videoPacePlan, videoPaceSpan, videoSkipTarget } from "./video-pacing";
+import { VideoAudioClock, VideoLensClock, videoPacePlan, videoPaceSpan, videoSkipTarget, videoStallBehind } from "./video-pacing";
 import { VideoMeasurement } from "./video-measurement";
 import { videoMemoryLines, videoHeapShapeLines } from "./video-memory";
 import { videoMeasurementLogs } from "./video-measurement-log";
@@ -130,6 +130,8 @@ export class VideoPlayback {
   private paces: { ordinal: number; ticks: [number, number]; applied: number }[] = [];
   private paceLatency: number[] = [];
   private lastShownOrdinal = 0;
+  /** Both lenses' last shown picture time from the newest PACE reply, and when it arrived. */
+  private lensShown: { pts: number; at: number } | null = null;
   private stallSince: number | null = null;
   private skippedAt = Number.NEGATIVE_INFINITY;
   private positionShownAt = 0;
@@ -354,7 +356,7 @@ export class VideoPlayback {
     this.progressAt = this.clock(); this.progress = -1;
     this.lastSeek = 0;
     this.av = this.audio.position ? new VideoAvSync(this.source.clip.duration, videoAvOptions(this.source.clip.fps)) : null;
-    this.paces = []; this.lastShownOrdinal = 0; this.stallSince = null;
+    this.paces = []; this.lastShownOrdinal = 0; this.stallSince = null; this.lensShown = null;
     this.rate = { at: this.clock(), sent: 0, consumed: Math.max(0, this.consumed), sentPictures: 0, consumedPictures: 0, drops: 0 };
     this.measurement = new VideoMeasurement(stream, this.generation.tokens, this.source.clip.fps);
     this.nativeMeasurement = null;
@@ -756,6 +758,7 @@ export class VideoPlayback {
     if (this.paces.length > 4) this.paces.shift();
     // The reply carries each lens's last shown picture time: the real picture-to-sound gap.
     const positions = rows.map((row) => row.length >= 28 ? videoU32(row, 24) : -1);
+    if (positions.every((pts) => pts >= 0)) this.lensShown = { pts: Math.min(...positions), at: this.clock() };
     const shown = positions.join("/");
     console.error(`Video pace ordinal=${plan.ordinal} dueIn=${Math.round(plan.due - now)}ms heard=${Math.round(heard)} ` +
       `rate=${this.lensClocks[1].rate.toFixed(4)} latency=${latency} lensShown=${shown} offset=${this.audioOffsetMs}`);
@@ -776,7 +779,9 @@ export class VideoPlayback {
   private async followAudio(now: number): Promise<void> {
     this.audioClock.add(now, this.audio.position!());
     const heard = this.audioClock.heard(now), video = this.av!.video(now);
-    if (heard !== null && video !== null && heard - this.audioOffsetMs - video > VIDEO_STALL_SKIP_MS) {
+    const behind = heard === null || video === null ? null :
+      videoStallBehind({ now, heard, offset: this.audioOffsetMs, estimate: video, lens: this.lensShown });
+    if (heard !== null && video !== null && behind !== null && behind > VIDEO_STALL_SKIP_MS) {
       this.stallSince ??= now;
       // Restarting takes about two seconds; land the new picture just ahead of the audio.
       const target = videoSkipTarget(this.source.clip, heard - this.audioOffsetMs + 2000, 2 * this.source.clip.fps);
@@ -785,8 +790,9 @@ export class VideoPlayback {
       if (now - this.stallSince >= 1000 && now - this.skippedAt >= 4000 && target > video + 1000 &&
           target < this.source.clip.duration - 500 && !this.intents.some((intent) => intent.kind === "skip")) {
         this.skippedAt = now;
-        console.error(`Video skip: picture ${Math.round(heard - this.audioOffsetMs - video)}ms behind audio, restart at ${target} ` +
-          `heard=${Math.round(heard)} video=${Math.round(video)} decodedPts=${this.consumedPts()} lastShown=${this.lastShownOrdinal}`);
+        const lens = this.lensShown ? `${this.lensShown.pts}@${Math.round(now - this.lensShown.at)}ms` : "none";
+        console.error(`Video skip: picture ${Math.round(behind)}ms behind audio, restart at ${target} ` +
+          `heard=${Math.round(heard)} video=${Math.round(video)} lens=${lens} decodedPts=${this.consumedPts()} lastShown=${this.lastShownOrdinal}`);
         this.intents.push({ kind: "skip", value: target, resolve: () => {}, reject: () => {} });
       }
     } else this.stallSince = null;

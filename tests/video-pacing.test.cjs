@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { VideoLensClock, VideoAudioClock, videoPaceSpan, videoPacePlan, videoSkipTarget } = require('../.test-build/app/apps/video/video-pacing');
+const { VideoLensClock, VideoAudioClock, videoPaceSpan, videoPacePlan, videoSkipTarget, videoStallBehind } = require('../.test-build/app/apps/video/video-pacing');
 
 // A deterministic generator keeps the jitter repeatable.
 function random(seed) { return () => (seed = (seed * 1103515245 + 12345) >>> 0) / 0x100000000; }
@@ -69,4 +69,16 @@ test('A stalled picture restarts at the audio, or at the next keyframe when the 
   assert.equal(videoSkipTarget(clip, 8_400, 20), 8_400);   // keyframe at 8 s: 4 pictures of preroll
   assert.equal(videoSkipTarget(clip, 12_000, 20), 16_000); // 40 pictures back to its keyframe: next one
   assert.equal(videoSkipTarget(clip, 99_000, 20), 29_900); // past the end and no later keyframe: last picture
+});
+
+test('A stall restart needs a fresh lens report to agree', () => {
+  // The phone estimate drifted 1.6 s behind while the lenses reported on-time pictures 0.5 s ago.
+  const base = {now: 10_000, heard: 50_000, offset: 0, estimate: 48_400};
+  assert.equal(videoStallBehind({...base, lens: {pts: 49_400, at: 9_500}}), 100);
+  // A stalled lens reports the same old picture: the restart still goes ahead.
+  assert.equal(videoStallBehind({...base, lens: {pts: 47_000, at: 9_500}}), 1_600);
+  // Without a fresh report the estimate decides, as before.
+  assert.equal(videoStallBehind({...base, lens: null}), 1_600);
+  assert.equal(videoStallBehind({...base, lens: {pts: 49_400, at: 6_000}}), 1_600);
+  assert.equal(videoStallBehind({...base, offset: 200, lens: {pts: 49_400, at: 9_500}}), -100);
 });
