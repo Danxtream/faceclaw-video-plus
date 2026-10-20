@@ -389,6 +389,51 @@ test('Native upload progress fences every JS report/control and recreates only a
   assert.equal(f.player.view.cleanupFailed, false); assert.equal(f.closed(), true);
 });
 
+test('A riding native flow keeps streaming through passive reports but fences SHOWN and skips room queries', async () => {
+  const f = fixture(60), source = f.player.source, sleep = f.player.sleep;
+  source.uploadHandle = 'audited-reader'; source.readNal = async () => { throw new Error('JS must not read native-pumped NALs'); };
+  let pump, native = false;
+  const rode = [], fenced = [];
+  f.protocol.rateEvidenceRows = async () => null;
+  for (const [name, method] of Object.entries(f.protocol)) {
+    f.protocol[name] = async (...args) => {
+      if (!native) (pump?.row.running ? rode : fenced).push(name === 'owned' ? `owned:${args[0]}` : name);
+      return method(...args);
+    };
+  }
+  f.protocol.createUploadPump = (reader, plan) => {
+    const p = {row: {index: 0, metadata: 0, consumed: -1, budget: 0, blocked: false, running: false, error: '', rides: true},
+      requested: false, closed: false, plan,
+      resume() {this.requested = true; this.row.running = this.row.index < plan.count;},
+      pause() {this.requested = false;}, snapshot() {return {...this.row};},
+      close() {assert.equal(this.row.running, false); this.closed = true;}};
+    pump = p; return p;
+  };
+  f.player.sleep = async ms => {
+    await sleep(ms);
+    if (!pump?.row.running) return;
+    const {row, plan} = pump;
+    native = true;
+    try {
+      const index = row.index < plan.prefix.length ? plan.prefix[row.index] : plan.firstNal + row.index - plan.prefix.length;
+      const next = plan.pictures[row.metadata];
+      if (next?.nal === index) {
+        assert.equal(await f.protocol.metadata(plan.stream, row.metadata + 1, row.index, next.pts), true); row.metadata++;
+      }
+      await f.protocol.sendNals(plan.stream, row.index, [Uint8Array.of(f.clip.h264.nals[index].type | 0x60, index)]);
+      row.index++; row.consumed = row.index; row.budget = 3;
+      await f.protocol.owned(VIDEO.credits, plan.stream, plan.tokens, 6);
+      row.running = pump.requested && row.index < plan.count;
+    } finally { native = false; }
+  };
+  await f.player.run();
+  assert.equal(f.player.view.error, null); assert.equal(f.copied(), 60);
+  assert.ok(rode.includes('rateEvidenceRows'), 'Statistics ride along with the flow');
+  assert.ok(!rode.includes('shown'), 'SHOWN times the lens clock and stays fenced');
+  assert.ok(fenced.includes('shown'));
+  assert.ok(!rode.includes(`owned:${VIDEO.credits}`), 'The flow learns room itself while riding');
+});
+
 test('Native pump failure still fences and attempts STOP and original PHY restoration', async () => {
   const f = fixture(5); let closed = false;
   f.protocol.createUploadPump = () => ({resume() {}, pause() {}, close() {closed = true;},

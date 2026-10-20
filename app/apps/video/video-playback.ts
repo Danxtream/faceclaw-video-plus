@@ -115,6 +115,7 @@ export class VideoPlayback {
   private ended = false;
   private consumed = -1;
   private creditBudget = 0;
+  private pumpRides = false;
   private metadataStaged = false;
   private av: VideoAvSync | null = null;
   private audioOffsetMs = 0;
@@ -176,6 +177,7 @@ export class VideoPlayback {
         typeof row.running !== "boolean" || typeof row.blocked !== "boolean" || typeof row.error !== "string")
       throw new Error("Invalid native upload progress");
     g.index = row.index; g.metadata = row.metadata; this.creditBudget = row.budget;
+    this.pumpRides = row.rides === true;
     if (row.consumed > this.consumed) { this.consumed = row.consumed; this.progressAt = this.clock(); }
     if (row.error) throw new Error(row.error);
     this.nativeMeasurement = {timing: row.measurement ?? null, consumedL: row.consumedL,
@@ -348,7 +350,7 @@ export class VideoPlayback {
     this.reportDue = 0;
     this.reportAt = this.clock();
     this.shownDue = 0; this.ended = false; this.consumed = -1;
-    this.creditBudget = 0;
+    this.creditBudget = 0; this.pumpRides = false;
     this.progressAt = this.clock(); this.progress = -1;
     this.lastSeek = 0;
     this.av = this.audio.position ? new VideoAvSync(this.source.clip.duration, videoAvOptions(this.source.clip.fps)) : null;
@@ -877,16 +879,27 @@ export class VideoPlayback {
     catch (error) { if (required || !this.deferReport(error, began)) throw error; }
     finally { this.measurement?.span(began, this.clock(), "report"); }
   }
+  /** Passive reports may ride in a running native flow instead of stopping it:
+   * a stopped sender drained the lenses' few hundred milliseconds of pictures. */
+  private reportsRide(): boolean {
+    const g = this.generation;
+    return !!g?.pump && this.pumpRides && g.reached && !g.detailedReports && !this.view.paused && g.index < g.count;
+  }
   /** One passive step per blocked or stale turn; recheck input before the next. */
   private async reportStep(): Promise<void> {
-    await this.suspendUpload();
+    // SHOWN replies also time the lens clock from their round trip, so they
+    // stay fenced; the turn is kept short and pacing waits for the next one.
+    const couldRide = this.reportsRide(), riding = couldRide && this.clock() < this.shownDue;
+    if (!riding) await this.suspendUpload();
     const g = this.generation!;
     const began = this.clock();
     this.reportAt = began; this.reportDue = began + 1500;
+    let brief = false;
     if (this.view.paused && g.reached && !g.detailedReports) {
       await this.credits();
     } else if (began >= this.shownDue) {
       this.shownDue = began + 5000;
+      brief = couldRide;
       if (g.detailedReports) {
         if (!await this.observe()) this.shownDue = began;
         this.updatePlayback(await this.playback());
@@ -918,9 +931,10 @@ export class VideoPlayback {
         }
       }
     } else if (g.index === g.count) this.updatePlayback(await this.playback());
-    else await this.credits();
-    if (!this.view.paused) await this.pace();
-    await this.collectMeasurement();
+    // A riding flow learns room from every acknowledgement and asks itself when full.
+    else if (!riding) await this.credits();
+    if (!this.view.paused && !brief) await this.pace();
+    if (!brief) await this.collectMeasurement();
     if (this.view.paused) await this.pauseAudio();
     this.notify();
   }

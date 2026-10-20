@@ -11,6 +11,8 @@ export type VideoUploadPlan = {
 export type VideoUploadProgress = {
   index: number; metadata: number; consumed: number; budget: number;
   blocked: boolean; running: boolean; error: string;
+  /** The native flow carries status queries in its own window, so reports need no fence. */
+  rides?: boolean;
   consumedL?: number; consumedR?: number; creditAgeMs?: number; measurement?: unknown;
 };
 
