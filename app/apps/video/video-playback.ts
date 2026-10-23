@@ -423,10 +423,15 @@ export class VideoPlayback {
     return (await this.protocol.owned(op, g.stream, g.tokens, op === VIDEO.menu || op === VIDEO.scale ? 48 : 36, value))
       .map((raw, i) => parsePlayback(raw, i + 1, g.stream, g.tokens[i]));
   }
+  /** Newer firmware retired the clock snapshot; after one refusal, stop asking this session. */
+  private clockEvidenceGone = false;
   private async clockEvidence(phase: number): Promise<void> {
-    if (!this.protocol.clockEvidence) return;
+    if (!this.protocol.clockEvidence || this.clockEvidenceGone) return;
     try { await this.protocol.clockEvidence(phase); }
-    catch (error) { console.error(`Video clock evidence unavailable phase=${phase}: ${error}`); }
+    catch (error) {
+      this.clockEvidenceGone = true;
+      console.error(`Video clock evidence unavailable phase=${phase}; not asked again this session: ${error}`);
+    }
   }
   private async settle(paused?: boolean): Promise<VideoPlaybackState[]> {
     const deadline = this.clock() + 30_000;
