@@ -4,6 +4,7 @@ import java.util.concurrent.locks.ReentrantLock
 import java.nio.ByteBuffer
 import java.security.SecureRandom
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.withLock
 
 /** Missing transport evidence, not an invalid owner, reply or decoder state. */
@@ -152,6 +153,14 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             ?: throw IllegalStateException("Video record generation retired")
         val bit = if (record.ingressLeft) 1 else 2
         (uncertainContexts and bit != 0).also { uncertainContexts = uncertainContexts and bit.inv() }
+    }
+
+    /** [targetsFor] plus [WRITE_RESET] when [needsContextReset], or -1 once the
+     * sender has given up on the record. One call, so a sender giving up between
+     * the writer's pick and its write cannot fail the session. */
+    fun writePlan(message: OutboundMessage): Int = synchronized(monitor) {
+        if (pending.none { it.message === message && it.epoch == epoch }) return -1
+        (if (needsContextReset(message)) WRITE_RESET else 0) or targetsFor(message)
     }
 
     /** Remove native queue entries only after every selected lens answered exactly. */
@@ -595,13 +604,26 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
     fun exchange(payload: ByteArray, length: Int, targets: Int, ingressLeft: Boolean, resultOffset: Int,
                  generation: Long = epoch, leading: Array<ByteArray> = emptyArray(), overlap: Boolean = false,
                  deadline: Long = System.nanoTime() + 15_000_000_000L): Array<ByteArray> {
-        val riding = leading.isEmpty() && !overlap && !writer.isHeldByCurrentThread &&
-            synchronized(monitor) { flowing && epoch == generation }
-        // A rider answers in tens of milliseconds; a lost one is dropped by its
-        // report turn, so it must not hold the reply slot for long.
-        return if (riding) exchangeOnce(payload, length, targets, ingressLeft, resultOffset, generation, leading, overlap,
-            minOf(deadline, System.nanoTime() + RIDER_DEADLINE_NS), true)
-        else writer.withLock { exchangeOnce(payload, length, targets, ingressLeft, resultOffset, generation, leading, overlap, deadline, false) }
+        if (leading.isNotEmpty() || overlap || writer.isHeldByCurrentThread)
+            return writer.withLock { exchangeOnce(payload, length, targets, ingressLeft, resultOffset, generation, leading, overlap, deadline, false) }
+        val began = System.nanoTime()
+        // A flow lets the writer go between bursts. A query that arrives in such a
+        // gap must not queue behind the next burst while its deadline runs out:
+        // it takes the writer if it frees up, or rides once a flow streams again.
+        while (true) {
+            // A rider answers in tens of milliseconds; a lost one is dropped by its
+            // report turn, so it must not hold the reply slot for long.
+            if (synchronized(monitor) { flowing && epoch == generation })
+                return exchangeOnce(payload, length, targets, ingressLeft, resultOffset, generation, leading, overlap,
+                    minOf(deadline, System.nanoTime() + RIDER_DEADLINE_NS), true)
+            if (writer.tryLock(WRITER_POLL_MS, TimeUnit.MILLISECONDS)) {
+                try { return exchangeOnce(payload, length, targets, ingressLeft, resultOffset, generation, leading, overlap, deadline, false) }
+                finally { writer.unlock() }
+            }
+            check(epoch == generation) { "Video query generation retired" }
+            if (deadline - System.nanoTime() <= 0) throw VideoQueryUnavailable("op=${unsigned(payload[1])} " +
+                "targets=$targets waiting=writer elapsedMs=${(System.nanoTime() - began) / 1_000_000}")
+        }
     }
 
     private fun exchangeOnce(payload: ByteArray, length: Int, targets: Int, ingressLeft: Boolean, resultOffset: Int,
@@ -805,6 +827,11 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         private const val REFUSED_REPLY_WAIT_NS = 300_000_000L
         /** The longest a riding status query may take, from its turn to its reply. */
         private const val RIDER_DEADLINE_NS = 1_000_000_000L
+        /** How often a query waiting for the writer looks for a flow to ride. */
+        private const val WRITER_POLL_MS = 10L
+        /** [writePlan] bits: the record's lens mask, and whether to reset the ingress inflater first. */
+        const val WRITE_TARGETS = 3
+        const val WRITE_RESET = 4
         private fun unsigned(value: Byte) = value.toInt() and 255
         private fun u16(data: ByteArray, offset: Int) = unsigned(data[offset]) or (unsigned(data[offset + 1]) shl 8)
         private fun u32(data: ByteArray, offset: Int): Long =

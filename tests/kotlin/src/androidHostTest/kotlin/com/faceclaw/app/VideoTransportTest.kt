@@ -170,7 +170,7 @@ class VideoTransportTest {
             try {
                 while (!stopIo.get()) {
                     val record = f.records.poll(5, TimeUnit.MILLISECONDS) ?: continue
-                    f.transport.needsContextReset(record.message!!); f.transport.targetsFor(record.message!!)
+                    if (f.transport.writePlan(record.message!!) < 0) continue
                     record.written(); acks.add(record)
                 }
             } catch (error: Throwable) { errors.add(error) }
@@ -189,18 +189,26 @@ class VideoTransportTest {
             } catch (error: Throwable) { errors.add(error) }
         }
         var sequence = 0L
+        fun video() = ByteArray(11).also { u32(50, 2, it); u32(sequence++, 6, it); it[0] = 31; it[1] = 28; it[10] = 0x65 }
         val flow = Thread {
             try {
-                while (!stop.get()) f.transport.flow({
-                    if (stop.get()) null else ByteArray(11).also { u32(50, 2, it); u32(sequence++, 6, it); it[0] = 31; it[1] = 28; it[10] = 0x65 }
-                }, { _, _, _ -> }, { !stop.get() }, VideoMeasurement(), true, 1)
+                while (!stop.get()) {
+                    var burst = 0
+                    f.transport.flow({ if (stop.get() || burst++ >= 40) null else video() },
+                        { _, _, _ -> }, { !stop.get() }, VideoMeasurement(), true, 1)
+                    // Between bursts the pump holds the writer outside any flow.
+                    if (!stop.get()) f.transport.pipeline(arrayOf(video()), arrayOf(null), 3, true)
+                }
             } catch (error: Throwable) { if (!stop.get()) errors.add(error) }
         }
-        var id = 1000L
+        var id = 1000L; var answered = 0
         val riders = Thread {
             while (!stop.get()) {
                 val command = ByteArray(8).also { it[0] = 31; it[1] = 25; it[2] = 1; u32(id++, 4, it) }
-                try { f.transport.exchange(command, 6, 3, true, 2) } catch (_: VideoQueryUnavailable) {}
+                // Report evidence queries have short deadlines; give half of them one.
+                val deadline = System.nanoTime() + if (id % 2 == 0L) 300_000_000L else 15_000_000_000L
+                try { f.transport.exchange(command, 6, 3, true, 2, deadline = deadline); answered++ }
+                catch (_: VideoQueryUnavailable) {}
                 catch (error: Throwable) { if (!stop.get()) errors.add(error) }
             }
         }
@@ -214,6 +222,55 @@ class VideoTransportTest {
         assertTrue(errors.isEmpty(), "Writer or flow failed: ${errors.firstOrNull()}")
         assertTrue(stuck.isEmpty(), "The flow and queries finished; stuck:\n$stuck")
         assertTrue(sequence > 100, "The flow kept streaming: $sequence NALs")
+        assertTrue(answered > 20, "Queries kept getting through: $answered answered")
+    }
+
+    @Test fun aQueryBetweenFlowsRidesTheNextOneInsteadOfWaitingItOut() {
+        for (left in listOf(true, false)) {
+            val f = Fixture(); val worker = Executors.newFixedThreadPool(2)
+            val lenses = Executors.newSingleThreadScheduledExecutor()
+            val keep = java.util.concurrent.atomic.AtomicBoolean(true); var sent = 0
+            f.respond = { record ->
+                when (record.payload[1].toInt()) {
+                    25 -> answer(f, record, left)
+                    28 -> lenses.schedule({ f.ack(record, 1); f.ack(record, 2) }, 5, TimeUnit.MILLISECONDS)
+                }
+            }
+            try {
+                val pump = worker.submit {
+                    // The writer is held outside any flow, then the next flow streams on.
+                    f.transport.pipeline(arrayOf(nal(0)), arrayOf(null), 3, left)
+                    f.transport.flow({ if (keep.get()) nal(sent++).also { it[1] = 28 } else null },
+                        { _, _, _ -> }, { keep.get() }, VideoMeasurement(), left, 1)
+                }
+                val gap = f.records.poll(1, TimeUnit.SECONDS)!!
+                val reply = worker.submit<Array<ByteArray>> {
+                    f.transport.exchange(query(94), 6, 3, left, 2, deadline = System.nanoTime() + 2_000_000_000L)
+                }
+                Thread.sleep(30)
+                assertFalse(reply.isDone)
+                f.ack(gap, 1); f.ack(gap, 2)
+                assertEquals(2, reply.get(1, TimeUnit.SECONDS).size, "The query got through while the next flow streamed")
+                assertFalse(pump.isDone, "The next flow kept streaming")
+                keep.set(false); pump.get(1, TimeUnit.SECONDS)
+            } finally { worker.shutdownNow(); lenses.shutdownNow() }
+        }
+    }
+
+    @Test fun aQueryBehindABusyWriterGivesUpByItsDeadlineWithoutQueuingARecord() {
+        val f = Fixture(); val worker = Executors.newFixedThreadPool(2)
+        try {
+            val batch = worker.submit<IntArray> { f.transport.pipeline(arrayOf(nal(0)), arrayOf(null), 3, true) }
+            val held = f.records.poll(1, TimeUnit.SECONDS)!!
+            val reply = worker.submit<Array<ByteArray>> {
+                f.transport.exchange(query(96), 6, 3, true, 2, deadline = System.nanoTime() + 200_000_000L)
+            }
+            val failure = assertFailsWith<java.util.concurrent.ExecutionException> { reply.get(1, TimeUnit.SECONDS) }
+            assertTrue(failure.cause is VideoQueryUnavailable, "Expected an unavailable query: ${failure.cause}")
+            assertEquals(null, f.records.poll(50, TimeUnit.MILLISECONDS), "Nothing was left for the writer to trip over")
+            f.ack(held, 1); f.ack(held, 2)
+            assertContentEquals(intArrayOf(1, 0), batch.get(1, TimeUnit.SECONDS))
+        } finally { worker.shutdownNow() }
     }
 
     @Test fun aRiderThatGivesUpLeavesItsUnwrittenRecordUntracked() {
@@ -228,7 +285,11 @@ class VideoTransportTest {
             assertTrue(System.nanoTime() - began < 1_500_000_000L, "A rider must not hold the reply slot for its full deadline")
             val rider = f.records.poll(1, TimeUnit.SECONDS)!!
             assertFalse(f.transport.tracks(rider.message!!), "The writer drops the abandoned record instead of failing")
+            assertEquals(-1, f.transport.writePlan(rider.message!!), "Even when the writer already picked it")
             assertTrue(f.transport.tracks(video.message!!))
+            // The rider's timeout leaves its ingress context uncertain, so the next record resets it.
+            assertEquals(FaceclawVideoTransport.WRITE_RESET or 3, f.transport.writePlan(video.message!!))
+            assertEquals(3, f.transport.writePlan(video.message!!))
             f.ack(video, 1); f.ack(video, 2); flow.get(1, TimeUnit.SECONDS)
             assertFalse(f.transport.tracks(video.message!!))
         } finally { worker.shutdownNow() }
@@ -361,13 +422,16 @@ class VideoTransportTest {
     internal class Fixture {
         val records = LinkedBlockingQueue<VideoSubmission>()
         var next = 40
-        var respond: ((VideoSubmission) -> Unit)? = null
+        @Volatile var respond: ((VideoSubmission) -> Unit)? = null
         val transport = FaceclawVideoTransport(VideoRecordQueue { record ->
             val message = OutboundMessage("video", "test", 0xf0, 0, next++ and 255, record.payload, 100, -1, record.ingressLeft)
             record.message = message
             message.onAck = MessageCallback { record.delivered() }
+            // Take the responder before the test can see this record: one it sets
+            // after polling a record is meant for the records that follow.
+            val reply = respond
             records.add(record)
-            respond?.invoke(record)
+            reply?.invoke(record)
             true
         })
 

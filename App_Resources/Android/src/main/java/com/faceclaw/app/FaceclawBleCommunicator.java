@@ -2655,6 +2655,16 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
 
 
     private boolean writeMessage(OutboundMessage message) {
+        // A video sender can give up on its record after the loop picked it;
+        // read the record's plan once, before anything is committed to the write.
+        int videoPlan = message.sid == CfwTransport.SID && "video".equals(message.kind)
+                ? videoTransport.writePlan(message) : CfwTransport.BOTH;
+        if (videoPlan < 0) {
+            synchronized (lock) {
+                releaseAbandonedVideoLocked(message);
+            }
+            return true;
+        }
         long now = SystemClock.elapsedRealtime();
         message.writeStartedAtMs = now;
         message.sentAtMs = now;
@@ -2686,11 +2696,11 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
             prewrittenFrames = Collections.emptyList();
         } else if (message.sid == CfwTransport.SID) {
             if (message.cfwRetries > 0 ||
-                "video".equals(message.kind) && videoTransport.needsContextReset(message))
+                "video".equals(message.kind) && (videoPlan & FaceclawVideoTransport.WRITE_RESET) != 0)
                 cfwTransports[message.isLeftArmMessage ? 0 : 1].reset();
             frames = cfwTransports[message.isLeftArmMessage ? 0 : 1].encode(
                     message.message, message.magic,
-                    "video".equals(message.kind) ? videoTransport.targetsFor(message) : CfwTransport.BOTH,
+                    "video".equals(message.kind) ? videoPlan & FaceclawVideoTransport.WRITE_TARGETS : CfwTransport.BOTH,
                     bleManager.getNegotiatedMtu(writeAddress));
         } else {
             frames = BleProtocol.framePb(
@@ -3750,10 +3760,14 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
             OutboundMessage message = iterator.next();
             if (!"video".equals(message.kind) || videoTransport.tracks(message)) continue;
             iterator.remove();
-            discardPrewriteIfMatchesLocked(message);
-            magicPool.release(message.sid, message.magic, message.label, "video record abandoned");
-            logLine("video record abandoned before write: id=" + message.magic);
+            releaseAbandonedVideoLocked(message);
         }
+    }
+
+    private void releaseAbandonedVideoLocked(OutboundMessage message) {
+        discardPrewriteIfMatchesLocked(message);
+        magicPool.release(message.sid, message.magic, message.label, "video record abandoned");
+        logLine("video record abandoned before write: id=" + message.magic);
     }
 
     private void discardPrewriteIfMatchesLocked(OutboundMessage message) {
