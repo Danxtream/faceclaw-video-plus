@@ -162,7 +162,9 @@ class VideoTransportTest {
         val f = Fixture(); val stop = java.util.concurrent.atomic.AtomicBoolean(false)
         val stopIo = java.util.concurrent.atomic.AtomicBoolean(false)
         val errors = java.util.concurrent.ConcurrentLinkedQueue<Throwable>()
-        val random = java.util.Random(7)
+        // Longer soaks set VIDEO_STRESS_MS and VIDEO_STRESS_SEED; the default stays a quick check.
+        val runMs = System.getenv("VIDEO_STRESS_MS")?.toLong() ?: 3000L
+        val random = java.util.Random(System.getenv("VIDEO_STRESS_SEED")?.toLong() ?: 7L)
         fun u32(value: Long, at: Int, into: ByteArray) { for (i in 0..3) into[at + i] = (value shr (8 * i)).toByte() }
         val acks = LinkedBlockingQueue<VideoSubmission>()
         // Like the communicator: write in FIFO order, asking the transport about each record.
@@ -213,7 +215,7 @@ class VideoTransportTest {
             }
         }
         listOf(writer, lenses, flow, riders).forEach { it.isDaemon = true; it.start() }
-        Thread.sleep(3000); stop.set(true)
+        Thread.sleep(runMs); stop.set(true)
         listOf(flow, riders).forEach { it.join(5000) }
         val stuck = listOf(flow, riders).filter { it.isAlive }.joinToString("\n") { thread ->
             "${if (thread === flow) "flow" else "riders"}:\n" + thread.stackTrace.joinToString("\n") { "  at $it" }
