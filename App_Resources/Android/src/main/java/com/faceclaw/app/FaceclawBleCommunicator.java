@@ -2365,6 +2365,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
             synchronized (lock) {
                 drainCfwAcknowledgementsLocked();
                 videoTextureCacheGate.poll();
+                dropAbandonedVideoLocked();
                 if (cfwCleanupDelivered) {
                     /* Successful mode 11 must be the last Faceclaw write. Drop
                      * anything a late external producer attempted to enqueue
@@ -3735,6 +3736,23 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
             var message = inFlightMessages.removeFirst();
             discardImageUpdateStatsLocked(message.imageUpdateId, "inflight messages cleared: " + reason);
             magicPool.release(message.sid, message.magic, message.label, "cleared inflight: " + reason);
+        }
+    }
+
+    /**
+     * A video record the transport gave up on before it was written (its sender
+     * failed or retired) must not be sent. Drop it here instead of letting the
+     * write path fail the whole session.
+     */
+    private void dropAbandonedVideoLocked() {
+        Iterator<OutboundMessage> iterator = pendingMessages.iterator();
+        while (iterator.hasNext()) {
+            OutboundMessage message = iterator.next();
+            if (!"video".equals(message.kind) || videoTransport.tracks(message)) continue;
+            iterator.remove();
+            discardPrewriteIfMatchesLocked(message);
+            magicPool.release(message.sid, message.magic, message.label, "video record abandoned");
+            logLine("video record abandoned before write: id=" + message.magic);
         }
     }
 

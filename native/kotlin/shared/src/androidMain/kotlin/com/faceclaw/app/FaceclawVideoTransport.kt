@@ -132,6 +132,20 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         record.targets
     }
 
+    /** Whether a queued record still belongs to a live sender; the writer drops it otherwise. */
+    fun tracks(message: OutboundMessage): Boolean = synchronized(monitor) {
+        pending.any { it.message === message && it.epoch == epoch }
+    }
+
+    /** Called under the monitor wherever records leave [pending]. One still queued
+     * but never written is dropped by the writer; say which sender gave up on it. */
+    private fun forget(records: Collection<VideoSubmission>, by: String) {
+        for (record in records) if (record.writtenAt == 0L && !record.delivered && record in pending)
+            System.err.println("Video record abandoned before write by=$by op=${unsigned(record.payload[1])} " +
+                "riding=${record.riding} failure=${record.failure}")
+        pending.removeAll(records.toSet())
+    }
+
     /** A refused record invalidates the ingress inflater; reset on the writer. */
     fun needsContextReset(message: OutboundMessage): Boolean = synchronized(monitor) {
         val record = pending.firstOrNull { it.message === message && it.epoch == epoch }
@@ -328,7 +342,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         } finally {
             synchronized(monitor) {
                 submitted.forEach { recordMeasurement.finished(it.timing) }
-                pending.removeAll(submitted.toSet())
+                forget(submitted, "pipeline")
             }
             flushRefusalEvidence(ingressLeft, generation)
         }
@@ -402,7 +416,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
             synchronized(monitor) {
                 flowing = false; flowReserving = false
                 live.forEach { recordMeasurement.finished(it.timing) }
-                pending.removeAll(live.toSet())
+                forget(live, "flow")
                 monitor.notifyAll()
             }
             flushRefusalEvidence(ingressLeft, generation)
@@ -568,7 +582,7 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
         } finally {
             synchronized(monitor) {
                 submitted.forEach { recordMeasurement.finished(it.timing) }
-                pending.removeAll(submitted.toSet())
+                forget(submitted, if (riding) "rider" else "query")
                 if (riding) riderEvents++
                 monitor.notifyAll()
             }
@@ -583,7 +597,10 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                  deadline: Long = System.nanoTime() + 15_000_000_000L): Array<ByteArray> {
         val riding = leading.isEmpty() && !overlap && !writer.isHeldByCurrentThread &&
             synchronized(monitor) { flowing && epoch == generation }
-        return if (riding) exchangeOnce(payload, length, targets, ingressLeft, resultOffset, generation, leading, overlap, deadline, true)
+        // A rider answers in tens of milliseconds; a lost one is dropped by its
+        // report turn, so it must not hold the reply slot for long.
+        return if (riding) exchangeOnce(payload, length, targets, ingressLeft, resultOffset, generation, leading, overlap,
+            minOf(deadline, System.nanoTime() + RIDER_DEADLINE_NS), true)
         else writer.withLock { exchangeOnce(payload, length, targets, ingressLeft, resultOffset, generation, leading, overlap, deadline, false) }
     }
 
@@ -642,9 +659,10 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
                     "page=0 pages=$count attempt=1 elapsedMs=${(System.nanoTime() - began) / 1_000_000}")
             }
             waiting = "page0"
-            // A rider refused without a frozen reply gets none later; free the
-            // single reply slot quickly so the video flow is not held behind it.
-            val pageDeadline = if (riding && refusedEmpty) minOf(deadline, System.nanoTime() + RIDER_REFUSAL_WAIT_NS) else deadline
+            // A command refused without a frozen reply gets none later. Free the
+            // reply slot (and, off the flow, the writer) quickly so video is not
+            // held behind it.
+            val pageDeadline = if (refusedEmpty) minOf(deadline, System.nanoTime() + REFUSED_REPLY_WAIT_NS) else deadline
             await(generation, pageDeadline) { sides.all { Pair(it, 0) in pages } }
             val result = mutableListOf<ByteArray>()
             for (side in sides) {
@@ -783,8 +801,10 @@ class FaceclawVideoTransport(private val queue: VideoRecordQueue) {
     companion object {
         const val MESSAGE = 31
         const val VIDEO_REPLY_MAX_BYTES = 200
-        /** How long a refused rider waits for a reply page that a refusal never sends. */
-        private const val RIDER_REFUSAL_WAIT_NS = 300_000_000L
+        /** How long a refused command waits for a reply page that a refusal never sends. */
+        private const val REFUSED_REPLY_WAIT_NS = 300_000_000L
+        /** The longest a riding status query may take, from its turn to its reply. */
+        private const val RIDER_DEADLINE_NS = 1_000_000_000L
         private fun unsigned(value: Byte) = value.toInt() and 255
         private fun u16(data: ByteArray, offset: Int) = unsigned(data[offset]) or (unsigned(data[offset + 1]) shl 8)
         private fun u32(data: ByteArray, offset: Int): Long =

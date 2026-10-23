@@ -158,6 +158,82 @@ class VideoTransportTest {
         }
     }
 
+    @Test fun ridersAndFlowNeverDropARecordTheWriterHasNotSent() {
+        val f = Fixture(); val stop = java.util.concurrent.atomic.AtomicBoolean(false)
+        val stopIo = java.util.concurrent.atomic.AtomicBoolean(false)
+        val errors = java.util.concurrent.ConcurrentLinkedQueue<Throwable>()
+        val random = java.util.Random(7)
+        fun u32(value: Long, at: Int, into: ByteArray) { for (i in 0..3) into[at + i] = (value shr (8 * i)).toByte() }
+        val acks = LinkedBlockingQueue<VideoSubmission>()
+        // Like the communicator: write in FIFO order, asking the transport about each record.
+        val writer = Thread {
+            try {
+                while (!stopIo.get()) {
+                    val record = f.records.poll(5, TimeUnit.MILLISECONDS) ?: continue
+                    f.transport.needsContextReset(record.message!!); f.transport.targetsFor(record.message!!)
+                    record.written(); acks.add(record)
+                }
+            } catch (error: Throwable) { errors.add(error) }
+        }
+        // Like the lenses: answer in order after a short random delay; refuse a few queries.
+        val lenses = Thread {
+            try {
+                while (!stopIo.get()) {
+                    val record = acks.poll(5, TimeUnit.MILLISECONDS) ?: continue
+                    Thread.sleep(random.nextInt(4).toLong())
+                    val op = record.payload[1].toInt()
+                    if (op == 25 && random.nextInt(10) == 0) { f.ack(record, 1, success = false); f.ack(record, 2, success = false) }
+                    else if (op == 25) answer(f, record, true)
+                    else { f.ack(record, 1); f.ack(record, 2) }
+                }
+            } catch (error: Throwable) { errors.add(error) }
+        }
+        var sequence = 0L
+        val flow = Thread {
+            try {
+                while (!stop.get()) f.transport.flow({
+                    if (stop.get()) null else ByteArray(11).also { u32(50, 2, it); u32(sequence++, 6, it); it[0] = 31; it[1] = 28; it[10] = 0x65 }
+                }, { _, _, _ -> }, { !stop.get() }, VideoMeasurement(), true, 1)
+            } catch (error: Throwable) { if (!stop.get()) errors.add(error) }
+        }
+        var id = 1000L
+        val riders = Thread {
+            while (!stop.get()) {
+                val command = ByteArray(8).also { it[0] = 31; it[1] = 25; it[2] = 1; u32(id++, 4, it) }
+                try { f.transport.exchange(command, 6, 3, true, 2) } catch (_: VideoQueryUnavailable) {}
+                catch (error: Throwable) { if (!stop.get()) errors.add(error) }
+            }
+        }
+        listOf(writer, lenses, flow, riders).forEach { it.isDaemon = true; it.start() }
+        Thread.sleep(3000); stop.set(true)
+        listOf(flow, riders).forEach { it.join(5000) }
+        val stuck = listOf(flow, riders).filter { it.isAlive }.joinToString("\n") { thread ->
+            "${if (thread === flow) "flow" else "riders"}:\n" + thread.stackTrace.joinToString("\n") { "  at $it" }
+        }
+        stopIo.set(true); listOf(writer, lenses).forEach { it.join(1000) }
+        assertTrue(errors.isEmpty(), "Writer or flow failed: ${errors.firstOrNull()}")
+        assertTrue(stuck.isEmpty(), "The flow and queries finished; stuck:\n$stuck")
+        assertTrue(sequence > 100, "The flow kept streaming: $sequence NALs")
+    }
+
+    @Test fun aRiderThatGivesUpLeavesItsUnwrittenRecordUntracked() {
+        val f = Fixture(); val worker = Executors.newSingleThreadExecutor(); var sent = 0
+        try {
+            val flow = worker.submit { f.transport.flow({ if (sent == 0) nal(sent++).also { it[1] = 28 } else null },
+                { _, _, _ -> }, { true }, VideoMeasurement(), true, 1) }
+            val video = f.records.poll(1, TimeUnit.SECONDS)!!
+            // The writer never sends the query: it gives up within its riding deadline.
+            val began = System.nanoTime()
+            assertFailsWith<VideoQueryUnavailable> { f.transport.exchange(query(98), 6, 3, true, 2) }
+            assertTrue(System.nanoTime() - began < 1_500_000_000L, "A rider must not hold the reply slot for its full deadline")
+            val rider = f.records.poll(1, TimeUnit.SECONDS)!!
+            assertFalse(f.transport.tracks(rider.message!!), "The writer drops the abandoned record instead of failing")
+            assertTrue(f.transport.tracks(video.message!!))
+            f.ack(video, 1); f.ack(video, 2); flow.get(1, TimeUnit.SECONDS)
+            assertFalse(f.transport.tracks(video.message!!))
+        } finally { worker.shutdownNow() }
+    }
+
     @Test fun retirementFailsAWaitingRiderAndItsFlow() {
         for (left in listOf(true, false)) {
             val f = Fixture(); val worker = Executors.newFixedThreadPool(2); var sent = 0
