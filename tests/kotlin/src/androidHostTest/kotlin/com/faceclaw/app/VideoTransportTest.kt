@@ -425,8 +425,17 @@ class VideoTransportTest {
         val records = LinkedBlockingQueue<VideoSubmission>()
         var next = 40
         @Volatile var respond: ((VideoSubmission) -> Unit)? = null
+        /** Like the communicator's magic pool: a number a record still in flight holds is
+         *  never handed out again, or that record's ACK would be matched to the new one. */
+        private val holders = arrayOfNulls<OutboundMessage>(256)
+        private fun message(record: VideoSubmission): OutboundMessage = synchronized(holders) {
+            var magic = next++ and 255
+            while (magic == 0 || holders[magic]?.let { this@Fixture.transport.tracks(it) } == true) magic = next++ and 255
+            OutboundMessage("video", "test", 0xf0, 0, magic, record.payload, 100, -1, record.ingressLeft)
+                .also { holders[magic] = it }
+        }
         val transport = FaceclawVideoTransport(VideoRecordQueue { record ->
-            val message = OutboundMessage("video", "test", 0xf0, 0, next++ and 255, record.payload, 100, -1, record.ingressLeft)
+            val message = message(record)
             record.message = message
             message.onAck = MessageCallback { record.delivered() }
             // Take the responder before the test can see this record: one it sets
