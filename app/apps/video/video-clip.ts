@@ -26,7 +26,7 @@ function hash(value: unknown): value is string { return typeof value === "string
 export function parseVideoClip(value: unknown, audit: VideoAudit): VideoClip {
   const clip = value as VideoClip;
   if (!isVideoPictureRate(clip?.fps))
-    throw new Error("Unsupported video picture rate. Re-convert this clip at 10, 15 or 20 fps.");
+    throw new Error("Unsupported video picture rate. Re-convert this clip at 10, 15, 20 or 24 fps.");
   if (!clip || clip.version !== 1 ||
       clip.range !== "full" || typeof clip.deblocking !== "boolean" || !integer(clip.duration, 1) ||
       typeof clip.encoder !== "string" || !clip.encoder || !Array.isArray(clip.options) ||

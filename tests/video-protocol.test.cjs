@@ -23,6 +23,31 @@ test('Confirmation room requires both base capabilities and adds only the queue-
   }
 });
 
+test('Mid frame sizes and 24 fps need both lenses to advertise them before START', async () => {
+  // Byte 8 bit 1 of the queue-size reply: full-width mid sizes. Rate mask bit 8: 24 fps.
+  for (const [midBits, rateMasks] of [[[1,1],[15,15]],[[1,0],[15,7]],[[0,0],[7,7]]]) {
+    let id=1; const sent=[];
+    const p=new VideoProtocol({epoch:()=>1,exchange:async(raw,length,targets)=>{
+      sent.push(raw.slice());
+      if (raw[1]===7) return [0,1].map(i=>{const row=new Uint8Array(128); row.set([1,7,0,11,4,12,12,i+1,midBits[i]]); return row;});
+      if (raw[1]===VIDEO.playbackCaps) return rateMasks.map(mask=>Uint8Array.from([1,13,0,255,194,mask,255,255,...Array(8).fill(0)]));
+      if (raw[1]===VIDEO.caps) return [0,1].map(()=>{const row=status().slice(0,length); row[71]=128; return row;});
+      return [status().slice(0,length),status().slice(0,length)].slice(0,targets===3?2:1);
+    }},()=>id++);
+    await p.capabilities();
+    const mid={width:480,height:272,picture:{x:0,y:1,width:480,height:270}};
+    const all=midBits.every(Boolean), rate24=rateMasks.every(mask=>mask&8);
+    if (!all) await assert.rejects(p.start(1,false,false,false,0,false,3,15,mid),/mid frame size/);
+    else {
+      await p.start(1,false,false,false,0,false,3,15,mid);
+      const v=new DataView(sent.at(-1).buffer);
+      assert.deepEqual([12,14,24,26,28,30].map(i=>v.getUint16(i,true)),[480,272,0,1,480,270]);
+    }
+    if (!rate24) await assert.rejects(p.start(2,false,false,false,0,false,3,24),/24 fps/);
+    else { await p.start(2,false,false,false,0,false,3,24); assert.equal(videoU32(sent.at(-1),20),42); }
+  }
+});
+
 test('Independent metadata room accepts six but never seven on either send path', async () => {
   let room = 6;
   const rows = () => [1, 2].map(() => Uint8Array.from([2, 0, 0, 0, room, 0]));

@@ -31,7 +31,7 @@ test('Picture geometry admits all three canvases and odd edges but never silentl
 });
 
 test('All supported clip rates have exact rounded timestamps and seek boundaries; old rates require reconversion', () => {
-  for (const fps of [10,15,20]) {
+  for (const fps of [10,15,20,24]) {
     const {clip,audit}=fixture(100);
     clip.fps=fps;clip.duration=Math.round(100000/fps);
     clip.pictures.forEach((p,i)=>p.pts=Math.round(i*1000/fps));
@@ -41,9 +41,9 @@ test('All supported clip rates have exact rounded timestamps and seek boundaries
       if(i)assert.equal(videoSeekPoint(parsed,p.pts-1).frame,i-1);
     });
   }
-  for(const fps of [undefined,null,0,16,24,30,'15']) {
+  for(const fps of [undefined,null,0,16,25,30,'15']) {
     const {clip,audit}=fixture();clip.fps=fps;
-    assert.throws(()=>parseVideoClip(clip,audit),/Re-convert.*10, 15 or 20 fps/);
+    assert.throws(()=>parseVideoClip(clip,audit),/Re-convert.*10, 15, 20 or 24 fps/);
   }
 });
 

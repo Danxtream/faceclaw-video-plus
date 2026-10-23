@@ -5,7 +5,7 @@ const {loader} = require('./helpers/load-typescript.cjs');
 
 function modelFixture(strip = false) {
   const calls = [], values = new Map(); let timer, observer, replace = false;
-  const settings = key => ({get: () => values.get(key) ?? (key === 'radio' ? 'video' : key === 'scale' ? 'native' : key === 'rate' ? '15' : key === 'height' ? '176' : key === 'floor' ? '1' : key === 'contrast' ? 'default' : key === 'keyframes' ? 'default' : key === 'bitrate' ? '110' : key === 'audioOffset' ? '0' : false),
+  const settings = key => ({get: () => values.get(key) ?? (key === 'radio' ? 'video' : key === 'scale' ? 'native' : key === 'rate' ? '15' : key === 'frame' ? '320x176' : key === 'floor' ? '1' : key === 'contrast' ? 'default' : key === 'keyframes' ? 'default' : key === 'bitrate' ? '110' : key === 'audioOffset' ? '0' : false),
     set: value => {values.set(key, value); calls.push([key, value]);}, displayValue: () => values.get(key) === 'off' ? 'Off' : 'Video-only'});
   const player = {view: {active: true, paused: false, position: 1234, duration: 20000},
     pause: async value => calls.push(['pause', value]), seek: async value => calls.push(['seek', value]),
@@ -23,7 +23,7 @@ function modelFixture(strip = false) {
     '../native/video-converter': {convertVideo: (...args) => calls.push(['convert', ...args]), cancelVideoConversion() {}, videoConversionState: () => ({running: false, stage: 'idle', progress: 0})},
     '../apps/video': {openPhoneVideo: async path => calls.push(['play', path])},
     '../apps/video/video-session': {activeVideoSession: () => session, observeVideoSession: () => () => calls.push(['unsub-video'])},
-    '../apps/video/video-settings': {videoRadioSetting: settings('radio'), videoScaleSetting: settings('scale'), videoDitherSetting: settings('dither'), videoBlackFloorSetting: settings('floor'), videoDeblockingSetting: settings('deblock'), videoConversionRateSetting: settings('rate'),videoConversionHeightSetting: settings('height'),
+    '../apps/video/video-settings': {videoRadioSetting: settings('radio'), videoScaleSetting: settings('scale'), videoDitherSetting: settings('dither'), videoBlackFloorSetting: settings('floor'), videoDeblockingSetting: settings('deblock'), videoConversionRateSetting: settings('rate'),videoConversionFrameSetting: settings('frame'),
       videoConversionContrastSetting: settings('contrast'), videoConversionKeyframesSetting: settings('keyframes'), videoConversionBitrateSetting: settings('bitrate'),
       videoAudioOffsetSetting: settings('audioOffset'), VIDEO_AUDIO_OFFSETS: Array.from({length: 81}, (_, i) => String(i * 25 - 1000))},
   });
@@ -41,25 +41,28 @@ test('Time entry handles seconds and clock forms without accepting invalid or ov
 test('Converter rate defaults to 15 and only changes the next conversion setting',()=>{
   const f=modelFixture();
   assert.equal(f.fixture.get('conversionRateIndex'),1);
-  for(const [index,rate] of [[0,'10'],[1,'15'],[2,'20']]){
+  for(const [index,rate] of [[0,'10'],[1,'15'],[2,'20'],[3,'24']]){
     f.fixture.onConversionRateChange({object:{selectedIndex:index}});
     assert.equal(f.values.get('rate'),rate);
   }
-  f.fixture.onConversionRateChange({object:{selectedIndex:3}});
-  assert.equal(f.values.get('rate'),'20');
+  f.fixture.onConversionRateChange({object:{selectedIndex:4}});
+  assert.equal(f.values.get('rate'),'24');
   assert.ok(f.calls.every(row=>row[0]==='rate'));
 });
 
-test('Canvas selector has only 192 and 176 with automatic orientation left to the converter',()=>{
+test('Frame selector offers the 320-wide canvases and the full-width mid sizes, orientation left to the converter',()=>{
   const f=modelFixture();
-  assert.equal(f.fixture.get('conversionHeightIndex'),1);
-  for(const [i,height] of [[0,'192'],[1,'176']]) {
-    f.fixture.onConversionHeightChange({object:{selectedIndex:i}});
-    assert.equal(f.values.get('height'),height);
+  assert.equal(f.fixture.get('conversionFrameIndex'),1);
+  const frames=['320x192','320x176','384x216','448x252','480x270','512x288'];
+  for(const [i,frame] of frames.entries()) {
+    f.fixture.onConversionFrameChange({object:{selectedIndex:i}});
+    assert.equal(f.values.get('frame'),frame);
   }
-  f.fixture.onConversionHeightChange({object:{selectedIndex:2}});
-  assert.equal(f.values.get('height'),'176');
-  assert.ok(f.calls.every(row=>row[0]==='height'));
+  f.fixture.onConversionFrameChange({object:{selectedIndex:6}});
+  assert.equal(f.values.get('frame'),'512x288');
+  assert.ok(f.calls.every(row=>row[0]==='frame'));
+  const xml=fs.readFileSync('app/phone-ui/video-page.xml','utf8');
+  assert.ok(xml.includes('selectedIndexChanged="{{ onConversionFrameChange }}"'));
 });
 
 test('Contrast and keyframes default to Default and the chosen levels go to the next conversion',async()=>{
@@ -80,7 +83,7 @@ test('Contrast and keyframes default to Default and the chosen levels go to the 
   assert.equal(f.values.get('keyframes'),'large');
   f.confirmReplace(true);
   f.fixture.get('sources')[0].convert(); await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(f.calls.find(row=>row[0]==='convert'),['convert','/Download/G2/movie.mp4',false,true,15,176,'veryhigh','large','110']);
+  assert.deepEqual(f.calls.find(row=>row[0]==='convert'),['convert','/Download/G2/movie.mp4',false,true,15,'320x176','veryhigh','large','110']);
   const xml=fs.readFileSync('app/phone-ui/video-page.xml','utf8');
   assert.ok(xml.includes('selectedIndexChanged="{{ onConversionContrastChange }}"') && xml.includes('title="Very high"'));
   assert.ok(xml.includes('selectedIndexChanged="{{ onConversionKeyframesChange }}"'));
@@ -90,14 +93,14 @@ test('Contrast and keyframes default to Default and the chosen levels go to the 
 test('Bitrate defaults to 110 and is applied only to the next conversion', async () => {
   const f=modelFixture();
   assert.equal(f.fixture.get('conversionBitrateIndex'),0);
-  for(const [index,rate] of ['110','150','200','250'].entries()) {
+  for(const [index,rate] of ['110','150','200','250','300','400'].entries()) {
     f.fixture.onConversionBitrateChange({object:{selectedIndex:index}});
     assert.equal(f.values.get('bitrate'),rate);
   }
   f.fixture.onConversionBitrateChange({object:{selectedIndex:99}});
-  assert.equal(f.values.get('bitrate'),'250');
+  assert.equal(f.values.get('bitrate'),'400');
   assert.ok(f.calls.every(row=>row[0]==='bitrate'));
-  f.fixture.onConversionBitrateChange({object:{selectedIndex:4}});
+  f.fixture.onConversionBitrateChange({object:{selectedIndex:6}});
   assert.equal(f.values.get('bitrate'),'auto');
   f.confirmReplace(true);
   f.fixture.get('sources')[0].convert(); await new Promise(resolve=>setImmediate(resolve));

@@ -32,13 +32,17 @@ export const videoAudioOffsetSetting = new ConfigSettingEnum<string>({
 export const videoDeblockingSetting = new ConfigSettingBoolean({
   id: "video-deblocking", label: "Deblocking filter", storageKey: "video.deblocking", defaultValue: false,
 });
-export const videoConversionRateSetting = new ConfigSettingEnum<"10" | "15" | "20">({
+export const videoConversionRateSetting = new ConfigSettingEnum<"10" | "15" | "20" | "24">({
   id: "video-conversion-rate", label: "Picture rate", storageKey: "video.conversionRate", defaultValue: "15",
-  values: ["10", "15", "20"], formatValue: value => value + " fps",
+  values: ["10", "15", "20", "24"], formatValue: value => value + " fps",
 });
-export const videoConversionHeightSetting = new ConfigSettingEnum<"192" | "176">({
-  id: "video-conversion-height", label: "Frame size", storageKey: "video.conversionHeight", defaultValue: "176",
-  values: ["192", "176"], formatValue: value => "320x" + value,
+export type VideoConversionFrame = "320x192" | "320x176" | "384x216" | "448x252" | "480x270" | "512x288";
+/** The 320-wide frames play at 2x or native size; the mid sizes fill the panel's full width.
+ *  Earlier versions stored only the 320-wide height. */
+export const videoConversionFrameSetting = new ConfigSettingEnum<VideoConversionFrame>({
+  id: "video-conversion-height", label: "Frame size", storageKey: "video.conversionHeight", defaultValue: "320x176",
+  values: ["320x192", "320x176", "384x216", "448x252", "480x270", "512x288"], formatValue: value => value,
+  normalize: (value) => value === "192" ? "320x192" : value === "176" ? "320x176" : undefined,
 });
 /** How the converter turns color into gray; applies to the next conversion only. */
 export const videoConversionContrastSetting = new ConfigSettingEnum<"default" | "medium" | "high" | "veryhigh">({
@@ -52,9 +56,9 @@ export const videoConversionKeyframesSetting = new ConfigSettingEnum<"default" |
   values: ["default", "large"], formatValue: value => value === "default" ? "Default" : "Large",
 });
 /** Applies only to the next conversion; higher caps are not a link-speed guarantee. */
-export const videoConversionBitrateSetting = new ConfigSettingEnum<"110" | "150" | "200" | "250" | "auto">({
+export const videoConversionBitrateSetting = new ConfigSettingEnum<"110" | "150" | "200" | "250" | "300" | "400" | "auto">({
   id: "video-conversion-bitrate", label: "Bitrate", storageKey: "video.conversionBitrate", defaultValue: "110",
-  values: ["110", "150", "200", "250", "auto"], formatValue: value => value === "auto" ? "Auto" : value + " kbps",
+  values: ["110", "150", "200", "250", "300", "400", "auto"], formatValue: value => value === "auto" ? "Auto" : value + " kbps",
 });
 export const videoDetailedReportsSetting = new ConfigSettingBoolean({
   id: "video-detailed-reports", label: "Video detailed reports", storageKey: "video.detailedReports", defaultValue: false,

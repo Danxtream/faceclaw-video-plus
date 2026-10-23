@@ -2,27 +2,46 @@ package com.faceclaw.app
 
 import kotlin.math.roundToInt
 
+/**
+ * Landscape canvases the converter offers. The 320-wide ones play at 2x or native size; the mid
+ * sizes fill the panel's full width (640 / width) on firmware that advertises them. Each coded
+ * height is the 16:9 picture height rounded up to whole macroblocks.
+ */
+enum class VideoFrameSize(val id: String, val width: Int, val height: Int) {
+    S320X192("320x192", 320, 192), S320X176("320x176", 320, 176),
+    S384X216("384x216", 384, 224), S448X252("448x252", 448, 256),
+    S480X270("480x270", 480, 272), S512X288("512x288", 512, 288);
+
+    val mid: Boolean get() = width > 320
+
+    companion object {
+        fun of(id: String): VideoFrameSize = entries.firstOrNull { it.id == id }
+            ?: throw IllegalArgumentException("Choose a supported frame size")
+    }
+}
+
 /** The visible picture is fitted without cropping inside an audited coded canvas. */
 data class VideoFrameGeometry(val width: Int, val height: Int, val x: Int = 0, val y: Int = 0,
     val pictureWidth: Int = width, val pictureHeight: Int = height) {
     init {
-        require((width == 320 && height in listOf(176,192) || width == 144 && height == 240) &&
+        require((VideoFrameSize.entries.any { it.width == width && it.height == height } || width == 144 && height == 240) &&
             x >= 0 && y >= 0 && pictureWidth > 0 && pictureHeight > 0 &&
             x.toLong() + pictureWidth <= width && y.toLong() + pictureHeight <= height) { "Unsupported video geometry" }
     }
     companion object {
-        /** Orientation is automatic for both landscape canvas choices. FFmpeg autorotates first. */
+        /** Orientation is automatic for every landscape canvas choice: tall sources keep the
+         *  144x240 portrait canvas. FFmpeg autorotates first. */
         fun fit(sourceWidth: Int, sourceHeight: Int, sar: String = "1:1", rotation: Int = 0,
-            landscapeHeight: Int = 176): VideoFrameGeometry {
-            require(sourceWidth > 0 && sourceHeight > 0 && landscapeHeight in listOf(176,192))
+            frame: VideoFrameSize = VideoFrameSize.S320X176): VideoFrameGeometry {
+            require(sourceWidth > 0 && sourceHeight > 0)
             val ratio = if (sar in listOf("N/A", "0:1", "")) listOf(1.0,1.0) else sar.split(':').map(String::toDouble)
             require(ratio.size == 2 && ratio.all { it.isFinite() && it > 0 }) { "Unsupported source pixel aspect ratio" }
             require(rotation % 90 == 0) { "Unsupported source rotation" }
             var aspect = sourceWidth.toDouble() / sourceHeight * ratio[0] / ratio[1]
             if ((rotation % 180 + 180) % 180 != 0) aspect = 1 / aspect
             require(aspect.isFinite() && aspect > 0) { "Invalid source display shape" }
-            val width = if (aspect < 1) 144 else 320
-            val height = if (aspect < 1) 240 else landscapeHeight
+            val width = if (aspect < 1) 144 else frame.width
+            val height = if (aspect < 1) 240 else frame.height
             val pw: Int; val ph: Int
             if (aspect >= width.toDouble()/height) { pw = width; ph = (width/aspect).roundToInt().coerceIn(1,height) }
             else { ph = height; pw = (height*aspect).roundToInt().coerceIn(1,width) }
@@ -67,22 +86,30 @@ enum class VideoKeyframes(val id: String) {
 
 /** Conversion cap; the validated result must still satisfy the existing NAL limit. */
 enum class VideoBitrate(val id: String, private val fixedKbps: Int) {
-    K110("110", 110), K150("150", 150), K200("200", 200), K250("250", 250), AUTO("auto", 0);
+    K110("110", 110), K150("150", 150), K200("200", 200), K250("250", 250),
+    K300("300", 300), K400("400", 400), AUTO("auto", 0);
 
-    /** Smallest tested caps matching the 10 fps/110 Y-quality baseline; not link adaptation. */
-    fun kbps(fps: Int): Int {
+    /**
+     * Auto at 320 wide: the smallest tested caps matching the 10 fps/110 Y-quality baseline; not
+     * link adaptation. The 24 fps and mid-size values are starting points from a PC quality
+     * ladder (more pixels only look sharper with more bits), still to be judged on the glasses.
+     */
+    fun kbps(fps: Int, frame: VideoFrameSize = VideoFrameSize.S320X192): Int {
         VideoEncodePlan.checkRate(fps)
-        return if (this != AUTO) fixedKbps else when (fps) {
-            10 -> 110
-            15 -> 150
-            20 -> 170
-            else -> error("Unsupported conversion picture rate")
+        if (this != AUTO) return fixedKbps
+        val rates = when (frame.width) {
+            384 -> intArrayOf(150, 200, 230, 270)
+            448 -> intArrayOf(170, 250, 280, 320)
+            480 -> intArrayOf(180, 250, 300, 350)
+            512 -> intArrayOf(200, 300, 340, 400)
+            else -> intArrayOf(110, 150, 170, 200)
         }
+        return rates[listOf(10, 15, 20, 24).indexOf(fps)]
     }
 
     companion object {
         fun of(id: String): VideoBitrate = entries.firstOrNull { it.id == id }
-            ?: throw IllegalArgumentException("Choose Auto or 110, 150, 200 or 250 kbps bitrate")
+            ?: throw IllegalArgumentException("Choose Auto or 110, 150, 200, 250, 300 or 400 kbps bitrate")
     }
 }
 
@@ -110,12 +137,13 @@ object VideoEncodePlan {
         "'clip(x+0.8*(x-y)*if(gt(x\\,y)\\,min(1\\,(255-x)/64)\\,min(1\\,x/64))\\,0\\,255)'"
 
     /** Refuse unsupported recipes before starting a foreground job. */
-    fun checkRate(fps: Int) { require(fps in listOf(10, 15, 20)) { "Choose 10, 15 or 20 fps and re-convert this clip" } }
+    fun checkRate(fps: Int) { require(fps in listOf(10, 15, 20, 24)) { "Choose 10, 15, 20 or 24 fps and re-convert this clip" } }
     @JvmStatic fun arguments(input: String, output: String, deblocking: Boolean, fps: Int = 15,
         geometry: VideoFrameGeometry = VideoFrameGeometry(320,192), contrast: VideoContrast = VideoContrast.DEFAULT,
-        keyframes: VideoKeyframes = VideoKeyframes.DEFAULT, bitrate: VideoBitrate = VideoBitrate.K110): Array<String> {
+        keyframes: VideoKeyframes = VideoKeyframes.DEFAULT, bitrate: VideoBitrate = VideoBitrate.K110,
+        frame: VideoFrameSize = VideoFrameSize.S320X192): Array<String> {
         checkRate(fps)
-        val cap = bitrate.kbps(fps)
+        val cap = bitrate.kbps(fps, frame)
         require(input.isNotBlank() && output.isNotBlank() && input != output && !input.contains('\u0000') && !output.contains('\u0000'))
         val size = "scale=${geometry.pictureWidth}:${geometry.pictureHeight}:flags=lanczos:in_range=auto"
         val gray = when (contrast) {

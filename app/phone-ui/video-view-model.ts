@@ -7,7 +7,12 @@ import { openPhoneVideo } from "../apps/video";
 import { activeVideoSession, observeVideoSession, type VideoSession } from "../apps/video/video-session";
 import { VideoSeekControls } from "./video-seek-controls";
 export { formatVideoTime } from "./video-seek-controls";
-import { videoRadioSetting, videoScaleSetting, videoDitherSetting, videoBlackFloorSetting, videoDeblockingSetting, videoConversionRateSetting, videoConversionHeightSetting, videoConversionContrastSetting, videoConversionKeyframesSetting, videoConversionBitrateSetting, videoAudioOffsetSetting, VIDEO_AUDIO_OFFSETS } from "../apps/video/video-settings";
+import { videoRadioSetting, videoScaleSetting, videoDitherSetting, videoBlackFloorSetting, videoDeblockingSetting, videoConversionRateSetting, videoConversionFrameSetting, videoConversionContrastSetting, videoConversionKeyframesSetting, videoConversionBitrateSetting, videoAudioOffsetSetting, VIDEO_AUDIO_OFFSETS } from "../apps/video/video-settings";
+
+/** Segment order on the Convert tab; each list matches its SegmentedBar items. */
+const VIDEO_CONVERSION_RATES = ["10", "15", "20", "24"] as const;
+const VIDEO_CONVERSION_FRAMES = ["320x192", "320x176", "384x216", "448x252", "480x270", "512x288"] as const;
+const VIDEO_CONVERSION_BITRATES = ["110", "150", "200", "250", "300", "400", "auto"] as const;
 
 /** Strict remote time input, with no changes to the source's fixed frame cadence. */
 export function parseVideoTime(text: string): number {
@@ -82,11 +87,13 @@ export class VideoViewModel extends Observable {
       const offset = VIDEO_AUDIO_OFFSETS.indexOf(videoAudioOffsetSetting.get());
       this.set("audioOffsetLabel", `Audio timing: ${videoAudioOffsetSetting.displayValue()}`);
       this.set("canAudioLater", offset > 0); this.set("canAudioEarlier", offset < VIDEO_AUDIO_OFFSETS.length - 1);
-      this.set("conversionRateIndex", ["10", "15", "20"].indexOf(videoConversionRateSetting.get()));
-      this.set("conversionHeightIndex", ["192", "176"].indexOf(videoConversionHeightSetting.get()));
+      this.set("conversionRateIndex", VIDEO_CONVERSION_RATES.indexOf(videoConversionRateSetting.get()));
+      this.set("conversionFrameIndex", VIDEO_CONVERSION_FRAMES.indexOf(videoConversionFrameSetting.get()));
+      this.set("conversionFrameLabel", `Frame size: ${videoConversionFrameSetting.get()}` +
+        (videoConversionFrameSetting.get().startsWith("320x") ? "" : " (fills the full width; mid sizes need newer glasses firmware)"));
       this.set("conversionContrastIndex", ["default", "medium", "high", "veryhigh"].indexOf(videoConversionContrastSetting.get()));
       this.set("conversionKeyframesIndex", ["default", "large"].indexOf(videoConversionKeyframesSetting.get()));
-      this.set("conversionBitrateIndex", ["110", "150", "200", "250", "auto"].indexOf(videoConversionBitrateSetting.get()));
+      this.set("conversionBitrateIndex", VIDEO_CONVERSION_BITRATES.indexOf(videoConversionBitrateSetting.get()));
       this.set("radioLabel", `Selected: ${videoRadioSetting.displayValue()} / Confirmed: ${view?.hostPhy ?? "Unknown"}`);
       const conversion = videoConversionState();
       this.set("conversionRunning", conversion.running); this.set("progress", conversion.progress * 100);
@@ -121,8 +128,8 @@ export class VideoViewModel extends Observable {
   private async convert(entry: DirectoryEntry): Promise<void> {
     const existing = resolveG2H264Path(entry.path) !== null || statPath(g2VideoMetadataPath(entry.path)) !== null;
     if (existing && !await Dialogs.confirm({title: "Replace converted video?", message: entry.name, okButtonText: "Replace", cancelButtonText: "Cancel"})) return;
-    try { convertVideo(entry.path, videoDeblockingSetting.get(), existing, Number(videoConversionRateSetting.get()) as 10 | 15 | 20,
-      Number(videoConversionHeightSetting.get()) as 176 | 192, videoConversionContrastSetting.get(),
+    try { convertVideo(entry.path, videoDeblockingSetting.get(), existing, Number(videoConversionRateSetting.get()) as 10 | 15 | 20 | 24,
+      videoConversionFrameSetting.get(), videoConversionContrastSetting.get(),
       videoConversionKeyframesSetting.get(), videoConversionBitrateSetting.get()); this.refresh(); }
     catch (error) { this.set("status", String(error)); }
   }
@@ -131,13 +138,13 @@ export class VideoViewModel extends Observable {
   onCancelTap(): void { cancelVideoConversion(); }
   onConversionRateChange(args: {object?: {selectedIndex?: number}}): void {
     if (this.refreshing) return;
-    const rate = (["10", "15", "20"] as const)[args.object?.selectedIndex ?? -1];
+    const rate = VIDEO_CONVERSION_RATES[args.object?.selectedIndex ?? -1];
     if (rate) videoConversionRateSetting.set(rate);
   }
-  onConversionHeightChange(args: {object?: {selectedIndex?: number}}): void {
+  onConversionFrameChange(args: {object?: {selectedIndex?: number}}): void {
     if (this.refreshing) return;
-    const height = (["192", "176"] as const)[args.object?.selectedIndex ?? -1];
-    if (height) videoConversionHeightSetting.set(height);
+    const frame = VIDEO_CONVERSION_FRAMES[args.object?.selectedIndex ?? -1];
+    if (frame) videoConversionFrameSetting.set(frame);
   }
   onConversionContrastChange(args: {object?: {selectedIndex?: number}}): void {
     if (this.refreshing) return;
@@ -151,7 +158,7 @@ export class VideoViewModel extends Observable {
   }
   onConversionBitrateChange(args: {object?: {selectedIndex?: number}}): void {
     if (this.refreshing) return;
-    const bitrate = (["110", "150", "200", "250", "auto"] as const)[args.object?.selectedIndex ?? -1];
+    const bitrate = VIDEO_CONVERSION_BITRATES[args.object?.selectedIndex ?? -1];
     if (bitrate) videoConversionBitrateSetting.set(bitrate);
   }
   onToggleTap(): void { void this.action(async () => { const player = activeVideoSession()?.engine; if (player) await player.pause(!player.view.paused); }); }

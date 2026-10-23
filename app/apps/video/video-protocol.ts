@@ -1,6 +1,6 @@
 import { type VideoUploadPlan, type VideoUploadPump } from "./video-upload";
 import { isVideoPictureRate, VIDEO_DEFAULT_RATE, type VideoPictureRate } from "./video-rate";
-import { videoGeometry, legacyVideoGeometry, type VideoGeometry } from "./video-geometry";
+import { videoGeometry, legacyVideoGeometry, midVideoGeometry, type VideoGeometry } from "./video-geometry";
 
 declare const console: { error(...args: unknown[]): void };
 
@@ -82,6 +82,8 @@ export class VideoProtocol {
   private pictureStyle = false;
   private multiSlice = false;
   private extendedQueue = 6;
+  private rate24 = false;
+  private midSizes = false;
   /** Both lenses accept a picture's frame time inside its VCL NAL record. */
   get timedNal(): boolean { return this.timed; }
   /** Both lenses decode pictures split into several slices (large-keyframe clips). */
@@ -140,6 +142,7 @@ export class VideoProtocol {
   }
   async capabilities(): Promise<void> {
     this.confirmationRoom = false;
+    this.midSizes = false;
     const caps = await this.status(VIDEO.caps);
     caps.forEach((row, i) => {
       if (videoStaleError(row)) console.error(`Video ${i ? "RIGHT" : "LEFT"} is idle after stream ${row.stream} ended with error=${row.error}; retained history, next START must pass readiness again (powerStep=${row.powerStep})`);
@@ -151,7 +154,7 @@ export class VideoProtocol {
     }
     const rows = await this.query(await this.header(VIDEO.playbackCaps, 8), 16);
     if (rows.some((row) => row[0] !== 1 || row[1] !== 13 || row[2] || row[3] !== 255 ||
-      (row[4] & 63) !== 2 || ((row[4] & 64) !== 0 && (row[4] & 128) === 0) || row[5] !== 7 || row[6] !== 255 || (row[7] & 7) !== 7))
+      (row[4] & 63) !== 2 || ((row[4] & 64) !== 0 && (row[4] & 128) === 0) || (row[5] & 7) !== 7 || row[6] !== 255 || (row[7] & 7) !== 7))
       throw new Error("Glasses do not support 10/15/20 fps playback; update both lenses.");
     this.evidence = rows.every(row => !!(row[7] & 32));
     this.rateEvidence = rows.every(row => !!(row[7] & 64));
@@ -163,6 +166,8 @@ export class VideoProtocol {
     this.pictureStyle = rows.every(row => !!(row[4] & 64));
     // Bit 8 of byte 7 was reserved before multi-slice pictures; older firmware leaves it clear.
     this.multiSlice = rows.every(row => !!(row[7] & 8));
+    // Rate mask bit 8: 24 pictures per second; older firmware advertises exactly 10/15/20.
+    this.rate24 = rows.every(row => !!(row[5] & 8));
     this.extendedQueue = this.confirmationRoom ? await this.queueSize() : 6;
     this.backend.configureEvidence?.(this.evidence);
   }
@@ -173,8 +178,11 @@ export class VideoProtocol {
     try {
       const raw = await this.header(7, 12); raw[8] = 11;
       const rows = await this.query(raw, 128);
-      if (rows.every(row => row[0] === 1 && row[1] === 7 && !row[2] && row[3] === 11 && row[4] === 4 && row[5] >= 6 && row[5] <= 15))
+      if (rows.every(row => row[0] === 1 && row[1] === 7 && !row[2] && row[3] === 11 && row[4] === 4 && row[5] >= 6 && row[5] <= 15)) {
+        // Byte 8 bit 1: both lenses play the full-width mid frame sizes (older replies leave it zero).
+        this.midSizes = rows.every(row => !!(row[8] & 1));
         return Math.min(...rows.map(row => row[5]));
+      }
     } catch (error) { console.error(`Video queue size unavailable, using six: ${error}`); }
     return 6;
   }
@@ -251,6 +259,8 @@ export class VideoProtocol {
     if (![1, 2, 3].includes(targets)) throw new Error("Invalid START lens mask");
     const size = videoGeometry(geometry), extended = !legacyVideoGeometry(size);
     if (extended && !this.geometry) throw new Error("Update both lenses to play this frame size and its unlit bars.");
+    if (midVideoGeometry(size) && !this.midSizes) throw new Error("Update both lenses to play this mid frame size.");
+    if (fps === 24 && !this.rate24) throw new Error("Update both lenses to play 24 fps clips.");
     const style = [1,0,0.25,0.5].indexOf(blackFloor);
     if (style < 0) throw new Error("Unsupported video black floor");
     const tuned = dither && style !== 0;

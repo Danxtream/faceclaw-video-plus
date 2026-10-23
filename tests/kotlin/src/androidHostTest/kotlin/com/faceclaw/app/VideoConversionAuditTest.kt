@@ -7,21 +7,21 @@ import kotlin.test.assertTrue
 
 class VideoConversionAuditTest {
     @Test fun bitrateChangesOnlyMaxrateAndKeepsTheNalBoundedRecipe() {
-        for (fps in listOf(10,15,20)) for (keyframes in VideoKeyframes.entries) {
+        for (fps in listOf(10,15,20,24)) for (keyframes in VideoKeyframes.entries) {
             fun args(rate: Int = 110) = VideoEncodePlan.arguments("in.mp4","out.h264",true,fps,
                 keyframes = keyframes, bitrate = VideoBitrate.of(rate.toString())).toList()
-            for (rate in listOf(110,150,200,250)) {
+            for (rate in listOf(110,150,200,250,300,400)) {
                 assertEquals(args().map { it.replace("vbv-maxrate=110:","vbv-maxrate=$rate:") },args(rate))
                 val recipe=args(rate).let { it[it.indexOf("-x264-params")+1] }
                 assertTrue(recipe.contains(if(keyframes==VideoKeyframes.LARGE) "vbv-bufsize=96:slice-max-size=4000:" else "vbv-bufsize=32:"))
             }
-            assertFails { args(0) }; assertFails { args(300) }
+            assertFails { args(0) }; assertFails { args(350) }
         }
-        assertEquals(listOf(110,150,200,250),listOf("110","150","200","250").map { VideoBitrate.of(it).kbps(15) })
-        assertFails { VideoBitrate.of("300") }
+        assertEquals(listOf(110,150,200,250,300,400),listOf("110","150","200","250","300","400").map { VideoBitrate.of(it).kbps(15) })
+        assertFails { VideoBitrate.of("350") }
     }
     @Test fun autoUsesMeasuredPerRateCapsWithoutChangingAnyOtherEncoderOption() {
-        for ((fps,cap) in listOf(10 to 110,15 to 150,20 to 170)) for (keyframes in VideoKeyframes.entries) {
+        for ((fps,cap) in listOf(10 to 110,15 to 150,20 to 170,24 to 200)) for (keyframes in VideoKeyframes.entries) {
             fun args(bitrate: VideoBitrate) = VideoEncodePlan.arguments("in.mp4","out.h264",true,fps,
                 keyframes = keyframes, bitrate = bitrate).toList()
             assertEquals(cap,VideoBitrate.AUTO.kbps(fps))
@@ -29,9 +29,13 @@ class VideoConversionAuditTest {
         }
         assertEquals(VideoBitrate.AUTO,VideoBitrate.of("auto"))
         assertFails { VideoBitrate.AUTO.kbps(16) }
+        // Mid sizes need more bits before their extra pixels show; fixed caps ignore the size.
+        assertEquals(listOf(200,250,250,300),listOf("384x216","448x252","480x270","512x288").map {
+            VideoBitrate.AUTO.kbps(15,VideoFrameSize.of(it)) })
+        assertEquals(250,VideoBitrate.K250.kbps(20,VideoFrameSize.S480X270))
     }
     @Test fun chosenRatesPreserveRecipeBitrateAndKeyframeSecondsAndRejectLegacyRate() {
-        for (fps in listOf(10,15,20)) {
+        for (fps in listOf(10,15,20,24)) {
             val args=VideoEncodePlan.arguments("in.mp4","out.h264",false,fps)
             assertTrue(args[args.indexOf("-vf")+1].startsWith("fps=$fps,scale=320:192:"))
             val recipe=args[args.indexOf("-x264-params")+1]
@@ -172,19 +176,30 @@ class VideoConversionAuditTest {
     }
 
     @Test fun bothLandscapeChoicesDetectPortraitRotationAndSampleAspectAutomatically() {
-        for (height in listOf(176,192)) {
-            assertEquals(VideoFrameGeometry(144,240,4,0,135,240),VideoFrameGeometry.fit(1080,1920,landscapeHeight=height))
+        for (frame in VideoFrameSize.entries) {
+            assertEquals(VideoFrameGeometry(144,240,4,0,135,240),VideoFrameGeometry.fit(1080,1920,frame=frame))
             for (angle in listOf(-270,-90,90,270))
-                assertEquals(VideoFrameGeometry.fit(1080,1920),VideoFrameGeometry.fit(1920,1080,rotation=angle,landscapeHeight=height))
-            val square = VideoFrameGeometry.fit(720,576,"16:15",landscapeHeight=height)
-            assertEquals(height,square.pictureHeight)
-            assertEquals(if (height == 176) 235 else 256,square.pictureWidth)
+                assertEquals(VideoFrameGeometry.fit(1080,1920),VideoFrameGeometry.fit(1920,1080,rotation=angle,frame=frame))
+            val square = VideoFrameGeometry.fit(720,576,"16:15",frame=frame)
+            assertEquals(frame.height,square.pictureHeight)
+            assertEquals(Math.round(frame.height * 4.0 / 3).toInt(),square.pictureWidth)
         }
-        assertEquals(VideoFrameGeometry(320,192,0,6,320,180),VideoFrameGeometry.fit(1920,1080,landscapeHeight=192))
+        assertEquals(VideoFrameGeometry(320,192,0,6,320,180),VideoFrameGeometry.fit(1920,1080,frame=VideoFrameSize.S320X192))
         assertFails { VideoFrameGeometry.fit(0,1080) }
         assertFails { VideoFrameGeometry.fit(1920,1080,"1:0") }
         assertFails { VideoFrameGeometry.fit(1920,1080,rotation=45) }
-        assertFails { VideoFrameGeometry.fit(1920,1080,landscapeHeight=180) }
+        assertFails { VideoFrameSize.of("320x180") }
+    }
+
+    @Test fun midSizesFillTheirCanvasWidthWithA16By9Picture() {
+        // Each mid canvas is the 16:9 picture height rounded up to whole macroblocks; the
+        // spare rows stay unlit, split above and below.
+        assertEquals(VideoFrameGeometry(384,224,0,4,384,216),VideoFrameGeometry.fit(1920,1080,frame=VideoFrameSize.S384X216))
+        assertEquals(VideoFrameGeometry(448,256,0,2,448,252),VideoFrameGeometry.fit(1920,1080,frame=VideoFrameSize.S448X252))
+        assertEquals(VideoFrameGeometry(480,272,0,1,480,270),VideoFrameGeometry.fit(1280,720,frame=VideoFrameSize.S480X270))
+        assertEquals(VideoFrameGeometry(512,288,0,0,512,288),VideoFrameGeometry.fit(1920,1080,frame=VideoFrameSize.S512X288))
+        assertTrue(VideoFrameSize.entries.filter { it.mid }.all { it.width > 320 && it.height % 16 == 0 })
+        assertFails { VideoFrameGeometry(480,270) }
     }
 
     @Test fun selectedGeometryAuditsRealMacroblockFieldsAndDecodedFrameDimensions() {

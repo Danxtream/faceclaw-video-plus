@@ -39,7 +39,7 @@ class VideoConversionService : Service() {
             wake = (getSystemService(Context.POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "faceclaw:video-conversion")
             wake!!.acquire(6 * 60 * 60 * 1000L)
             val conversion = VideoConversion(File(path), intent.getBooleanExtra("deblocking", false), intent.getBooleanExtra("overwrite", false),
-                intent.getIntExtra("fps", 15),intent.getIntExtra("landscapeHeight",176),
+                intent.getIntExtra("fps", 15), VideoFrameSize.of(intent.getStringExtra("frame") ?: VideoFrameSize.S320X176.id),
                 VideoContrast.of(intent.getStringExtra("contrast") ?: VideoContrast.DEFAULT.id),
                 VideoKeyframes.of(intent.getStringExtra("keyframes") ?: VideoKeyframes.DEFAULT.id),
                 VideoBitrate.of(intent.getStringExtra("bitrate") ?: VideoBitrate.K110.id)) { stage, progress ->
@@ -87,15 +87,15 @@ class VideoConversionService : Service() {
         private const val ID = 4202
         @Volatile private var state = "{\"running\":false,\"stage\":\"idle\",\"progress\":0}"
         @JvmStatic fun snapshotJson(): String = state
-        @JvmStatic fun start(context: Context, source: String, deblocking: Boolean, overwrite: Boolean, fps: Int, landscapeHeight: Int,
+        @JvmStatic fun start(context: Context, source: String, deblocking: Boolean, overwrite: Boolean, fps: Int, frame: String,
             contrast: String, keyframes: String, bitrate: String) {
             VideoEncodePlan.checkRate(fps)
-            require(landscapeHeight in listOf(176,192))
+            VideoFrameSize.of(frame)
             VideoContrast.of(contrast)
             VideoKeyframes.of(keyframes)
             VideoBitrate.of(bitrate)
             val intent = Intent(context, VideoConversionService::class.java).setAction(START).putExtra("source", source)
-                .putExtra("deblocking", deblocking).putExtra("overwrite", overwrite).putExtra("fps", fps).putExtra("landscapeHeight",landscapeHeight)
+                .putExtra("deblocking", deblocking).putExtra("overwrite", overwrite).putExtra("fps", fps).putExtra("frame", frame)
                 .putExtra("contrast", contrast).putExtra("keyframes", keyframes).putExtra("bitrate", bitrate)
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else context.startService(intent)
         }

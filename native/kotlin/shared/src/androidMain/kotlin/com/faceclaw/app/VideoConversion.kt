@@ -73,12 +73,12 @@ internal fun videoDecodedPictures(frames: BufferedReader, packets: BufferedReade
 
 /** A single native conversion job; no BLE, firmware, repair pass or auto-downrate. */
 class VideoConversion(private val input: File, private val deblocking: Boolean, private val overwrite: Boolean,
-    private val fps: Int = 15, private val landscapeHeight: Int = 176,
+    private val fps: Int = 15, private val frame: VideoFrameSize = VideoFrameSize.S320X176,
     private val contrast: VideoContrast = VideoContrast.DEFAULT,
     private val keyframes: VideoKeyframes = VideoKeyframes.DEFAULT,
     private val bitrate: VideoBitrate = VideoBitrate.K110,
     private val progress: (String, Double) -> Unit) {
-    init { VideoEncodePlan.checkRate(fps); require(landscapeHeight in listOf(176,192)) }
+    init { VideoEncodePlan.checkRate(fps) }
     private val cancelled = AtomicBoolean(false)
     private val sessionId = AtomicLong(0)
     @Volatile private var thread: Thread? = null
@@ -159,8 +159,8 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
             if (sideData != null) for (i in 0 until sideData.length())
                 if (sideData.getJSONObject(i).has("rotation")) rotation = sideData.getJSONObject(i).getInt("rotation")
             val geometry = VideoFrameGeometry.fit(stream.getInt("width"),stream.getInt("height"),
-                stream.optString("sample_aspect_ratio","1:1"),rotation,landscapeHeight)
-            val args = VideoEncodePlan.arguments(input.path, publication.candidate.path, deblocking, fps, geometry, contrast, keyframes, bitrate)
+                stream.optString("sample_aspect_ratio","1:1"),rotation,frame)
+            val args = VideoEncodePlan.arguments(input.path, publication.candidate.path, deblocking, fps, geometry, contrast, keyframes, bitrate, frame)
             progress("encoding", 0.0)
             execute(args, duration)
             progress("auditing headers", 0.99)
@@ -200,7 +200,7 @@ class VideoConversion(private val input: File, private val deblocking: Boolean, 
                     .put("width",geometry.pictureWidth).put("height",geometry.pictureHeight))
                 .put("duration", (pictures.size * 1000L + fps / 2) / fps).put("range", "full").put("deblocking", deblocking)
                 .put("contrast", contrast.id).put("keyframes", keyframes.id)
-                .put("bitrate", bitrate.kbps(fps)).put("bitrateSelection", bitrate.id)
+                .put("bitrate", bitrate.kbps(fps, frame)).put("bitrateSelection", bitrate.id)
                 .put("encoder", "${VideoEncodePlan.ENCODER}; FFmpeg ${FFmpegKitConfig.getFFmpegVersion()}")
                 .put("options", JSONArray(args.toList())).put("source", JSONObject().put("name", input.name).put("bytes", bytes).put("sha256", sourceHash))
                 .put("h264", JSONObject().put("bytes", audit.bytes).put("sha256", audit.sha256)
