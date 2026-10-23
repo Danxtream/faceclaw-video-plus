@@ -48,6 +48,35 @@ test('Mid frame sizes and 24 fps need both lenses to advertise them before START
   }
 });
 
+test('The 4x4 dither pattern needs both lenses to advertise it and reaches START only for dithered mid sizes', async () => {
+  // Byte 8 of the queue-size reply: 1 mid sizes, 2 their 4x4 pattern.
+  for (const midBits of [[3,3],[3,1],[1,1]]) {
+    let id=1; const sent=[];
+    const p=new VideoProtocol({epoch:()=>1,exchange:async(raw,length,targets)=>{
+      sent.push(raw.slice());
+      if (raw[1]===7) return [0,1].map(i=>{const row=new Uint8Array(128); row.set([1,7,0,11,4,12,12,i+1,midBits[i]]); return row;});
+      if (raw[1]===VIDEO.playbackCaps) return [0,1].map(()=>Uint8Array.from([1,13,0,255,194,15,255,255,...Array(8).fill(0)]));
+      if (raw[1]===VIDEO.caps) return [0,1].map(()=>{const row=status().slice(0,length); row[71]=128; return row;});
+      return [status().slice(0,length),status().slice(0,length)].slice(0,targets===3?2:1);
+    }},()=>id++);
+    await p.capabilities();
+    const mid={width:480,height:272,picture:{x:0,y:1,width:480,height:270}};
+    const both=midBits.every(bits=>bits&2);
+    if (!both) await assert.rejects(p.start(1,false,true,false,0,false,3,15,mid,1,'4x4'),/Update both lenses.*4x4/);
+    else {
+      await p.start(1,false,true,false,0,false,3,15,mid,1,'4x4');
+      assert.equal(sent.at(-1).length,36); assert.equal(sent.at(-1)[32],4);
+      await p.start(2,false,true,false,0,false,3,15,mid,0.25,'4x4');
+      assert.equal(sent.at(-1)[32],4|2);
+    }
+    // Undithered mid sizes and 320 clips never carry the pattern bit.
+    await p.start(3,false,false,false,0,false,3,15,mid,1,'4x4'); assert.equal(sent.at(-1).length,32);
+    await p.start(4,false,true,false,0,false,3,15,undefined,1,'4x4'); assert.equal(sent.at(-1).length,24);
+    await p.start(5,false,true,false,0,false,3,15,undefined,0.5,'4x4'); assert.equal(sent.at(-1)[32],3);
+    await p.start(6,false,true,false,0,false,3,15,mid,1,'2x2'); assert.equal(sent.at(-1).length,32);
+  }
+});
+
 test('Independent metadata room accepts six but never seven on either send path', async () => {
   let room = 6;
   const rows = () => [1, 2].map(() => Uint8Array.from([2, 0, 0, 0, room, 0]));

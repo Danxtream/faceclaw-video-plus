@@ -7,7 +7,7 @@ import { openPhoneVideo } from "../apps/video";
 import { activeVideoSession, observeVideoSession, type VideoSession } from "../apps/video/video-session";
 import { VideoSeekControls } from "./video-seek-controls";
 export { formatVideoTime } from "./video-seek-controls";
-import { videoRadioSetting, videoScaleSetting, videoDitherSetting, videoBlackFloorSetting, videoDeblockingSetting, videoConversionRateSetting, videoConversionFrameSetting, videoConversionContrastSetting, videoConversionKeyframesSetting, videoConversionBitrateSetting, videoAudioOffsetSetting, VIDEO_AUDIO_OFFSETS } from "../apps/video/video-settings";
+import { videoRadioSetting, videoScaleSetting, videoDitherSetting, videoBlackFloorSetting, videoDitherPatternSetting, videoDeblockingSetting, videoConversionRateSetting, videoConversionFrameSetting, videoConversionContrastSetting, videoConversionKeyframesSetting, videoConversionBitrateSetting, videoAudioOffsetSetting, VIDEO_AUDIO_OFFSETS } from "../apps/video/video-settings";
 
 /** Segment order on the Convert tab; each list matches its SegmentedBar items. */
 const VIDEO_CONVERSION_RATES = ["10", "15", "20", "24"] as const;
@@ -84,6 +84,7 @@ export class VideoViewModel extends Observable {
       this.set("scaleIndex", videoScaleSetting.get() === "native" ? 0 : 1);
       this.set("dither", videoDitherSetting.get()); this.set("deblocking", videoDeblockingSetting.get());
       this.set("blackFloorIndex", ["0", "0.25", "0.5", "1"].indexOf(videoBlackFloorSetting.get()));
+      this.set("ditherPatternIndex", videoDitherPatternSetting.get() === "4x4" ? 1 : 0);
       const offset = VIDEO_AUDIO_OFFSETS.indexOf(videoAudioOffsetSetting.get());
       this.set("audioOffsetLabel", `Audio timing: ${videoAudioOffsetSetting.displayValue()}`);
       this.set("canAudioLater", offset > 0); this.set("canAudioEarlier", offset < VIDEO_AUDIO_OFFSETS.length - 1);
@@ -193,6 +194,11 @@ export class VideoViewModel extends Observable {
     if (this.refreshing) return;
     const floor = (["0", "0.25", "0.5", "1"] as const)[args.object?.selectedIndex ?? -1];
     if (floor !== undefined && videoBlackFloorSetting.get() !== floor) videoBlackFloorSetting.set(floor);
+  }
+  onDitherPatternChange(args: {object?: {selectedIndex?: number}}): void {
+    if (this.refreshing) return;
+    const pattern = (["2x2", "4x4"] as const)[args.object?.selectedIndex ?? -1];
+    if (pattern !== undefined && videoDitherPatternSetting.get() !== pattern) videoDitherPatternSetting.set(pattern);
   }
   /** Applies to the playing video within a quarter second, so it can be tuned by ear. */
   onAudioEarlierTap(): void { this.stepAudioOffset(1); }

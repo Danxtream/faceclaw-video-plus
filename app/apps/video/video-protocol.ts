@@ -84,6 +84,7 @@ export class VideoProtocol {
   private extendedQueue = 6;
   private rate24 = false;
   private midSizes = false;
+  private dither4x4 = false;
   /** Both lenses accept a picture's frame time inside its VCL NAL record. */
   get timedNal(): boolean { return this.timed; }
   /** Both lenses decode pictures split into several slices (large-keyframe clips). */
@@ -142,7 +143,7 @@ export class VideoProtocol {
   }
   async capabilities(): Promise<void> {
     this.confirmationRoom = false;
-    this.midSizes = false;
+    this.midSizes = this.dither4x4 = false;
     const caps = await this.status(VIDEO.caps);
     caps.forEach((row, i) => {
       if (videoStaleError(row)) console.error(`Video ${i ? "RIGHT" : "LEFT"} is idle after stream ${row.stream} ended with error=${row.error}; retained history, next START must pass readiness again (powerStep=${row.powerStep})`);
@@ -181,6 +182,8 @@ export class VideoProtocol {
       if (rows.every(row => row[0] === 1 && row[1] === 7 && !row[2] && row[3] === 11 && row[4] === 4 && row[5] >= 6 && row[5] <= 15)) {
         // Byte 8 bit 1: both lenses play the full-width mid frame sizes (older replies leave it zero).
         this.midSizes = rows.every(row => !!(row[8] & 1));
+        // Byte 8 bit 2: both lenses dither mid sizes with the 4x4 pattern on request.
+        this.dither4x4 = rows.every(row => !!(row[8] & 2));
         return Math.min(...rows.map(row => row[5]));
       }
     } catch (error) { console.error(`Video queue size unavailable, using six: ${error}`); }
@@ -254,7 +257,7 @@ export class VideoProtocol {
     raw[8] = 1;
     return this.query(raw, 128);
   }
-  async start(stream: number, native: boolean, dither: boolean, radio: boolean, preroll = 0, paused = false, targets = 3, fps: VideoPictureRate = VIDEO_DEFAULT_RATE, geometry: VideoGeometry = {width: 320, height: 192}, blackFloor: 0 | 0.25 | 0.5 | 1 = 1): Promise<VideoStatus[]> {
+  async start(stream: number, native: boolean, dither: boolean, radio: boolean, preroll = 0, paused = false, targets = 3, fps: VideoPictureRate = VIDEO_DEFAULT_RATE, geometry: VideoGeometry = {width: 320, height: 192}, blackFloor: 0 | 0.25 | 0.5 | 1 = 1, ditherPattern: "2x2" | "4x4" = "2x2"): Promise<VideoStatus[]> {
     if (!isVideoPictureRate(fps)) throw new Error("Unsupported video picture rate");
     if (![1, 2, 3].includes(targets)) throw new Error("Invalid START lens mask");
     const size = videoGeometry(geometry), extended = !legacyVideoGeometry(size);
@@ -263,7 +266,10 @@ export class VideoProtocol {
     if (fps === 24 && !this.rate24) throw new Error("Update both lenses to play 24 fps clips.");
     const style = [1,0,0.25,0.5].indexOf(blackFloor);
     if (style < 0) throw new Error("Unsupported video black floor");
-    const tuned = dither && style !== 0;
+    // 320 clips keep 2x2 whatever the setting: at 2x each of their pixels is a 2x2 cell.
+    const fine = dither && ditherPattern === "4x4" && midVideoGeometry(size);
+    if (fine && !this.dither4x4) throw new Error("Update both lenses to use the 4x4 dither pattern.");
+    const tuned = dither && (style !== 0 || fine);
     if (tuned && !this.pictureStyle) throw new Error("Update both lenses to select this dither black floor.");
     const raw = await this.header(VIDEO.start, tuned ? 36 : extended ? 32 : 24);
     if (!Number.isInteger(preroll) || preroll < 0 || preroll > 255) throw new Error("Unsupported seek preroll");
@@ -272,7 +278,7 @@ export class VideoProtocol {
     const field = (offset: number, value: number) => { raw[offset] = value; raw[offset+1] = value >>> 8; };
     field(12, size.width); field(14, size.height);
     if (extended || tuned) [size.picture.x, size.picture.y, size.picture.width, size.picture.height].forEach((value, i) => field(24+i*2, value));
-    if (tuned) raw[32] = style;
+    if (tuned) raw[32] = style | (fine ? 4 : 0); // Bits 0..1 black floor, bit 2 the 4x4 pattern.
     put(raw, 20, Math.ceil(1000 / fps));
     return (await this.query(raw, 128, targets)).map(parseVideoStatus);
   }

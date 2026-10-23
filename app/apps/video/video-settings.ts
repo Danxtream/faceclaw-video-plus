@@ -17,6 +17,12 @@ export const videoBlackFloorSetting = new ConfigSettingEnum<"0" | "0.25" | "0.5"
   id: "video-black-floor", label: "Black floor", storageKey: "video.blackFloor", defaultValue: "1",
   values: ["0", "0.25", "0.5", "1"], formatValue: value => value,
 });
+/** 4x4 applies to the mid sizes only: a 320 clip at 2x shows each pixel as a 2x2 cell,
+ *  which the 2x2 pattern already fills, so 320 clips keep it. */
+export const videoDitherPatternSetting = new ConfigSettingEnum<"2x2" | "4x4">({
+  id: "video-dither-pattern", label: "Dither pattern", storageKey: "video.ditherPattern", defaultValue: "2x2",
+  values: ["2x2", "4x4"], formatValue: value => value === "2x2" ? "2x2" : "4x4 (mid sizes)",
+});
 /** Positive values play sound earlier than the picture, for headphones whose delay the phone
  *  does not report: 25 ms steps from 1000 ms later to 1000 ms earlier. */
 export const VIDEO_AUDIO_OFFSETS: readonly string[] = Array.from({length: 81}, (_, i) => String(i * 25 - 1000));
@@ -69,10 +75,10 @@ export const videoDetailedReportsSetting = new ConfigSettingBoolean({
 export function configuredVideoOptions(): VideoOptions {
   return { native: videoScaleSetting.get() === "native", dither: videoDitherSetting.get(), radio: videoRadioSetting.get() === "video",
     detailedReports: videoDetailedReportsSetting.get(), blackFloor: Number(videoBlackFloorSetting.get()) as 0 | 0.25 | 0.5 | 1,
-    audioOffsetMs: Number(videoAudioOffsetSetting.get()) };
+    ditherPattern: videoDitherPatternSetting.get(), audioOffsetMs: Number(videoAudioOffsetSetting.get()) };
 }
 /** These are Video settings, not entries in the firmware's playback pause menu. */
 export function videoSettingsMenuItems() {
   return [enumSettingMenuItem(videoScaleSetting), enumSettingMenuItem(videoRadioSetting),
-    toggleSettingMenuItem(videoDitherSetting), enumSettingMenuItem(videoBlackFloorSetting)];
+    toggleSettingMenuItem(videoDitherSetting), enumSettingMenuItem(videoBlackFloorSetting), enumSettingMenuItem(videoDitherPatternSetting)];
 }

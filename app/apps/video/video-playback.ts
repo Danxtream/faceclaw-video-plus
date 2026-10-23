@@ -25,6 +25,8 @@ export interface VideoAudio {
 }
 export const silentVideoAudio: VideoAudio = { sync: async () => {}, pause: async () => {}, close: async () => {} };
 export type VideoOptions = { native: boolean; dither: boolean; radio: boolean; detailedReports?: boolean; blackFloor?: 0 | 0.25 | 0.5 | 1;
+  /** Dithered mid-size clips only; 320 clips always use 2x2. */
+  ditherPattern?: "2x2" | "4x4";
   /** Phone-side only and read while playing: audio plays this many ms ahead of the picture. */
   audioOffsetMs?: number };
 export type VideoPlaybackView = {
@@ -309,7 +311,7 @@ export class VideoPlayback {
       anchorUncertainty: 0, detailedReports: !!selection.detailedReports };
     this.recentNals = [];
     await this.logHeaps(stream, "before-start");
-    const start = await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused, 3, this.source.clip.fps, this.source.clip, selection.blackFloor);
+    const start = await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused, 3, this.source.clip.fps, this.source.clip, selection.blackFloor, selection.ditherPattern);
     const retryDeadline = this.clock() + 1_000;
     for (let attempt = 0; ; attempt++) {
       if (this.stopping) throw new VideoCancelled();
@@ -329,7 +331,7 @@ export class VideoPlayback {
         this.validateStatus(start, VIDEO.start, stream);
         break;
       }
-      const retry = await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused, mask, this.source.clip.fps, this.source.clip, selection.blackFloor);
+      const retry = await this.protocol.start(stream, selection.native, selection.dither, selection.radio, preroll, paused, mask, this.source.clip.fps, this.source.clip, selection.blackFloor, selection.ditherPattern);
       let index = 0;
       for (let i = 0; i < 2; i++) if (mask & 1 << i) start[i] = retry[index++];
     }

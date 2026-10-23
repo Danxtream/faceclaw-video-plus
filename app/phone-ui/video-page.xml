@@ -40,6 +40,7 @@
           <Label text="{{ radioLabel }}" textWrap="true" />
           <GridLayout rows="auto" columns="*,auto"><Label col="0" text="Dithering" verticalAlignment="center" /><Switch col="1" checked="{{ dither }}" checkedChange="{{ onDitherChange }}" /></GridLayout>
           <GridLayout columns="auto,*"><Label text="Black floor" verticalAlignment="center" /><SegmentedBar col="1" isEnabled="{{ dither }}" selectedIndex="{{ blackFloorIndex }}" selectedIndexChanged="{{ onBlackFloorChange }}"><SegmentedBarItem title="0" /><SegmentedBarItem title="0.25" /><SegmentedBarItem title="0.5" /><SegmentedBarItem title="1" /></SegmentedBar></GridLayout>
+          <GridLayout columns="auto,*"><Label text="Dither pattern" verticalAlignment="center" /><SegmentedBar col="1" isEnabled="{{ dither }}" selectedIndex="{{ ditherPatternIndex }}" selectedIndexChanged="{{ onDitherPatternChange }}"><SegmentedBarItem title="2x2" /><SegmentedBarItem title="4x4 (mid sizes)" /></SegmentedBar></GridLayout>
           <Label text="{{ audioOffsetLabel }}" textWrap="true" />
           <GridLayout columns="*,*"><Button col="0" text="Sound later" tap="{{ onAudioLaterTap }}" isEnabled="{{ canAudioLater }}" /><Button col="1" text="Sound earlier" tap="{{ onAudioEarlierTap }}" isEnabled="{{ canAudioEarlier }}" /></GridLayout>
           <Label text="{{ fpsLabel }}" textWrap="true" /><Label text="{{ audioLabel }}" />

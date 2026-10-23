@@ -5,7 +5,7 @@ const {loader} = require('./helpers/load-typescript.cjs');
 
 function modelFixture(strip = false) {
   const calls = [], values = new Map(); let timer, observer, replace = false;
-  const settings = key => ({get: () => values.get(key) ?? (key === 'radio' ? 'video' : key === 'scale' ? 'native' : key === 'rate' ? '15' : key === 'frame' ? '320x176' : key === 'floor' ? '1' : key === 'contrast' ? 'default' : key === 'keyframes' ? 'default' : key === 'bitrate' ? '110' : key === 'audioOffset' ? '0' : false),
+  const settings = key => ({get: () => values.get(key) ?? (key === 'radio' ? 'video' : key === 'scale' ? 'native' : key === 'rate' ? '15' : key === 'frame' ? '320x176' : key === 'floor' ? '1' : key === 'pattern' ? '2x2' : key === 'contrast' ? 'default' : key === 'keyframes' ? 'default' : key === 'bitrate' ? '110' : key === 'audioOffset' ? '0' : false),
     set: value => {values.set(key, value); calls.push([key, value]);}, displayValue: () => values.get(key) === 'off' ? 'Off' : 'Video-only'});
   const player = {view: {active: true, paused: false, position: 1234, duration: 20000},
     pause: async value => calls.push(['pause', value]), seek: async value => calls.push(['seek', value]),
@@ -23,7 +23,7 @@ function modelFixture(strip = false) {
     '../native/video-converter': {convertVideo: (...args) => calls.push(['convert', ...args]), cancelVideoConversion() {}, videoConversionState: () => ({running: false, stage: 'idle', progress: 0})},
     '../apps/video': {openPhoneVideo: async path => calls.push(['play', path])},
     '../apps/video/video-session': {activeVideoSession: () => session, observeVideoSession: () => () => calls.push(['unsub-video'])},
-    '../apps/video/video-settings': {videoRadioSetting: settings('radio'), videoScaleSetting: settings('scale'), videoDitherSetting: settings('dither'), videoBlackFloorSetting: settings('floor'), videoDeblockingSetting: settings('deblock'), videoConversionRateSetting: settings('rate'),videoConversionFrameSetting: settings('frame'),
+    '../apps/video/video-settings': {videoRadioSetting: settings('radio'), videoScaleSetting: settings('scale'), videoDitherSetting: settings('dither'), videoBlackFloorSetting: settings('floor'), videoDitherPatternSetting: settings('pattern'), videoDeblockingSetting: settings('deblock'), videoConversionRateSetting: settings('rate'),videoConversionFrameSetting: settings('frame'),
       videoConversionContrastSetting: settings('contrast'), videoConversionKeyframesSetting: settings('keyframes'), videoConversionBitrateSetting: settings('bitrate'),
       videoAudioOffsetSetting: settings('audioOffset'), VIDEO_AUDIO_OFFSETS: Array.from({length: 81}, (_, i) => String(i * 25 - 1000))},
   });
@@ -139,6 +139,17 @@ test('Dither remains On/Off with an independent four-choice default-one floor fo
   const xml=fs.readFileSync('app/phone-ui/video-page.xml','utf8');
   assert.ok(xml.includes('checkedChange="{{ onDitherChange }}"'));
   assert.ok(xml.includes('onBlackFloorChange') && !xml.includes('Half-step'));
+});
+
+test('Dither pattern offers 2x2 and 4x4 beside the floor and is greyed out with dithering off',()=>{
+  const f=modelFixture();
+  assert.equal(f.fixture.get('ditherPatternIndex'),0);
+  f.fixture.onDitherPatternChange({object:{selectedIndex:1}}); assert.equal(f.values.get('pattern'),'4x4');
+  f.fixture.onDitherPatternChange({object:{selectedIndex:0}}); assert.equal(f.values.get('pattern'),'2x2');
+  f.fixture.onDitherPatternChange({object:{selectedIndex:2}});
+  assert.deepEqual(f.calls.filter(row=>row[0]==='pattern'),[['pattern','4x4'],['pattern','2x2']]);
+  const xml=fs.readFileSync('app/phone-ui/video-page.xml','utf8');
+  assert.match(xml,/isEnabled="\{\{ dither \}\}" selectedIndex="\{\{ ditherPatternIndex \}\}" selectedIndexChanged="\{\{ onDitherPatternChange \}\}"/);
 });
 
 test('Radio/dither settings issue no current-generation command and remote controls use one engine', async () => {

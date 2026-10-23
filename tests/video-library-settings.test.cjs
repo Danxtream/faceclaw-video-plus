@@ -13,7 +13,7 @@ test('Video settings retain old scale/radio keys with new defaults and generatio
   const load = loader({}, {'../../ui/dashboard-settings': {ConfigSettingEnum: Enum, ConfigSettingBoolean: Bool,
     enumSettingMenuItem: setting => ({label: setting.options.label}), toggleSettingMenuItem: setting => ({label: setting.options.label})}});
   const settings = load('app/apps/video/video-settings.ts');
-  assert.deepEqual({...settings.configuredVideoOptions()}, {native: true, dither: false, radio: true, detailedReports: false,blackFloor:1, audioOffsetMs: 0});
+  assert.deepEqual({...settings.configuredVideoOptions()}, {native: true, dither: false, radio: true, detailedReports: false,blackFloor:1, ditherPattern: '2x2', audioOffsetMs: 0});
   for(const value of ['0','0.25','0.5','1']) {
     saved.set('video.blackFloor',value);assert.equal(settings.configuredVideoOptions().blackFloor,Number(value));
   }
@@ -27,7 +27,7 @@ test('Video settings retain old scale/radio keys with new defaults and generatio
   saved.set('video.blePhy', 'broken'); assert.equal(settings.configuredVideoOptions().radio, true);
   saved.set('video.scale', '2x'); assert.equal(settings.configuredVideoOptions().native, false);
   assert.equal(settings.videoDeblockingSetting.get(), false);
-  assert.deepEqual(Array.from(settings.videoSettingsMenuItems(), item => item.label), ['Video size', '2M radio', 'Dithering', 'Black floor']);
+  assert.deepEqual(Array.from(settings.videoSettingsMenuItems(), item => item.label), ['Video size', '2M radio', 'Dithering', 'Black floor', 'Dither pattern']);
 });
 
 test('Library de-duplicates paired movies, retains silent streams and keeps one resume key', () => {
